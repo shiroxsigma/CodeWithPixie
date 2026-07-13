@@ -119,6 +119,7 @@ class AgentSession:
         self._approval_required = frozenset(core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
         self.tool_count = self._engine.tool_count
         self.model_name = self._engine.model_name
+        self.workspace = getattr(self._engine, "workspace", None)  # このセッションの作業フォルダ
 
         # ターン実行の排他（1セッション）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()

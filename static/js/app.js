@@ -331,6 +331,74 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
 
+// ---- 作業フォルダ選択（フォルダ移動） ----
+async function loadDirs(path) {
+  const data = await fetch("/api/workspace/dirs?path=" + encodeURIComponent(path || "")).then((r) => r.json());
+  $("root-input").value = data.cwd || "";
+  const drives = $("root-drives");
+  drives.innerHTML = "";
+  for (const d of data.drives || []) {
+    const b = document.createElement("button");
+    b.textContent = d; b.onclick = () => loadDirs(d);
+    drives.appendChild(b);
+  }
+  const list = $("root-dirlist");
+  list.innerHTML = "";
+  if (data.parent && data.parent !== data.cwd) {
+    const up = document.createElement("li");
+    up.textContent = "⬆ .. (上へ)"; up.onclick = () => loadDirs(data.parent);
+    list.appendChild(up);
+  }
+  for (const d of data.dirs || []) {
+    const li = document.createElement("li");
+    li.textContent = "📁 " + d.name; li.onclick = () => loadDirs(d.path);
+    list.appendChild(li);
+  }
+}
+
+function openFolderModal() {
+  $("root-modal").classList.remove("hidden");
+  loadDirs($("root-path").textContent || "");
+}
+
+async function chooseWorkspace(path) {
+  const r = await fetch("/api/workspace", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  }).then((r) => r.json()).catch(() => ({}));
+  if (!r.ok) { alert("フォルダ変更に失敗: " + (r.detail || "unknown")); return; }
+  $("root-modal").classList.add("hidden");
+  state.currentFile = null;
+  $("current-file").textContent = "（ファイル未選択）";
+  state.editor.setValue("");
+  await loadStatus();
+  await loadFileList();
+  newSession();  // 新しい作業フォルダで新しい会話を開始
+  addMsg("status", "📂 作業フォルダを変更: " + (r.workspace || path));
+}
+
+// ---- 設定（モデル/サーバ） ----
+async function openSettings() {
+  const data = await fetch("/api/servers").then((r) => r.json()).catch(() => ({ servers: [], active: 0 }));
+  const sel = $("settings-model");
+  sel.innerHTML = "";
+  (data.servers || []).forEach((s, i) => {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = `${s.name} — ${s.model || "(model?)"}`;
+    if (i === data.active) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.onchange = async () => {
+    await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active_server: Number(sel.value) }),
+    }).catch(() => {});
+    await loadStatus();
+  };
+  $("settings-modal").classList.remove("hidden");
+}
+
 // ---- UI バインド ----
 function bindUI() {
   $("send-btn").onclick = sendChat;
@@ -348,6 +416,16 @@ function bindUI() {
   });
   $("new-file-btn").onclick = () => createFs("file");
   $("new-folder-btn").onclick = () => createFs("dir");
+  // 作業フォルダ選択
+  $("folder-btn").onclick = openFolderModal;
+  $("root-cancel").onclick = () => $("root-modal").classList.add("hidden");
+  $("root-ok").onclick = () => chooseWorkspace($("root-input").value.trim());
+  $("root-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); loadDirs($("root-input").value.trim()); }
+  });
+  // 設定（モデル）
+  $("settings-btn").onclick = openSettings;
+  $("settings-close").onclick = () => $("settings-modal").classList.add("hidden");
   setupDivider();
 }
 

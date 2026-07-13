@@ -103,6 +103,11 @@ run.bat
       - LLM バックエンド（LM Studio 単一モデル）は事実上リクエストを直列処理するため、真の並列
         スループットはバックエンド側に律速される。分離の正しさ自体はそれとは独立。
 
+- [x] **セッション別 workspace（cwd 依存の解消）**。`os.chdir` を廃止し、workspace を ContextVar 化
+      （pixie_core API 1.2）。engine のディスパッチ境界でツール引数の相対パスをセッション workspace
+      基準に絶対化（承認/バックアップ/shadow検証/実行が同一絶対パスを見る）。CWP は作業フォルダを
+      実行中に切替でき（📂）、会話ごとに別フォルダを扱える。プロセス cwd を変えないので開いている
+      フォルダの削除・移動も可能。UI に **⚙️ 設定（モデル/サーバ選択）** を追加。
 - [x] **pixie-core の物理パッケージ化**。engine 群を `src/pixie_core/` パッケージへ物理移動し、
       `src/<name>.py` を sys.modules エイリアスシムにして AWP CLI・テストを無改修で維持。CWP も無改修。
       `paths.get_app_root()` の `__file__` 逆算補正、遅延 `__init__`（循環回避）、facade の CLI 依存の遅延化を含む。

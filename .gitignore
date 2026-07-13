@@ -10,3 +10,6 @@ config.json
 # runtime workspace contents (keep the folder, ignore its files)
 /workspace/*
 !/workspace/.gitkeep
+
+# local test scratch
+/testroot/

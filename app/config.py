@@ -88,15 +88,22 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 AWP_SRC = _resolve(settings.awp_src)
 
 
-def load_servers() -> list[dict]:
-    """config.json の servers[] を読む（AWP と同形式）。無ければ設定値から単一構成を合成。"""
-    data: dict = {}
+def _read_config_json() -> dict:
     if CONFIG_JSON.exists():
         try:
-            data = json.loads(CONFIG_JSON.read_text(encoding="utf-8-sig"))
+            return json.loads(CONFIG_JSON.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError:
-            data = {}
-    servers = data.get("servers") or []
+            return {}
+    return {}
+
+
+def _write_config_json(data: dict) -> None:
+    CONFIG_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_servers() -> list[dict]:
+    """config.json の servers[] を読む（AWP と同形式）。無ければ設定値から単一構成を合成。"""
+    servers = _read_config_json().get("servers") or []
     if not servers:
         servers = [{
             "name": "LM Studio",
@@ -105,3 +112,41 @@ def load_servers() -> list[dict]:
             "model": settings.lmstudio_model,
         }]
     return servers
+
+
+#: 現在アクティブなサーバの index（新規セッションが使う）。config.json に永続化。
+def get_active_server_index() -> int:
+    idx = _read_config_json().get("active_server", 0)
+    n = len(load_servers())
+    return idx if isinstance(idx, int) and 0 <= idx < n else 0
+
+
+def set_active_server_index(idx: int) -> None:
+    servers = load_servers()
+    if not (0 <= idx < len(servers)):
+        raise ValueError(f"サーバ番号が範囲外です: {idx}")
+    data = _read_config_json()
+    data["active_server"] = idx
+    _write_config_json(data)
+
+
+def active_server() -> dict:
+    return load_servers()[get_active_server_index()]
+
+
+def set_workspace(raw: str) -> Path:
+    """作業対象フォルダ（ファイルブラウザ＋新規セッションの workspace）を切り替え、config.json に永続化する。"""
+    global WORKSPACE
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("パスを指定してください。")
+    p = _resolve(raw)
+    if p.is_file():
+        raise ValueError(f"ファイルが指定されました。フォルダを指定してください: {p}")
+    p.mkdir(parents=True, exist_ok=True)
+    data = _read_config_json()
+    data["workspace_root"] = str(p)
+    _write_config_json(data)
+    settings.workspace_root = str(p)
+    WORKSPACE = p
+    return p

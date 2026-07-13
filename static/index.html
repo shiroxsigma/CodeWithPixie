@@ -37,6 +37,7 @@
       <span id="save-state"></span>
     </div>
     <div class="model-info">model: <span id="model-name">…</span><span id="agent-status"></span></div>
+    <button id="settings-btn" title="設定（モデル）">⚙️</button>
   </header>
 
   <main id="split">
@@ -56,6 +57,7 @@
         <div class="section-head">
           <span>ファイル（ワークスペース）</span>
           <span class="fm-actions">
+            <button id="folder-btn" title="作業フォルダを変更">📂</button>
             <button id="refresh-btn" title="再読込">⟳</button>
             <button id="new-file-btn" title="新規ファイル">📄+</button>
             <button id="new-folder-btn" title="新規フォルダ">📁+</button>
@@ -63,7 +65,7 @@
           <input id="file-search" type="search" placeholder="🔍 全文検索…" />
         </div>
         <div id="root-bar">
-          <span id="root-path" title=""></span>
+          <span id="root-path" title="現在の作業フォルダ"></span>
         </div>
         <ul id="file-list"></ul>
         <div id="search-results" class="hidden"></div>
@@ -86,6 +88,36 @@
       </div>
     </section>
   </main>
+
+  <!-- 作業フォルダ選択ダイアログ -->
+  <div id="root-modal" class="hidden">
+    <div id="root-dialog">
+      <div class="root-head">📂 作業フォルダを選ぶ</div>
+      <div id="root-drives"></div>
+      <input id="root-input" type="text" spellcheck="false"
+        placeholder="例: D:\projects\myapp（Enter で移動）" />
+      <ul id="root-dirlist"></ul>
+      <div class="root-hint hint">フォルダをクリックで移動 ／ パス直接入力＋Enter でも移動。決定するとファイルブラウザが切替わり、新しい会話がそのフォルダで始まります。</div>
+      <div class="root-actions">
+        <button id="root-cancel">キャンセル</button>
+        <button id="root-ok" class="apply-btn">✓ このフォルダにする</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 設定ダイアログ（⚙️ モデル/サーバ） -->
+  <div id="settings-modal" class="hidden">
+    <div id="settings-dialog">
+      <div class="root-head">⚙️ 設定</div>
+      <label class="settings-row">
+        <span><b>モデル / サーバ</b><span class="hint">以降の新しい会話に反映されます。</span></span>
+        <select id="settings-model"></select>
+      </label>
+      <div class="root-actions">
+        <button id="settings-close" class="apply-btn">閉じる</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     window.__MONACO_VS__ = "/static/vendor/monaco/min/vs";

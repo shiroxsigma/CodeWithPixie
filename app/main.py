@@ -2,12 +2,14 @@
 
 NWP の Web 骨格（静的フロント配信・ファイル API・SSE チャット）を流用しつつ、
 チャットは AWP エンジンを駆動する自律エージェント（app.engine_adapter）に置き換える。
-1プロセス1セッション。ワークスペースは起動時固定。
+複数セッション並行・セッション別 workspace 対応。作業フォルダは実行中に切替可能。
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import string
 import threading
 
 from pathlib import Path
@@ -34,14 +36,14 @@ MAX_SESSIONS = 8  # 1プロセスで同時に保持する会話（セッショ�
 class SessionManager:
     """会話ごとに独立した AgentSession（＝pixie_core.Engine）を保持する。
 
-    別セッションのターンは別スレッドで並行実行され、state_board は pixie_core 側の
+    別セッションのターンは別スレッドで並行実行され、state_board / workspace は pixie_core 側の
     ContextVar で分離される。同一セッション内では busy ロックで直列化する。
+    セッションは作成時の「現在の作業フォルダ(config.WORKSPACE)」と「アクティブなサーバ」に束縛
+    される（フォルダ/モデルを切り替えても既存セッションは維持、以降の新規セッションに反映）。
     """
 
-    def __init__(self, core, server: dict, workspace, max_sessions: int = MAX_SESSIONS):
+    def __init__(self, core, max_sessions: int = MAX_SESSIONS):
         self._core = core
-        self._server = server
-        self._workspace = workspace
         self._max = max_sessions
         self._sessions: dict[str, AgentSession] = {}
         self._lock = threading.Lock()
@@ -52,12 +54,17 @@ class SessionManager:
             if s is None:
                 if len(self._sessions) >= self._max:
                     raise HTTPException(429, f"セッション上限({self._max})に達しました。")
-                s = AgentSession(self._core, self._server, self._workspace)
+                # 作成時点の作業フォルダ・アクティブサーバに束縛する。
+                s = AgentSession(self._core, config.active_server(), str(config.WORKSPACE))
                 self._sessions[sid] = s
             return s
 
     def get(self, sid: str) -> AgentSession | None:
         return self._sessions.get(sid)
+
+    def drop(self, sid: str) -> None:
+        with self._lock:
+            self._sessions.pop(sid, None)
 
     def count(self) -> int:
         return len(self._sessions)
@@ -66,20 +73,17 @@ class SessionManager:
 # startup で構築するプロセス共有のマネージャ。
 _manager: SessionManager | None = None
 _engine_error: str = ""
-_model_name: str = ""
 _tool_count: int = 0
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    global _manager, _engine_error, _model_name, _tool_count
+    global _manager, _engine_error, _tool_count
     try:
         core = engine_adapter.bootstrap(config.AWP_SRC)
-        server = config.load_servers()[0]
-        _manager = SessionManager(core, server, config.WORKSPACE)
-        _model_name = server.get("model", "") or "(unset)"
+        _manager = SessionManager(core)
         _tool_count = core.tool_count()
-        print(f"[CWP] engine ready: model={_model_name} tools={_tool_count} "
+        print(f"[CWP] engine ready: model={config.active_server().get('model')} tools={_tool_count} "
               f"workspace={config.WORKSPACE} (multi-session, max={MAX_SESSIONS})")
     except Exception as e:  # noqa: BLE001 - 起動失敗でもサーバは上げ、/api/status で理由を出す
         _engine_error = f"{type(e).__name__}: {e}"
@@ -234,14 +238,85 @@ def api_patch(req: PatchReq):
 def api_status():
     if _manager is None:
         return {"ready": False, "error": _engine_error, "workspace": str(config.WORKSPACE)}
+    srv = config.active_server()
     return {
         "ready": True,
         "workspace": str(config.WORKSPACE),
-        "model": _model_name,
+        "model": srv.get("model") or "(unset)",
+        "server": srv.get("name") or srv.get("base_url"),
         "tools": _tool_count,
         "sessions": _manager.count(),
         "max_sessions": MAX_SESSIONS,
     }
+
+
+# --- 作業フォルダ（ファイルブラウザ＋新規セッションの workspace） ---------------
+class WorkspaceReq(BaseModel):
+    path: str
+
+
+@app.post("/api/workspace")
+def api_set_workspace(req: WorkspaceReq):
+    """作業フォルダを切り替える（フォルダ移動）。以降の新規セッションと file API に反映。"""
+    try:
+        p = config.set_workspace(req.path)
+        return {"ok": True, "workspace": str(p)}
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/workspace/dirs")
+def api_workspace_dirs(path: str = ""):
+    """フォルダ選択ダイアログ用: 指定ディレクトリの子フォルダ一覧（ドライブ含む）を返す。"""
+    entries: list[dict] = []
+    drives: list[str] = []
+    if os.name == "nt":
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            if os.path.isdir(root):
+                drives.append(root)
+    base = (path or "").strip()
+    cur = ""
+    if base:
+        try:
+            cur = str(Path(base).expanduser().resolve())
+            with os.scandir(cur) as it:
+                for e in it:
+                    try:
+                        if e.is_dir() and not e.name.startswith("."):
+                            entries.append({"name": e.name, "path": str(Path(cur) / e.name)})
+                    except OSError:
+                        continue
+        except (OSError, ValueError):
+            cur = ""
+    entries.sort(key=lambda d: d["name"].lower())
+    parent = str(Path(cur).parent) if cur else ""
+    return {"cwd": cur, "parent": parent, "dirs": entries, "drives": drives,
+            "current_workspace": str(config.WORKSPACE)}
+
+
+# --- モデル/サーバ設定 ---------------------------------------------------------
+class SettingsReq(BaseModel):
+    active_server: int
+
+
+@app.get("/api/servers")
+def api_servers():
+    """設定済みサーバ一覧とアクティブ index を返す（⚙️ 設定用）。"""
+    servers = [{"name": s.get("name") or s.get("base_url"),
+                "base_url": s.get("base_url"), "model": s.get("model")}
+               for s in config.load_servers()]
+    return {"servers": servers, "active": config.get_active_server_index()}
+
+
+@app.post("/api/settings")
+def api_settings(req: SettingsReq):
+    """アクティブなサーバ（モデル）を切り替える。以降の新規セッションに反映。"""
+    try:
+        config.set_active_server_index(req.active_server)
+        return {"ok": True, "active": config.get_active_server_index()}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 def _sse(ev: dict) -> str:
