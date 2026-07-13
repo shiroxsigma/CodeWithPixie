@@ -8,22 +8,21 @@ NoteWithPixie(NWP) の Web UI（FastAPI + Monaco）に、AnythingWithPixie(AWP) 
 NWP が「read 系のみ・人間がクリックで反映」の安全設計なのに対し、CWP は「エージェントが
 直接 write／承認制」の自律設計。原則が逆なので**別プロジェクト**として分離している。
 
-## 3プロジェクトの関係（Phase 2 進行中: pixie-core 境界を確立済み）
+## 3プロジェクトの関係（Phase 2: pixie-core を物理パッケージ化済み）
 
 ```
-AnythingWithPixie/src/pixie_core.py   ← AWP が公開する UI 非依存の埋め込み API（安定境界）
-  ├─ AnythingWithPixie（CLI）          … 既存の内部実装。将来この API を利用する側に寄せる余地
+AnythingWithPixie/src/pixie_core/     ← AWP のコア engine 群を収めた本物のパッケージ（UI 非依存の埋め込みAPI）
+  ├─ AnythingWithPixie（CLI）          … main.py 等は src/ の互換シム経由でフラット import を継続
   └─ CodeWithPixie（本アプリ）= NWP フロント + pixie_core（自律 write）
 NoteWithPixie（安全・読取専用の Web エディタ）  … 不変
 ```
 
-- **CWP は AWP 内部（engine/main/registry…）に直接触れず、公開境界 `pixie_core` だけに依存**する。
-  接点は「AWP/src を sys.path に前置して `import pixie_core` する」1点のみ（`app/engine_adapter.py`）。
-- `pixie_core` は **AWP に追加した facade モジュール**（既存コード不変・AWP テストに影響なし）。
-  `create_engine()` / `Engine.run_turn(output_fn, interactive_fn)` / `CancelTurn` / ツール分類を公開。
-  起動時に `pixie_core.API_VERSION`（現在 `1.0`）を検証し、非互換を早期検知する。
-- **pixie-core の「API 境界の確立」は完了**。engine 等を別パッケージへ物理移動する作業は Phase 2 の
-  後続（下記 TODO 1）。境界 API を保てば CWP は無改修で追従できる。
+- **CWP は AWP 内部に直接触れず、公開境界 `pixie_core` だけに依存**する。接点は
+  「AWP/src を sys.path に前置して `import pixie_core` する」1点のみ（`app/engine_adapter.py`）。
+- `pixie_core` は engine/tools/state/registry/config 等14モジュールを収めた **`src/pixie_core/` パッケージ**。
+  `create_engine()` / `Engine.run_turn(output_fn, interactive_fn)` / `CancelTurn` / ツール分類 / `API_VERSION`(1.1) を公開。
+- AWP の CLI・テストは `src/<name>.py` の **sys.modules エイリアスシム**でフラット import を維持
+  （モジュール同一性を保持）。この物理移動で **CWP・NWP・AWP いずれも挙動不変**（AWP は 394 テストがグリーン）。
 
 ## セットアップ
 
@@ -104,10 +103,16 @@ run.bat
       - LLM バックエンド（LM Studio 単一モデル）は事実上リクエストを直列処理するため、真の並列
         スループットはバックエンド側に律速される。分離の正しさ自体はそれとは独立。
 
+- [x] **pixie-core の物理パッケージ化**。engine 群を `src/pixie_core/` パッケージへ物理移動し、
+      `src/<name>.py` を sys.modules エイリアスシムにして AWP CLI・テストを無改修で維持。CWP も無改修。
+      `paths.get_app_root()` の `__file__` 逆算補正、遅延 `__init__`（循環回避）、facade の CLI 依存の遅延化を含む。
+      安全網テスト `tests/test_packaging_identity.py` 追加、AWP 394 passed。
+      - フォローアップ（未実施）: パッケージ内 import を相対化して**真の自己完結**にする（`config`/`state`/`tools` 等
+        の一般名が sys.modules で衝突するリスクの根絶・将来の `pip install` 化）。シムは恒久の互換層として残す。
+
 残り（engine 深部に触れるため段階的に進める。各項目は AWP のテストを壊さないことを条件に着手）:
 
-1. `pixie-core` の**物理切り出し**（engine 等を別パッケージへ移動。境界 API は維持するので CWP は無改修）。
-2. 出力の**型付きイベント**再設計と、engine 内の直書き `print` 全廃（現状は stdout に逃がして握っている）。
+1. 出力の**型付きイベント**再設計と、engine 内の直書き `print` 全廃（現状は stdout に逃がして握っている）。
 4. `AppContext` を「実行設定(core)」と「UI 機能(app)」に分離。
 5. 作業ディレクトリ/永続ストレージの**セッション別抽象化**（cwd 依存の解消）。
 6. write の**物理サンドボックス**（現状は cwd 限定＋承認のみ）、権限 allowlist。
