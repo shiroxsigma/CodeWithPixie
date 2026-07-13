@@ -87,8 +87,9 @@ def _resolve(raw: str) -> Path:
     return (p if p.is_absolute() else PROJECT_ROOT / p).resolve()
 
 
-# ワークスペースは起動時固定（1プロセス1セッション前提。実行中切替は非対応）。
-# 参照側は `from . import config` して config.WORKSPACE を読む（files.py 互換のため）。
+# ルートプロジェクト（作業対象フォルダ）。起動後も set_workspace()（📂 / POST /api/workspace）で
+# 実行中に切替できる。以降の新規会話と file API はこの値に追従する。
+# 参照側は `from . import config` して config.WORKSPACE を毎回読む（実行中に変わるため）。
 WORKSPACE = _resolve(settings.workspace_root)
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 

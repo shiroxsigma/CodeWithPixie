@@ -70,6 +70,9 @@ async function loadStatus() {
       $("agent-status").textContent = `  ・${s.tools} tools`;
       $("root-path").textContent = s.workspace;
       $("root-path").title = s.workspace;
+      const base = (s.workspace || "").split(/[\\/]/).filter(Boolean).pop() || s.workspace;
+      $("root-project-name").textContent = base || "(未設定)";
+      $("root-project-btn").title = "ルートプロジェクト: " + s.workspace + "（クリックで変更）";
     }
   } catch (e) {
     $("model-name").textContent = "接続不可";
@@ -444,7 +447,8 @@ function bindUI() {
   });
   $("new-file-btn").onclick = () => createFs("file");
   $("new-folder-btn").onclick = () => createFs("dir");
-  // 作業フォルダ選択
+  // ルートプロジェクト（作業フォルダ）変更
+  $("root-project-btn").onclick = openFolderModal;
   $("folder-btn").onclick = openFolderModal;
   $("root-cancel").onclick = () => $("root-modal").classList.add("hidden");
   $("root-ok").onclick = () => chooseWorkspace($("root-input").value.trim());

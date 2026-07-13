@@ -8,6 +8,13 @@
   <style>
     /* CWP 固有の追加スタイル（承認バー・ステータス・ツールログ） */
     #agent-status { font-size: 12px; opacity: .8; margin-left: 8px; }
+    #root-project-btn {
+      display: inline-flex; align-items: center; gap: 4px; margin: 0 6px;
+      max-width: 320px; cursor: pointer; font-size: 13px;
+    }
+    #root-project-btn #root-project-name {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;
+    }
     .msg.status { opacity: .75; font-size: 12px; font-style: italic; white-space: pre-wrap; }
     .msg.error  { color: #ff6b6b; white-space: pre-wrap; }
     #approval {
@@ -31,6 +38,9 @@
 <body>
   <header id="topbar">
     <div class="brand">🧚 CodeWithPixie</div>
+    <button id="root-project-btn" title="ルートプロジェクト（作業対象フォルダ）を変更">
+      📁 <span id="root-project-name">…</span>
+    </button>
     <div class="file-info">
       <span id="current-file">（ファイル未選択）</span>
       <button id="save-btn" title="保存 (Ctrl+S)">保存</button>
@@ -92,7 +102,7 @@
   <!-- 作業フォルダ選択ダイアログ -->
   <div id="root-modal" class="hidden">
     <div id="root-dialog">
-      <div class="root-head">📂 作業フォルダを選ぶ</div>
+      <div class="root-head">📂 ルートプロジェクト（作業対象フォルダ）を選ぶ</div>
       <div id="root-drives"></div>
       <input id="root-input" type="text" spellcheck="false"
         placeholder="例: D:\projects\myapp（Enter で移動）" />

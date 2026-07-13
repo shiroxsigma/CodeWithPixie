@@ -40,8 +40,10 @@ copy config.json.example config.json
 run.bat
 ```
 
-- 作業対象フォルダは `workspace/`（`config.json` の `workspace_root` で変更）。
-  **起動時に固定**され、実行中の切替は非対応（全セッション共通の作業対象）。
+- **ルートプロジェクト**（作業対象フォルダ）は既定 `workspace/`（`config.json` の `workspace_root`）。
+  **起動後もトップバーのフォルダ表示や 📂 ボタンから実行中に変更できる**（`POST /api/workspace`）。
+  変更すると以降の新しい会話はそのフォルダで始まり、ファイルブラウザも追従する。既存の会話は
+  作成時のフォルダを保持する（会話ごとに別プロジェクトを並行して扱える）。
   複数の会話（セッション）は「＋新規会話」やタブごとに並行して持てる（`session_id` で分離）。
 - 起動失敗の理由は起動ログと `GET /api/status` で確認できる。
 
@@ -76,7 +78,8 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
 
 ## 設計メモ（安全性）
 
-- エージェントの書き込みは AWP のツールが行い、`os.chdir(workspace)` で作業対象を限定。
+- エージェントの書き込みは AWP のツールが行い、パスはセッションのルートプロジェクト基準に
+  絶対化して作業対象を限定（`os.chdir` は使わない＝セッション別フォルダ・cwd 非依存）。
 - 破壊操作は承認ゲート＋引数全文表示。AWP の編集前バックアップ（`.pixie_notes/backups/`）も併用。
 - サーバは `127.0.0.1` バインド、Host/Origin 検証で外部ページからの API 叩きを拒否。
 - ⚠ 現状 `run_command` は任意シェルを実行し得る（パス検査では守れない）。**承認時に必ずコマンド全文を確認**すること。
@@ -101,16 +104,15 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
 
 ## Phase 2 進捗と残タスク
 
-- [x] **pixie-core の API 境界確立**（`AnythingWithPixie/src/pixie_core.py`）。CWP は AWP 内部への
+- [x] **pixie-core の API 境界確立**（`AnythingWithPixie/src/pixie_core/`）。CWP は AWP 内部への
       散在依存をやめ、単一の安定境界にのみ依存するようになった（監査 Fable の最大 Major を解消）。
 - [x] **マルチセッション化**（`pixie_core` API 1.1）。`registry` の `_state_board` / `_dynamic_max_chars`
       を ContextVar 化（PEP 562 の `__getattr__` で全参照を無改修のままコンテキスト別に）、並列ツール
       実行へ `copy_context()` で伝播。CWP は会話ごとに独立 Engine を持つ `SessionManager` を実装し、
       `/api/chat|approve|interrupt` は `session_id` でルーティング。別会話のターンは並行実行され、
       推論状態（state_board）はメモリ内で分離される。
-      - ⚠ 制限: `cwd`（作業対象 workspace）はプロセス共有のため全セッション同一フォルダ。cwd 依存の
-        永続ファイル（`.pixie_notes/state_board.json` 等）も共有され、同時運用では最後の保存が勝つ
-        （メモリ内の推論は正しく分離）。作業対象別セッションは下記 TODO 5（cwd 抽象化）待ち。
+      - 当初あった「cwd がプロセス共有で全セッション同一フォルダ」の制限は、次項 #4（セッション別
+        workspace）で解消済み（会話ごとに別ルートプロジェクトを扱える）。
       - LLM バックエンド（LM Studio 単一モデル）は事実上リクエストを直列処理するため、真の並列
         スループットはバックエンド側に律速される。分離の正しさ自体はそれとは独立。
 
