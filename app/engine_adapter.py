@@ -100,8 +100,38 @@ def bootstrap(awp_src):
     if pixie_core.tool_count() <= 0:  # 起動スモーク
         raise RuntimeError("pixie_core: ツールが1つも登録されていません")
 
+    _register_copilot_tool(pixie_core)
+
     _core = pixie_core
     return _core
+
+
+def _register_copilot_tool(pixie_core) -> None:
+    """CWP 固有の ask_copilot ツールを AWP レジストリに登録する（pack="copilot"）。
+
+    pack 付きなので、セッションの context.active_packs に "copilot" が含まれる時だけ LLM に提示
+    される（＝⚙️ 設定の on/off で制御）。実体は PrayLight subprocess を呼ぶ CWP の copilot モジュール。
+    """
+    from . import copilot
+
+    @pixie_core.register_tool(
+        name="ask_copilot",
+        description=("Microsoft Copilot (Web) に単発質問して回答を得る。設計判断・ライブラリの用法・"
+                     "エラーメッセージの解釈など、手元のコードやツールだけでは判断しづらい問いに使う。"),
+        schema={
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "Copilot への質問（日本語可）"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "参考として添付するファイルのパス（任意・ワークスペース相対可）"},
+            },
+            "required": ["question"],
+        },
+        prompt_desc="ask_copilot(question, files?): Copilot に質問して外部知識を相談（数十秒かかる）",
+        pack="copilot",
+    )
+    def ask_copilot(question, files=None):  # noqa: ANN001 - AWP ツールは動的引数
+        return copilot.ask(str(question), files or [])
 
 
 class AgentSession:
@@ -230,6 +260,11 @@ class AgentSession:
         self._approval_decision = {"id": approval_id, "approve": bool(approve), "override": override or None}
         self._approval_event.set()
         return True
+
+    def set_copilot(self, enabled: bool) -> None:
+        """このセッションで ask_copilot ツールの提示を on/off する（context.active_packs 経由）。"""
+        ctx = self._engine.context
+        ctx.active_packs = {"copilot"} if enabled else set()
 
     def cancel(self) -> None:
         self._cancel = True

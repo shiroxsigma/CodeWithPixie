@@ -396,7 +396,35 @@ async function openSettings() {
     }).catch(() => {});
     await loadStatus();
   };
+  await refreshCopilot();
   $("settings-modal").classList.remove("hidden");
+}
+
+async function refreshCopilot() {
+  const c = await fetch("/api/copilot").then((r) => r.json()).catch(() => ({}));
+  $("settings-copilot").checked = !!c.enabled;
+  const parts = [];
+  if (c.enabled) parts.push("オン");
+  if (!c.script_ok) parts.push("⚠ PrayLight 未検出: " + (c.praylight_dir || "?"));
+  else if (!c.python_ok) parts.push("⚠ PrayLight の .venv Python 未検出");
+  else if (c.enabled) parts.push("PrayLight OK — 未ログインなら下のボタンでブラウザを開いてログイン");
+  $("copilot-status").textContent = parts.join(" / ");
+}
+
+async function toggleCopilot() {
+  const enabled = $("settings-copilot").checked;
+  await fetch("/api/copilot/enable", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  }).catch(() => {});
+  await refreshCopilot();
+}
+
+async function openCopilotBrowser() {
+  $("copilot-status").textContent = "起動中…";
+  const r = await fetch("/api/copilot/open", { method: "POST", headers: { "Content-Type": "application/json" } })
+    .then((r) => r.json()).catch(() => ({ ok: false, error: "通信エラー" }));
+  $("copilot-status").textContent = r.ok ? "ブラウザを開きました。Copilot にログインしてください。" : (r.error || "起動失敗");
 }
 
 // ---- UI バインド ----
@@ -423,9 +451,11 @@ function bindUI() {
   $("root-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); loadDirs($("root-input").value.trim()); }
   });
-  // 設定（モデル）
+  // 設定（モデル・Copilot）
   $("settings-btn").onclick = openSettings;
   $("settings-close").onclick = () => $("settings-modal").classList.add("hidden");
+  $("settings-copilot").onchange = toggleCopilot;
+  $("copilot-open-btn").onclick = openCopilotBrowser;
   setupDivider();
 }
 

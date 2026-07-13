@@ -62,6 +62,17 @@ run.bat
 - **承認バー**: 書き込み・コマンド実行など破壊操作の直前に、ツール名と**引数全文**を表示。
   「承認して実行」/「却下（＋別指示を入力）」を選べる。read 系・低リスク状態系は自動実行。
 - **■ 中断**: 進行中ターンを協調キャンセル（承認待ちも解除）。
+- **⚙️ 設定**: モデル/サーバの選択、**Copilot 連携の on/off**。
+- **📂 フォルダ**: 作業フォルダを切替（会話ごとに別フォルダを扱える）。
+
+### Copilot 連携（任意）
+⚙️ 設定でオンにすると、エージェントに `ask_copilot` ツールが提示され、設計判断やライブラリ用法などを
+Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経由の subprocess）。
+- 事前に PrayLight で `python start_browser.py` を実行し、開いたブラウザで Copilot にログインしておく
+  （⚙️ 設定の「🕊️ Copilot ブラウザを開く」からも起動可能）。
+- 設定: `copilot_enabled`（既定 false）、`praylight_dir`（既定 `../PrayLight`）、`praylight_python`、`copilot_timeout`。
+- 実装: AWP コアは無改修。CWP が起動時に `pixie_core.register_tool(pack="copilot")` で ask_copilot を
+  登録し、on の会話だけ `context.active_packs={"copilot"}` にして提示する（off の会話には出ない）。
 
 ## 設計メモ（安全性）
 

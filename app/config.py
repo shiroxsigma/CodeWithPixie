@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # 承認待ちのタイムアウト秒。0 以下で無期限（推奨: 離席でターンが死なない）。
     approval_timeout: float = 0.0
 
+    # --- Copilot 連携（PrayLight subprocess 経由で Microsoft Copilot に単発質問）---
+    # copilot_enabled=True でエージェントに ask_copilot ツールを提供する（⚙️ 設定でトグル）。
+    copilot_enabled: bool = False
+    praylight_dir: str = "../PrayLight"   # PrayLight プロジェクトのルート
+    praylight_python: str = ""            # 空なら {praylight_dir}/.venv/Scripts/python.exe
+    copilot_timeout: float = 120.0        # Copilot 応答待ちの上限秒
+
 
 settings = Settings()
 
@@ -132,6 +139,15 @@ def set_active_server_index(idx: int) -> None:
 
 def active_server() -> dict:
     return load_servers()[get_active_server_index()]
+
+
+def set_copilot_enabled(enabled: bool) -> bool:
+    """Copilot 連携の on/off を切り替え、config.json に永続化する。"""
+    data = _read_config_json()
+    data["copilot_enabled"] = bool(enabled)
+    _write_config_json(data)
+    settings.copilot_enabled = bool(enabled)
+    return settings.copilot_enabled
 
 
 def set_workspace(raw: str) -> Path:

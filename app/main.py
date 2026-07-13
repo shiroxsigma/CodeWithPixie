@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, engine_adapter, files, patch, search
+from . import config, copilot, engine_adapter, files, patch, search
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -319,6 +319,33 @@ def api_settings(req: SettingsReq):
         raise HTTPException(400, str(e))
 
 
+# --- Copilot 連携（PrayLight 経由）--------------------------------------------
+class CopilotEnableReq(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/copilot")
+def api_copilot_status():
+    """Copilot 連携の on/off と PrayLight の疎通状況（⚙️ 設定表示用）。"""
+    return copilot.status()
+
+
+@app.post("/api/copilot/enable")
+def api_copilot_enable(req: CopilotEnableReq):
+    """Copilot 連携を on/off する。on の会話では ask_copilot ツールがエージェントに提示される。"""
+    config.set_copilot_enabled(req.enabled)
+    return copilot.status()
+
+
+@app.post("/api/copilot/open")
+def api_copilot_open():
+    """PrayLight のログイン用ブラウザを起動して Copilot を開く（人がそこでログインする）。"""
+    if not config.settings.copilot_enabled:
+        return {"ok": False, "error": "Copilot 連携が無効です。先にオンにしてください。"}
+    err = copilot.open_browser()
+    return {"ok": not err, "error": err}
+
+
 def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
@@ -329,6 +356,7 @@ async def api_chat(req: ChatReq):
     if not req.message.strip():
         raise HTTPException(400, "空のメッセージです。")
     sess = manager.get_or_create(_valid_sid(req.session_id))
+    sess.set_copilot(config.settings.copilot_enabled)  # トグルを次ターンに反映（ask_copilot の提示可否）
     # 同一セッションは直列（別セッションは並行可）。実行中なら 409。
     if not sess.busy.acquire(blocking=False):
         raise HTTPException(409, "このセッションは別のターンを実行中です。")

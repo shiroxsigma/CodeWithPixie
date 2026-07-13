@@ -105,7 +105,7 @@
     </div>
   </div>
 
-  <!-- 設定ダイアログ（⚙️ モデル/サーバ） -->
+  <!-- 設定ダイアログ（⚙️ モデル/サーバ・Copilot） -->
   <div id="settings-modal" class="hidden">
     <div id="settings-dialog">
       <div class="root-head">⚙️ 設定</div>
@@ -113,6 +113,17 @@
         <span><b>モデル / サーバ</b><span class="hint">以降の新しい会話に反映されます。</span></span>
         <select id="settings-model"></select>
       </label>
+      <label class="settings-row toggle">
+        <input type="checkbox" id="settings-copilot" />
+        <span>
+          <b>Copilot 連携</b>
+          <span class="hint">オンにすると、エージェントが <code>ask_copilot</code> ツールで Microsoft Copilot に相談できます（PrayLight 経由）。</span>
+        </span>
+      </label>
+      <div class="settings-row" id="copilot-controls">
+        <button id="copilot-open-btn" title="Copilot にログインするためのブラウザを開く">🕊️ Copilot ブラウザを開く（ログイン用）</button>
+        <span id="copilot-status" class="hint"></span>
+      </div>
       <div class="root-actions">
         <button id="settings-close" class="apply-btn">閉じる</button>
       </div>
