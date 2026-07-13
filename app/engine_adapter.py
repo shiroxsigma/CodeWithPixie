@@ -1,21 +1,18 @@
 """AnythingWithPixie(AWP) の ReAct エンジンを Web から駆動するアダプタ。
 
-方針（PLAN Phase 1）: pixie-core を今は切り出さず、AWP の `src` を sys.path に前置して
-`engine.run_graph` を**そのまま**呼ぶ薄い境界に閉じ込める。AWP 側は一切変更しない。
+Phase 2 以降: AWP 内部（engine/main/registry/...）へは直接触れず、AWP が公開する
+**単一の安定境界 `pixie_core`** だけに依存する。これにより AWP の内部変更に対して
+CWP が静かに壊れるリスク（監査 Fable の Major）を解消する。AWP/src を sys.path に
+前置してから `import pixie_core` する、その1点だけが AWP との接点。
 
-AWP との結合はこのファイル1枚に閉じる。CWP の他モジュールは AWP を直接 import しない。
+このファイルの責務（Web 固有・pixie_core には持ち込まない部分）:
+- 出力(output_fn)を端末制御文字除去のうえ token/status の SSE イベントへ分類（監査 F2）。
+- 承認(interactive_fn)を相関 ID 付きイベント化し、別リクエストの解放を待つ（監査 C2/C4）。
+- 中断を協調キャンセル化（output_fn / interactive_fn から pixie_core.CancelTurn を送出：監査 C1）。
+- 書き込みを mtime スナップショット差分で files_changed イベントとして自前発行。
+- stdout の utf-8 再設定（engine 内の直書き print による UnicodeEncodeError 対策）。
 
-監査(Fable)反映点:
-- F1 : ターン毎に reset_for_new_turn() → chat_history.add(user) してから run_graph。
-- C1 : 中断は協調キャンセル（output_fn / interactive_fn で CancelTurn を送出＋承認を却下解放）。
-- F2 : show_thinking=False で出力ストリームを単純化し、思考本文はストリームしない。
-       出力は端末制御文字を除去し token / status に分類。
-- C2 : 承認要求に相関 ID を付け、resolve 時に一致検証（古い/二重承認の誤解放を防ぐ）。
-- C4 : 承認は「破壊的ツールのうち副作用の大きいもの」だけに限定。低リスク状態系は自動承認。
-       タイムアウト既定は無期限（離席でターンが死なないように）。
-- 追加: stdout を utf-8 再設定（engine 内の直書き print の UnicodeEncodeError でターンが死ぬのを防ぐ）。
-        llm_model_name を設定（サンプリングプロファイル選択のため）。
-        書き込みは mtime スナップショット差分で files_changed イベントとして自前発行。
+ターンシーケンス(F1: reset→user追加→run_graph)は pixie_core.Engine.run_turn に集約済み。
 """
 from __future__ import annotations
 
@@ -30,19 +27,15 @@ from . import files
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 #: 破壊的ツールのうち、承認をスキップして自動実行する低リスクの状態/参照系。
-#: （AWP の DESTRUCTIVE_TOOLS からこれらを除いた集合が「承認必須」になる）
+#: （pixie_core.DESTRUCTIVE_TOOLS からこれらを除いた集合が「承認必須」になる）
 APPROVAL_SKIP = frozenset({
     "update_core_memory", "update_state", "set_goal",
     "gather_project_info", "view_image", "make_directory",
 })
 
-#: 出力ストリーム中の非本文インジケータ（token ではなく status に回す/捨てる）。
+#: 出力ストリーム中の非本文インジケータ（token ではなく status に回す）。
 _INDICATOR_HINTS = ("🧠", "⏳", "Prefill", "Thinking...")
 _STATUS_PREFIXES = ("🔧", "✅", "⚠️", "🕊️", "🔍", "[System]", "[システム", "[Warning]", "[警告]")
-
-
-class CancelTurn(Exception):
-    """協調キャンセル: output_fn / interactive_fn から送出してターンを打ち切る。"""
 
 
 def _tc_name(tc) -> str:
@@ -73,7 +66,7 @@ def _tc_args(tc) -> dict:
 
 
 class AgentSession:
-    """1プロセス1セッション。AWP の AppContext / AgentState を保持し run_graph を回す。"""
+    """1プロセス1セッション。pixie_core.Engine を保持し、Web からターンを回す。"""
 
     def __init__(self, awp_src, workspace, server: dict):
         awp_src = str(awp_src)
@@ -88,41 +81,21 @@ class AgentSession:
             except Exception:
                 pass
 
-        # AWP のツール(run_command/write_file 等)と永続状態(.pixie_notes)は cwd 基準。
-        os.chdir(str(workspace))
+        # AWP との唯一の接点: 公開境界 pixie_core だけを import する。
+        import pixie_core
 
-        # --- AWP モジュール（sys.path 前置後にのみ解決可能） ---
-        import importlib
+        if not str(getattr(pixie_core, "API_VERSION", "")).startswith("1."):
+            raise RuntimeError(f"pixie_core API 非互換: {getattr(pixie_core, 'API_VERSION', '?')}")
 
-        engine = importlib.import_module("engine")
-        importlib.import_module("tools")       # @register_tool 副作用でツール登録
-        importlib.import_module("code_tool")   # コード系ツール登録
-        paths = importlib.import_module("paths")
-        from main import AppContext            # 実クラスを使う（duck-type 自作はしない: 監査指摘）
-        from state import AgentState
-        from registry import set_state_board, TOOL_REGISTRY
-        from llm_client import LMStudioBackend
-        from config import DESTRUCTIVE_TOOLS
+        self._core = pixie_core
+        self._CancelTurn = pixie_core.CancelTurn
+        self._engine = pixie_core.create_engine(server, str(workspace))  # cwd/状態注入もここで完結
 
-        paths.set_project_root(os.getcwd())
-
-        ctx = AppContext()
-        ctx.llm = LMStudioBackend(
-            server["base_url"], server.get("api_key", "lm-studio"),
-            server.get("model", "local-model"),
-        )
-        # サンプリングプロファイルはモデル名の部分一致で選ばれる（空だと常に default）。
-        ctx.llm_model_name = server.get("model", "") or ""
-        self.context = ctx
-
-        self.state = AgentState()
-        set_state_board(self.state.state_board)  # プロセスグローバル注入（単一セッション前提）
-
-        self._run_graph = engine.run_graph
-        self._build_system_text = engine.build_system_text
-        self._approval_required = frozenset(DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
-        self.tool_count = len(TOOL_REGISTRY)
-        self.model_name = ctx.llm_model_name
+        self._approval_required = frozenset(pixie_core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
+        self.tool_count = self._engine.tool_count
+        self.model_name = self._engine.model_name
+        if self.tool_count <= 0:  # 起動スモーク
+            raise RuntimeError("pixie_core: ツールが1つも登録されていません")
 
         # ターン実行の排他（1セッション）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()
@@ -144,19 +117,10 @@ class AgentSession:
         self._approval_timeout = approval_timeout if approval_timeout and approval_timeout > 0 else None
 
         before = files.snapshot_mtimes()
-        self.state.reset_for_new_turn()                     # F1: カウンタ持ち越し防止
-        self.state.chat_history.add("user", message)        # F1: user メッセージ投入
-
         try:
-            self._run_graph(
-                context=self.context,
-                state=self.state,
-                show_thinking=False,                        # F2: 思考本文はストリームしない
-                system_msg_builder=self._build_system_text,
-                interactive_fn=self._approve,
-                output_fn=self._emit,
-            )
-        except CancelTurn:
+            # ターンシーケンス(reset→user追加→run_graph)は pixie_core 側に集約済み。
+            self._engine.run_turn(message, output_fn=self._emit, interactive_fn=self._approve)
+        except self._CancelTurn:
             emit_event({"type": "status", "text": "⏹ 中断しました。"})
         except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
             emit_event({"type": "error", "text": f"{type(e).__name__}: {e}"})
@@ -168,7 +132,7 @@ class AgentSession:
     # ---- output_fn: engine → SSE イベント分類 ----
     def _emit(self, text, end="", flush=False):
         if self._cancel:
-            raise CancelTurn()
+            raise self._CancelTurn()
         if not text:
             return
         s = _ANSI.sub("", text).replace("\r", "")
