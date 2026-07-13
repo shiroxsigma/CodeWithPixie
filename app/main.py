@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, files, patch, search
+from . import config, engine_adapter, files, patch, search
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -28,28 +28,75 @@ app = FastAPI(title="CodeWithPixie")
 
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", settings.host}
 
-# 1プロセス1セッション。startup で構築する。
-_session: AgentSession | None = None
-_session_error: str = ""
+MAX_SESSIONS = 8  # 1プロセスで同時に保持する会話（セッション）数の上限
 
 
-def get_session() -> AgentSession:
-    if _session is None:
-        raise HTTPException(503, f"エンジン未初期化: {_session_error or 'starting...'}")
-    return _session
+class SessionManager:
+    """会話ごとに独立した AgentSession（＝pixie_core.Engine）を保持する。
+
+    別セッションのターンは別スレッドで並行実行され、state_board は pixie_core 側の
+    ContextVar で分離される。同一セッション内では busy ロックで直列化する。
+    """
+
+    def __init__(self, core, server: dict, workspace, max_sessions: int = MAX_SESSIONS):
+        self._core = core
+        self._server = server
+        self._workspace = workspace
+        self._max = max_sessions
+        self._sessions: dict[str, AgentSession] = {}
+        self._lock = threading.Lock()
+
+    def get_or_create(self, sid: str) -> AgentSession:
+        with self._lock:
+            s = self._sessions.get(sid)
+            if s is None:
+                if len(self._sessions) >= self._max:
+                    raise HTTPException(429, f"セッション上限({self._max})に達しました。")
+                s = AgentSession(self._core, self._server, self._workspace)
+                self._sessions[sid] = s
+            return s
+
+    def get(self, sid: str) -> AgentSession | None:
+        return self._sessions.get(sid)
+
+    def count(self) -> int:
+        return len(self._sessions)
+
+
+# startup で構築するプロセス共有のマネージャ。
+_manager: SessionManager | None = None
+_engine_error: str = ""
+_model_name: str = ""
+_tool_count: int = 0
 
 
 @app.on_event("startup")
 def _startup() -> None:
-    global _session, _session_error
+    global _manager, _engine_error, _model_name, _tool_count
     try:
+        core = engine_adapter.bootstrap(config.AWP_SRC)
         server = config.load_servers()[0]
-        _session = AgentSession(config.AWP_SRC, config.WORKSPACE, server)
-        print(f"[CWP] engine ready: model={_session.model_name or '(unset)'} "
-              f"tools={_session.tool_count} workspace={config.WORKSPACE}")
+        _manager = SessionManager(core, server, config.WORKSPACE)
+        _model_name = server.get("model", "") or "(unset)"
+        _tool_count = core.tool_count()
+        print(f"[CWP] engine ready: model={_model_name} tools={_tool_count} "
+              f"workspace={config.WORKSPACE} (multi-session, max={MAX_SESSIONS})")
     except Exception as e:  # noqa: BLE001 - 起動失敗でもサーバは上げ、/api/status で理由を出す
-        _session_error = f"{type(e).__name__}: {e}"
-        print(f"[CWP][ERROR] engine init failed: {_session_error}")
+        _engine_error = f"{type(e).__name__}: {e}"
+        print(f"[CWP][ERROR] engine init failed: {_engine_error}")
+
+
+def _require_manager() -> SessionManager:
+    if _manager is None:
+        raise HTTPException(503, f"エンジン未初期化: {_engine_error or 'starting...'}")
+    return _manager
+
+
+def _valid_sid(sid: str) -> str:
+    sid = (sid or "").strip()
+    if not sid or len(sid) > 64:
+        raise HTTPException(400, "session_id が不正です。")
+    return sid
 
 
 @app.middleware("http")
@@ -90,12 +137,18 @@ class FsDeleteReq(BaseModel):
 
 class ChatReq(BaseModel):
     message: str
+    session_id: str
 
 
 class ApproveReq(BaseModel):
     id: int
+    session_id: str
     approve: bool = True
     override: str | None = None
+
+
+class InterruptReq(BaseModel):
+    session_id: str
 
 
 class PatchEdit(BaseModel):
@@ -179,14 +232,15 @@ def api_patch(req: PatchReq):
 # --- エージェント制御 ----------------------------------------------------------
 @app.get("/api/status")
 def api_status():
-    if _session is None:
-        return {"ready": False, "error": _session_error, "workspace": str(config.WORKSPACE)}
+    if _manager is None:
+        return {"ready": False, "error": _engine_error, "workspace": str(config.WORKSPACE)}
     return {
         "ready": True,
         "workspace": str(config.WORKSPACE),
-        "model": _session.model_name or "(unset)",
-        "tools": _session.tool_count,
-        "busy": _session.busy.locked(),
+        "model": _model_name,
+        "tools": _tool_count,
+        "sessions": _manager.count(),
+        "max_sessions": MAX_SESSIONS,
     }
 
 
@@ -196,12 +250,13 @@ def _sse(ev: dict) -> str:
 
 @app.post("/api/chat")
 async def api_chat(req: ChatReq):
-    sess = get_session()
+    manager = _require_manager()
     if not req.message.strip():
         raise HTTPException(400, "空のメッセージです。")
-    # 単一セッション: 実行中なら 409（Lock で構造的に保証）。
+    sess = manager.get_or_create(_valid_sid(req.session_id))
+    # 同一セッションは直列（別セッションは並行可）。実行中なら 409。
     if not sess.busy.acquire(blocking=False):
-        raise HTTPException(409, "エージェントは別のターンを実行中です。")
+        raise HTTPException(409, "このセッションは別のターンを実行中です。")
 
     q: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
@@ -239,13 +294,19 @@ async def api_chat(req: ChatReq):
 
 @app.post("/api/approve")
 def api_approve(req: ApproveReq):
-    ok = get_session().resolve_approval(req.id, req.approve, req.override)
+    sess = _require_manager().get(_valid_sid(req.session_id))
+    if sess is None:
+        raise HTTPException(404, "session not found")
+    ok = sess.resolve_approval(req.id, req.approve, req.override)
     return {"ok": ok}
 
 
 @app.post("/api/interrupt")
-def api_interrupt():
-    get_session().cancel()
+def api_interrupt(req: InterruptReq):
+    sess = _require_manager().get(_valid_sid(req.session_id))
+    if sess is None:
+        raise HTTPException(404, "session not found")
+    sess.cancel()
     return {"ok": True}
 
 

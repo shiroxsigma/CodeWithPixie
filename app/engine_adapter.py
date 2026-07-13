@@ -65,37 +65,60 @@ def _tc_args(tc) -> dict:
     return a or {}
 
 
+# --- プロセス1回だけの AWP ブートストラップ（全セッション共有） ---
+_core = None  # 読み込んだ pixie_core モジュール（キャッシュ）
+
+
+def bootstrap(awp_src):
+    """AWP/src を sys.path に前置し、公開境界 pixie_core を読み込む（プロセス1回）。
+
+    マルチセッションでは複数の AgentSession を作るが、AWP モジュールの import と stdout の
+    utf-8 化はプロセス共有の1回で済む。pixie_core.API_VERSION の互換性もここで検証する。
+    """
+    global _core
+    if _core is not None:
+        return _core
+
+    awp_src = str(awp_src)
+    if awp_src not in sys.path:
+        sys.path.insert(0, awp_src)
+
+    # engine 内の output_fn を通さない直書き print が cp932 コンソールで
+    # UnicodeEncodeError を投げると worker スレッドのターンが例外死する（監査指摘）。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+    import pixie_core  # AWP との唯一の接点
+
+    ver = str(getattr(pixie_core, "API_VERSION", ""))
+    # 1.1+ でマルチセッション（ContextVar 分離）に対応。1.0 でも動くが単一セッション相当。
+    if not ver.startswith("1."):
+        raise RuntimeError(f"pixie_core API 非互換: {ver or '?'}")
+    if pixie_core.tool_count() <= 0:  # 起動スモーク
+        raise RuntimeError("pixie_core: ツールが1つも登録されていません")
+
+    _core = pixie_core
+    return _core
+
+
 class AgentSession:
-    """1プロセス1セッション。pixie_core.Engine を保持し、Web からターンを回す。"""
+    """1会話（セッション）分の埋め込みエンジン。pixie_core.Engine を1つ保持する。
 
-    def __init__(self, awp_src, workspace, server: dict):
-        awp_src = str(awp_src)
-        if awp_src not in sys.path:
-            sys.path.insert(0, awp_src)
+    複数インスタンスを同一プロセスで並行実行できる（state_board は pixie_core 側で ContextVar
+    分離される）。ただし cwd（作業対象 workspace）はプロセス共有のため全セッション同一。
+    """
 
-        # engine 内の output_fn を通さない直書き print が cp932 コンソールで
-        # UnicodeEncodeError を投げると worker スレッドのターンが例外死する（監査指摘）。
-        for stream in (sys.stdout, sys.stderr):
-            try:
-                stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
-            except Exception:
-                pass
+    def __init__(self, core, server: dict, workspace):
+        self._core = core
+        self._CancelTurn = core.CancelTurn
+        self._engine = core.create_engine(server, str(workspace))  # 自セッション専用の Engine
 
-        # AWP との唯一の接点: 公開境界 pixie_core だけを import する。
-        import pixie_core
-
-        if not str(getattr(pixie_core, "API_VERSION", "")).startswith("1."):
-            raise RuntimeError(f"pixie_core API 非互換: {getattr(pixie_core, 'API_VERSION', '?')}")
-
-        self._core = pixie_core
-        self._CancelTurn = pixie_core.CancelTurn
-        self._engine = pixie_core.create_engine(server, str(workspace))  # cwd/状態注入もここで完結
-
-        self._approval_required = frozenset(pixie_core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
+        self._approval_required = frozenset(core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
         self.tool_count = self._engine.tool_count
         self.model_name = self._engine.model_name
-        if self.tool_count <= 0:  # 起動スモーク
-            raise RuntimeError("pixie_core: ツールが1つも登録されていません")
 
         # ターン実行の排他（1セッション）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()

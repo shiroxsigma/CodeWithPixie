@@ -42,7 +42,8 @@ run.bat
 ```
 
 - 作業対象フォルダは `workspace/`（`config.json` の `workspace_root` で変更）。
-  **起動時に固定**され、実行中の切替は非対応（1プロセス1セッション）。
+  **起動時に固定**され、実行中の切替は非対応（全セッション共通の作業対象）。
+  複数の会話（セッション）は「＋新規会話」やタブごとに並行して持てる（`session_id` で分離）。
 - 起動失敗の理由は起動ログと `GET /api/status` で確認できる。
 
 ## 設定（`CWP_*` / config.json）
@@ -92,13 +93,21 @@ run.bat
 
 - [x] **pixie-core の API 境界確立**（`AnythingWithPixie/src/pixie_core.py`）。CWP は AWP 内部への
       散在依存をやめ、単一の安定境界にのみ依存するようになった（監査 Fable の最大 Major を解消）。
+- [x] **マルチセッション化**（`pixie_core` API 1.1）。`registry` の `_state_board` / `_dynamic_max_chars`
+      を ContextVar 化（PEP 562 の `__getattr__` で全参照を無改修のままコンテキスト別に）、並列ツール
+      実行へ `copy_context()` で伝播。CWP は会話ごとに独立 Engine を持つ `SessionManager` を実装し、
+      `/api/chat|approve|interrupt` は `session_id` でルーティング。別会話のターンは並行実行され、
+      推論状態（state_board）はメモリ内で分離される。
+      - ⚠ 制限: `cwd`（作業対象 workspace）はプロセス共有のため全セッション同一フォルダ。cwd 依存の
+        永続ファイル（`.pixie_notes/state_board.json` 等）も共有され、同時運用では最後の保存が勝つ
+        （メモリ内の推論は正しく分離）。作業対象別セッションは下記 TODO 5（cwd 抽象化）待ち。
+      - LLM バックエンド（LM Studio 単一モデル）は事実上リクエストを直列処理するため、真の並列
+        スループットはバックエンド側に律速される。分離の正しさ自体はそれとは独立。
 
 残り（engine 深部に触れるため段階的に進める。各項目は AWP のテストを壊さないことを条件に着手）:
 
 1. `pixie-core` の**物理切り出し**（engine 等を別パッケージへ移動。境界 API は維持するので CWP は無改修）。
-2. **マルチセッション化**（`registry` のプロセスグローバル `_state_board` / `_dynamic_max_chars` を
-   Engine インスタンスへ移す。現状は1プロセス1セッション）。
-3. 出力の**型付きイベント**再設計と、engine 内の直書き `print` 全廃（現状は stdout に逃がして握っている）。
+2. 出力の**型付きイベント**再設計と、engine 内の直書き `print` 全廃（現状は stdout に逃がして握っている）。
 4. `AppContext` を「実行設定(core)」と「UI 機能(app)」に分離。
 5. 作業ディレクトリ/永続ストレージの**セッション別抽象化**（cwd 依存の解消）。
 6. write の**物理サンドボックス**（現状は cwd 限定＋承認のみ）、権限 allowlist。

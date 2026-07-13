@@ -3,6 +3,12 @@
 // 破壊操作は approval イベントで承認バーを出し、POST /api/approve で解放する。
 
 const $ = (id) => document.getElementById(id);
+
+function newSessionId() {
+  return (crypto.randomUUID && crypto.randomUUID()) ||
+    ("s-" + Math.random().toString(36).slice(2) + Date.now().toString(36));
+}
+
 const state = {
   editor: null,
   monaco: null,
@@ -11,6 +17,7 @@ const state = {
   streaming: false,
   abort: null,
   assistantEl: null,
+  sessionId: newSessionId(),  // このタブ/会話のセッション。並行セッションはサーバ側で分離される。
 };
 
 // 拡張子 → Monaco 言語 ID
@@ -176,7 +183,7 @@ async function sendChat() {
     resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: msg }),
+      body: JSON.stringify({ message: msg, session_id: state.sessionId }),
       signal: state.abort.signal,
     });
   } catch (e) {
@@ -273,7 +280,7 @@ async function resolveApproval(id, approve, override) {
   await fetch("/api/approve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, approve, override }),
+    body: JSON.stringify({ id, approve, override, session_id: state.sessionId }),
   }).catch(() => {});
 }
 
@@ -299,8 +306,25 @@ function setStreaming(on) {
 }
 
 async function interrupt() {
-  await fetch("/api/interrupt", { method: "POST" }).catch(() => {});
+  await fetch("/api/interrupt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: state.sessionId }),
+  }).catch(() => {});
   if (state.abort) state.abort.abort();
+}
+
+function newSession() {
+  if (state.streaming) { alert("実行中です。中断してから新しい会話を開始してください。"); return; }
+  state.sessionId = newSessionId();
+  $("messages").innerHTML = "";
+  $("approval").classList.add("hidden");
+  addMsg("status", "🆕 新しい会話を開始しました（別セッション）。");
+  updateSessionInfo();
+}
+
+function updateSessionInfo() {
+  $("session-info").textContent = "session: " + state.sessionId.slice(0, 8);
 }
 
 function escapeHtml(s) {
@@ -310,7 +334,9 @@ function escapeHtml(s) {
 // ---- UI バインド ----
 function bindUI() {
   $("send-btn").onclick = sendChat;
+  $("new-session-btn").onclick = newSession;
   $("interrupt-btn").onclick = interrupt;
+  updateSessionInfo();
   $("save-btn").onclick = saveFile;
   $("refresh-btn").onclick = () => loadFileList();
   $("file-search").oninput = onSearch;
