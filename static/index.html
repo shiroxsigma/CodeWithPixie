@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CodeWithPixie</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <style>
+    /* CWP 固有の追加スタイル（承認バー・ステータス・ツールログ） */
+    #agent-status { font-size: 12px; opacity: .8; margin-left: 8px; }
+    .msg.status { opacity: .75; font-size: 12px; font-style: italic; white-space: pre-wrap; }
+    .msg.error  { color: #ff6b6b; white-space: pre-wrap; }
+    #approval {
+      border: 1px solid #d08b28; background: rgba(208,139,40,.12);
+      border-radius: 8px; padding: 10px; margin: 8px 0;
+    }
+    #approval h4 { margin: 0 0 6px; font-size: 13px; }
+    #approval .call { font-family: ui-monospace, monospace; font-size: 12px;
+      background: rgba(0,0,0,.25); border-radius: 6px; padding: 6px 8px; margin: 4px 0;
+      white-space: pre-wrap; word-break: break-word; }
+    #approval .call .danger { color: #ffb454; font-weight: 700; }
+    #approval .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    #approval textarea { flex: 1; min-height: 34px; resize: vertical; }
+    .btn-approve { background: #2e7d32; color: #fff; }
+    .btn-reject  { background: #6b2e2e; color: #fff; }
+    #interrupt-btn { background: #6b2e2e; color: #fff; }
+    .changed-badge { color: #7bd88f; font-size: 11px; margin-left: 6px; }
+    li.file.changed > .name { color: #7bd88f; }
+  </style>
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">🧚 CodeWithPixie</div>
+    <div class="file-info">
+      <span id="current-file">（ファイル未選択）</span>
+      <button id="save-btn" title="保存 (Ctrl+S)">保存</button>
+      <span id="save-state"></span>
+    </div>
+    <div class="model-info">model: <span id="model-name">…</span><span id="agent-status"></span></div>
+  </header>
+
+  <main id="split">
+    <!-- 左：コードエディタ -->
+    <section id="left-pane">
+      <div id="editor"></div>
+      <div id="left-toolbar">
+        <span id="sel-info" class="hint">エージェントがファイルを直接編集します（破壊操作は承認制）。</span>
+      </div>
+    </section>
+
+    <div id="divider" title="ドラッグで幅を調整"></div>
+
+    <!-- 右：ファイルツリー & チャット -->
+    <section id="right-pane">
+      <div id="filemgr">
+        <div class="section-head">
+          <span>ファイル（ワークスペース）</span>
+          <span class="fm-actions">
+            <button id="refresh-btn" title="再読込">⟳</button>
+            <button id="new-file-btn" title="新規ファイル">📄+</button>
+            <button id="new-folder-btn" title="新規フォルダ">📁+</button>
+          </span>
+          <input id="file-search" type="search" placeholder="🔍 全文検索…" />
+        </div>
+        <div id="root-bar">
+          <span id="root-path" title=""></span>
+        </div>
+        <ul id="file-list"></ul>
+        <div id="search-results" class="hidden"></div>
+      </div>
+
+      <div id="chat">
+        <div id="messages"></div>
+        <div id="approval" class="hidden"></div>
+        <div id="composer">
+          <textarea id="chat-input" rows="3"
+            placeholder="例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。"></textarea>
+          <div class="composer-actions">
+            <span class="hint">Ctrl+Enter で送信</span>
+            <button id="interrupt-btn" class="hidden">■ 中断</button>
+            <button id="send-btn">送信</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    window.__MONACO_VS__ = "/static/vendor/monaco/min/vs";
+  </script>
+  <script src="/static/js/monaco-loader.js"></script>
+  <script src="/static/js/app.js" type="module"></script>
+</body>
+</html>
