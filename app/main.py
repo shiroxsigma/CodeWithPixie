@@ -142,6 +142,7 @@ class FsDeleteReq(BaseModel):
 class ChatReq(BaseModel):
     message: str
     session_id: str
+    current_file: str | None = None  # エディタで開いているファイル（エージェントへのコンテキスト）
 
 
 class ApproveReq(BaseModel):
@@ -368,9 +369,19 @@ async def api_chat(req: ChatReq):
         # worker スレッド → イベントループへ安全に受け渡し。
         loop.call_soon_threadsafe(q.put_nowait, ev)
 
+    # 開いているファイルをコンテキストとして前置する。小型モデルは「このファイル」「今開いて
+    # いるファイル」という指示語からパスを推測できず、ハルシネートしたパスを探し回る実測がある。
+    message = req.message
+    if req.current_file:
+        message = (
+            f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
+            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。）\n\n"
+            f"{req.message}"
+        )
+
     def worker() -> None:
         try:
-            sess.run_turn(req.message, emit, settings.approval_timeout)
+            sess.run_turn(message, emit, settings.approval_timeout)
         finally:
             emit({"type": "__end__"})
             sess.busy.release()
