@@ -27,6 +27,7 @@ const state = {
   saveError: null,          // 直近の保存失敗（ApiError）。成功でクリア
   fsEntries: [],            // /api/files の結果 [{path, type, size?, text?}]
   collapsedDirs: new Set(), // 折りたたみ中のフォルダ
+  knownDirs: new Set(),     // 既出のフォルダ。初出だけを閉じる（開いた状態の記憶を壊さない）
   changedPaths: new Set(),  // 直近ターンでエージェントが変更したファイル
   streaming: false,
   abort: null,
@@ -338,6 +339,13 @@ async function loadFileList() {
   if (!r) return;
   state.fsEntries = r.files;
   renderRootPath(r.root);
+  // フォルダは既定で閉じた状態にする（深い階層が全部開いていると目的のファイルが埋もれる）。
+  // 「初めて見るフォルダだけ」閉じるので、ユーザーが開いたフォルダは再読込でも開いたまま。
+  for (const f of r.files) {
+    if (f.type !== "dir" || state.knownDirs.has(f.path)) continue;
+    state.knownDirs.add(f.path);
+    state.collapsedDirs.add(f.path);
+  }
   // 消えたファイルはコンテキストのチェック集合からも掃除する（Note モード）
   const alive = new Set(r.files.filter((f) => f.type === "file").map((f) => f.path));
   for (const p of [...state.checkedFiles]) if (!alive.has(p)) state.checkedFiles.delete(p);
@@ -353,6 +361,16 @@ function isHiddenByCollapse(parentPath) {
     if (state.collapsedDirs.has(cur)) return true;
   }
   return false;
+}
+
+/** 指定パスの祖先フォルダを開く（閉じた木の中に開いたファイルが埋もれないように）。 */
+function revealInTree(path) {
+  const parts = String(path || "").split("/");
+  let cur = "";
+  for (const part of parts.slice(0, -1)) {
+    cur = cur ? cur + "/" + part : part;
+    state.collapsedDirs.delete(cur);
+  }
 }
 
 function renderFileTree() {
@@ -614,6 +632,7 @@ async function openFile(path, force) {
   $("current-file").textContent = path;
   updatePreviewAvailability();
   renderPreview();  // setValue でも更新はされるが、150ms 待たずに新ファイルを映す
+  revealInTree(path);  // 既定は閉じた木なので、開いたファイルの祖先だけ開いて見せる
   renderFileTree();
   if (isNote()) { await loadNotes(); await loadRefs(); }  // 付箋・関連ファイルはノートに随伴
 }
@@ -1845,6 +1864,7 @@ async function chooseWorkspace() {
   // 前のワークスペースに紐づく状態をリセットする
   state.currentFile = null;
   state.collapsedDirs.clear();
+  state.knownDirs.clear();  // 別ワークスペースの木なので「既定で閉じる」判定もやり直す
   state.changedPaths.clear();
   state.saveError = null;
   state.editor.setValue("");
@@ -2154,6 +2174,7 @@ function bindUI() {
   });
 
   setupDivider();
+  setupVDivider();
 }
 
 function setupDivider() {
@@ -2168,5 +2189,50 @@ function setupDivider() {
     const w = Math.max(320, Math.min(e.clientX, total - 320));
     left.style.flex = `0 0 ${w}px`;
     state.editor.layout();
+  });
+}
+
+//: ファイル欄の高さ（px）の保存キー。作業フォルダをまたいで同じ使い勝手にしたいので
+//  ワークスペース別にはしない。
+const FILEMGR_H_KEY = "pixie.filemgrHeight";
+const FILEMGR_MIN_H = 80;
+
+/** ファイル欄とチャット欄の境界を上下ドラッグで調整する（ダブルクリックで既定に戻す）。 */
+function setupVDivider() {
+  const divider = $("v-divider");
+  const filemgr = $("filemgr");
+  if (!divider || !filemgr) return;
+
+  const apply = (px) => {
+    // inline で書くのは、スタイルシート側の max-height:40% に勝たせるため。
+    filemgr.style.flex = `0 0 ${px}px`;
+    filemgr.style.maxHeight = "none";
+  };
+  const saved = Number(localStorage.getItem(FILEMGR_H_KEY));
+  if (saved >= FILEMGR_MIN_H) apply(saved);
+
+  let dragging = false;
+  divider.addEventListener("mousedown", (e) => {
+    e.preventDefault();  // ドラッグ中にテキスト選択が走らないように
+    dragging = true;
+    document.body.style.cursor = "row-resize";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = "";
+    localStorage.setItem(FILEMGR_H_KEY, String(filemgr.getBoundingClientRect().height));
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const top = filemgr.getBoundingClientRect().top;
+    // チャット側にも最低限の高さを残す（送信欄が潰れると操作不能になる）
+    const maxH = $("right-pane").getBoundingClientRect().bottom - top - 220;
+    apply(Math.max(FILEMGR_MIN_H, Math.min(e.clientY - top, maxH)));
+  });
+  divider.addEventListener("dblclick", () => {
+    filemgr.style.flex = "";
+    filemgr.style.maxHeight = "";      // スタイルシートの既定（40%）へ戻す
+    localStorage.removeItem(FILEMGR_H_KEY);
   });
 }
