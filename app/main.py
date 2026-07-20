@@ -378,7 +378,8 @@ def api_workspace_dirs(path: str = "", files: bool = False):
 
 # --- モデル/サーバ設定 ---------------------------------------------------------
 class SettingsReq(BaseModel):
-    active_server: int
+    active_server: int | None = None
+    model: str | None = None
 
 
 @app.get("/api/servers")
@@ -390,16 +391,41 @@ def api_servers():
     return {"servers": servers, "active": config.get_active_server_index()}
 
 
+@app.get("/api/models")
+async def api_models():
+    """アクティブサーバからロード済みモデル一覧を取得（LM Studio の /v1/models）。
+
+    ⚙️設定のモデル選択ドロップダウン用。LM Studio 未起動・モデル未ロード時は空配列を返す
+    （フロントは「取得できません」表示にフォールバックする）。"""
+    import httpx
+    srv = config.active_server()
+    base = (srv.get("base_url") or "").rstrip("/")
+    headers = {"Authorization": f"Bearer {srv.get('api_key') or 'lm-studio'}"}
+    models: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{base}/models", headers=headers)
+            r.raise_for_status()
+            models = [m["id"] for m in r.json().get("data", []) if m.get("id")]
+    except Exception:
+        pass  # LM Studio 停止中・タイムアウト等。空配列で返す（フロントが案内する）
+    return {"models": models, "current": srv.get("model")}
+
+
 @app.post("/api/settings")
 def api_settings(req: SettingsReq):
-    """アクティブなサーバ（モデル）を切り替える。以降の新規セッションに反映。"""
-    try:
-        config.set_active_server_index(req.active_server)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    """アクティブなサーバ、またはそのモデルを切り替える。以降の新規セッションに反映。"""
+    if req.active_server is not None:
+        try:
+            config.set_active_server_index(req.active_server)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    if req.model is not None and req.model.strip():
+        config.set_active_server_model(req.model.strip())
     # Note セッションは LLM バックエンド束縛ごと作り直す（Code は新規セッションから反映）
     engine_adapter.reset_note_session()
-    return {"ok": True, "active": config.get_active_server_index()}
+    return {"ok": True, "active": config.get_active_server_index(),
+            "model": config.active_server().get("model")}
 
 
 # --- Copilot 連携（PrayLight 経由）--------------------------------------------

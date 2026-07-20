@@ -151,6 +151,24 @@ def set_active_server_index(idx: int) -> None:
     _write_config_json(data)
 
 
+def set_active_server_model(model: str) -> None:
+    """アクティブなサーバの model を更新し config.json に永続化する。
+
+    LM Studio の /v1/models で得たロード済みモデルを⚙️設定で選んだときに呼ぶ。
+    サーバの接続先は変えずモデル名だけ差し替える（以降の新規セッションに反映）。"""
+    data = _read_config_json()
+    servers = data.get("servers")
+    if not servers:
+        # config.json に servers[] が無い（フォールバック単一構成）→ 実体化して書き込む
+        servers = load_servers()
+        data["servers"] = servers
+    idx = get_active_server_index()
+    if not (0 <= idx < len(servers)):
+        raise ValueError("アクティブサーバが範囲外です")
+    servers[idx]["model"] = str(model)
+    _write_config_json(data)
+
+
 def active_server() -> dict:
     return load_servers()[get_active_server_index()]
 

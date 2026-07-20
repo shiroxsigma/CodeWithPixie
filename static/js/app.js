@@ -1820,10 +1820,48 @@ async function openSettings() {
     } catch (e) {
       alert("⚠️ 設定を保存できません: " + e.message);
     }
+    await loadModelOptions();  // サーバが変わればモデル一覧も切り替わる
     await loadStatus();
   };
+  await loadModelOptions();
   await refreshCopilot();
   $("settings-modal").classList.remove("hidden");
+}
+
+// LM Studio の /v1/models からロード済みモデル一覧を取得して選択ドロップダウンに並べる。
+// サーバ未起動・モデル未ロード時は案内表示にフォールバック。
+async function loadModelOptions() {
+  const sel = $("settings-llm-model");
+  if (!sel) return;
+  const r = await getJSON("/api/models").catch(() => ({ models: [] }));
+  const models = r.models || [];
+  sel.innerHTML = "";
+  sel.onchange = null;
+  if (!models.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(取得できません・LM Studio 起動中か確認)";
+    sel.appendChild(opt);
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  models.forEach((m) => {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    if (m === r.current) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.onchange = async () => {
+    if (!sel.value) return;
+    try {
+      await postJSON("/api/settings", { model: sel.value });
+    } catch (e) {
+      alert("⚠️ モデルを保存できません: " + e.message);
+    }
+    await loadStatus();
+  };
 }
 
 function closeSettings() { $("settings-modal").classList.add("hidden"); }
