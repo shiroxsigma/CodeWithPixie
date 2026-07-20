@@ -1,3 +1,9 @@
+/* ============================================================================
+   正本: PixieProject/shared/web/css/style.css
+   このファイルは shared/scripts/sync_web.py で各アプリ（NoteWithPixie /
+   CodeWithPixie）の static/css/ へコピー配布される。アプリ側のコピーを直接
+   編集しないこと（次回 sync で上書きされる）。編集は必ずこの正本で行う。
+   ========================================================================= */
 :root {
   --bg: #1e1e2a;
   --bg2: #262637;
@@ -32,6 +38,15 @@ body {
 #current-file { color: var(--muted); }
 .model-info { color: var(--muted); }
 #model-name { color: var(--accent2); }
+/* --- Code モード固有: topbar のエージェント状態・ルートプロジェクト切替 --- */
+#agent-status { font-size: 12px; opacity: .8; margin-left: 8px; }
+#root-project-btn {
+  display: inline-flex; align-items: center; gap: 4px; margin: 0 6px;
+  max-width: 320px; cursor: pointer; font-size: 13px;
+}
+#root-project-btn #root-project-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;
+}
 
 button {
   background: var(--bg3); color: var(--fg);
@@ -41,6 +56,8 @@ button {
 button:hover { border-color: var(--accent); }
 button:active { transform: translateY(1px); }
 #save-state { color: var(--accent2); font-size: 12px; min-width: 40px; }
+/* 保存失敗は消えずに残す。hover で title に理由が出る。 */
+#save-state.save-error { color: var(--danger); cursor: help; }
 #settings-btn { padding: 4px 8px; font-size: 15px; line-height: 1; }
 
 /* --- 設定ダイアログ --- */
@@ -68,7 +85,21 @@ button:active { transform: translateY(1px); }
 /* --- split layout --- */
 #split { flex: 1; display: flex; min-height: 0; }
 #left-pane { position: relative; display: flex; flex-direction: column; min-width: 320px; flex: 1 1 55%; }
-#editor { flex: 1; min-height: 0; }
+#edit-area { flex: 1; display: flex; min-height: 0; }
+/* basis を 50% にするのは、0 だとプレビュー側のパディング＋ボーダー(33px)が
+   basis の外側に足され、その分だけエディタが狭くなるため（box-sizing 基準で等分する）。 */
+#editor { flex: 1 1 50%; min-width: 0; min-height: 0; }
+/* Markdown プレビューは表示時のみエディタと横並びで半分ずつ。既定は hidden。 */
+#preview {
+  flex: 1 1 50%; min-width: 0; overflow-y: auto; padding: 12px 16px;
+  background: var(--bg); border-left: 1px solid var(--border);
+  font-size: 14px; line-height: 1.7;
+}
+#preview.hidden { display: none; }
+#preview-btn.active { background: var(--accent); color: #17131f; border-color: var(--accent); }
+/* Code モード: .md 以外を開いている間はプレビュー不可 */
+#preview-btn:disabled { opacity: .45; cursor: default; }
+#preview-btn:disabled:hover { border-color: var(--border); }
 
 /* --- 差分プレビュー オーバーレイ --- */
 #diff-overlay {
@@ -116,6 +147,8 @@ button:active { transform: translateY(1px); }
 #file-list li:hover { background: var(--bg3); }
 #file-list li.active { background: var(--bg3); outline: 1px solid var(--accent); }
 #file-list input[type=checkbox] { accent-color: var(--accent); }
+/* チェックボックスを出さないファイル（画像等）の位置合わせ用ダミー */
+#file-list .cb-pad { width: 13px; flex: none; }
 #file-list .fname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #file-list li.dir { color: var(--accent2); font-weight: 600; }
 #file-list li.dragging { opacity: 0.4; }
@@ -237,6 +270,146 @@ button:active { transform: translateY(1px); }
 .apply-btn { background: var(--accent2); color: #10201e; border: none; font-weight: 600; }
 .insert-btn { background: var(--accent); color: #17131f; border: none; font-weight: 600; }
 
+/* --- Code モード固有: 会話区切り・エラー・承認バー・変更バッジ --------------- */
+/* 会話の区切り（新規会話・フォルダ変更など、吹き出しではない出来事） */
+.msg.system {
+  align-self: center; max-width: 100%; padding: 2px 10px;
+  background: none; color: var(--muted); font-size: 11px; font-style: italic;
+}
+.msg.error { align-self: flex-start; background: rgba(255, 107, 138, .12); border: 1px solid var(--danger); color: #ffb3c2; }
+
+/* 承認バー（破壊的ツールの実行要求） */
+#approval {
+  margin: 0 12px 8px; padding: 10px;
+  border: 1px solid #d08b28; background: rgba(208, 139, 40, .12); border-radius: 8px;
+}
+#approval h4 { margin: 0 0 6px; font-size: 13px; }
+#approval .call {
+  margin: 4px 0; padding: 6px 8px; border-radius: 6px; background: rgba(0, 0, 0, .25);
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow-y: auto;
+}
+#approval .call .danger { color: #ffb454; font-weight: 700; }
+#approval .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+#approval textarea {
+  flex: 1; min-height: 34px; resize: vertical; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px; font-size: 12px; font-family: inherit;
+}
+.btn-approve { background: #2e7d32; color: #fff; border: none; font-weight: 600; }
+.btn-reject { background: #6b2e2e; color: #fff; border: none; font-weight: 600; }
+
+/* エージェントが変更したファイル */
+.changed-badge { color: #7bd88f; font-size: 11px; margin-left: 6px; }
+#file-list li.changed .fname { color: #7bd88f; }
+
+/* ---- Markdown 描画（チャット返信・プレビューで共用） ------------------------
+   .md は markdown.js が付ける。付いていない要素（ストリーミング中の生テキストや
+   ユーザー発言）は .msg の pre-wrap のまま扱う。 */
+.md { white-space: normal; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4 { margin: 12px 0 6px; line-height: 1.3; font-weight: 700; }
+.md h1 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.md h2 { font-size: 1.3em; border-bottom: 1px solid var(--border); padding-bottom: 3px; }
+.md h3 { font-size: 1.15em; }
+.md h4 { font-size: 1.05em; }
+.md p { margin: 6px 0; }
+.md ul, .md ol { margin: 6px 0; padding-left: 1.4em; }
+.md li { margin: 2px 0; }
+.md li > p { margin: 0; }
+.md blockquote {
+  margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--accent);
+  color: var(--muted); background: rgba(139, 124, 255, 0.08);
+}
+.md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.md a { color: var(--accent2); }
+.md code {
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.92em;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px;
+}
+/* コードブロックと表は枠を広げずに自分の中で横スクロールさせる（狭いチャット欄で溢れさせない） */
+.md pre {
+  margin: 8px 0; padding: 8px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; overflow-x: auto;
+}
+.md pre code { background: none; border: none; padding: 0; white-space: pre; }
+.md table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; max-width: 100%; }
+.md th, .md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.md th { background: var(--bg2); font-weight: 600; }
+.md img { max-width: 100%; }
+
+/* ---- Mermaid 図 -------------------------------------------------------------
+   .mermaid-src は描画前・描画失敗時のソース。成功すると .mermaid-box に差し替わる。 */
+.mermaid-box {
+  margin: 8px 0; padding: 8px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px;
+  overflow-x: auto; text-align: center;
+}
+/* 幅は markdown.js の toBox が自然幅で固定する（枠に合わせて縮小させないため）。
+   ここで width/max-width を指定すると、それを打ち消してしまう。 */
+.mermaid-box svg { height: auto; }
+.mermaid-src {
+  margin: 8px 0; padding: 8px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; overflow-x: auto; white-space: pre;
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 12px;
+}
+/* 構文エラーの図は消さずソースを残す。書きかけの段階では普通に起きる。 */
+.mermaid-src.mermaid-error { border-color: var(--danger); cursor: help; }
+
+/* --- mdflow: 条件別フロー可視化 ---------------------------------------------
+   図の直下に出る条件プリセットのリスト。DOM は markdown.js の buildPresetList、
+   クリック等は app.js の委譲リスナー（bindMdflowUI）。 */
+.mdflow-presets {
+  margin: 2px 0 12px; padding: 8px 10px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  font-size: 13px;
+}
+.mdflow-presets-title { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+.mdflow-presets ul { list-style: none; margin: 0; padding: 0; }
+.mdflow-preset-item {
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 3px 8px; border-radius: 5px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.mdflow-preset-item:hover { background: var(--bg3); }
+/* ● / ○ のラジオ風マーカー。選択状態が一目でわかるように */
+.mdflow-preset-item::before { content: "○"; color: var(--muted); font-size: 11px; line-height: 18px; }
+.mdflow-preset-item.selected::before { content: "●"; color: var(--accent); }
+.mdflow-preset-item.selected { background: var(--bg3); border-color: var(--accent); }
+.mdflow-preset-item.mdflow-auto { color: var(--muted); }
+/* 自動判定モードで when がマッチしたプリセット */
+.mdflow-preset-item.auto-hit { border-color: var(--accent2); }
+/* 名前行 / when サブテキストの縦構造。プリセット名・バッジは名前行、
+   when 式はその下に控えめに表示する。 */
+.mdflow-preset-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mdflow-preset-name { display: flex; align-items: center; gap: 6px; line-height: 18px; }
+.mdflow-when { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mdflow-warn-badge { color: var(--danger); font-size: 11px; }
+.mdflow-badge {
+  margin-left: auto; padding: 0 6px; border-radius: 8px;
+  background: var(--accent2); color: var(--bg); font-size: 10px; line-height: 16px;
+}
+.mdflow-note { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.mdflow-cond {
+  width: 100%; margin-top: 6px; padding: 4px 8px;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 5px;
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 12px;
+}
+.mdflow-cond:focus { outline: none; border-color: var(--accent); }
+.mdflow-cond.invalid { border-color: var(--danger); }
+/* 条件マッピング定義（YAML）の折りたたみ。ソースが正であることは隠さない */
+details.mdflow-mapping {
+  margin: 8px 0; padding: 6px 10px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  font-size: 12px;
+}
+details.mdflow-mapping summary { cursor: pointer; color: var(--muted); user-select: none; }
+details.mdflow-mapping pre {
+  margin: 6px 0 2px; overflow-x: auto;
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 12px;
+}
+
 /* 応答待ちインジケータ（prefill/思考中） */
 .wait-indicator {
   display: flex; align-items: center; gap: 8px;
@@ -306,3 +479,15 @@ button:active { transform: translateY(1px); }
 .pixie-note-glyph { background: transparent; }
 .pixie-note-glyph::after { content: "📌"; font-size: 12px; }
 .pixie-note-line { background: rgba(139,124,255,0.10); }
+
+/* ==== モード出し分け（統合シェル Stage C） ====================================
+   統合アプリ（CodeWithPixie）は起動時と切替時に body へ mode-note / mode-code を
+   付与し、.note-only / .code-only の要素を表示・非表示する。
+   NWP には .note-only / .code-only 要素も body.mode-* クラスも無いため影響しない。 */
+body.mode-code .note-only { display: none !important; }
+body.mode-note .code-only { display: none !important; }
+
+/* トップバーのモードバッジ（クリックで切替） */
+#mode-btn { padding: 3px 12px; font-size: 12px; font-weight: 700; border-radius: 12px; }
+#mode-btn.mode-note { border-color: var(--accent2); color: var(--accent2); }
+#mode-btn.mode-code { border-color: var(--accent); color: var(--accent); }

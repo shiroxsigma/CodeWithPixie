@@ -5,39 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CodeWithPixie</title>
   <link rel="stylesheet" href="/static/css/style.css" />
-  <style>
-    /* CWP 固有の追加スタイル（承認バー・ステータス・ツールログ） */
-    #agent-status { font-size: 12px; opacity: .8; margin-left: 8px; }
-    #root-project-btn {
-      display: inline-flex; align-items: center; gap: 4px; margin: 0 6px;
-      max-width: 320px; cursor: pointer; font-size: 13px;
-    }
-    #root-project-btn #root-project-name {
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;
-    }
-    .msg.status { opacity: .75; font-size: 12px; font-style: italic; white-space: pre-wrap; }
-    .msg.error  { color: #ff6b6b; white-space: pre-wrap; }
-    #approval {
-      border: 1px solid #d08b28; background: rgba(208,139,40,.12);
-      border-radius: 8px; padding: 10px; margin: 8px 0;
-    }
-    #approval h4 { margin: 0 0 6px; font-size: 13px; }
-    #approval .call { font-family: ui-monospace, monospace; font-size: 12px;
-      background: rgba(0,0,0,.25); border-radius: 6px; padding: 6px 8px; margin: 4px 0;
-      white-space: pre-wrap; word-break: break-word; }
-    #approval .call .danger { color: #ffb454; font-weight: 700; }
-    #approval .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
-    #approval textarea { flex: 1; min-height: 34px; resize: vertical; }
-    .btn-approve { background: #2e7d32; color: #fff; }
-    .btn-reject  { background: #6b2e2e; color: #fff; }
-    #interrupt-btn { background: #6b2e2e; color: #fff; }
-    .changed-badge { color: #7bd88f; font-size: 11px; margin-left: 6px; }
-    li.file.changed > .name { color: #7bd88f; }
-  </style>
 </head>
 <body>
   <header id="topbar">
     <div class="brand">🧚 CodeWithPixie</div>
+    <button id="mode-btn" title="モード切替">…</button>
     <button id="root-project-btn" title="ルートプロジェクト（作業対象フォルダ）を変更">
       📁 <span id="root-project-name">…</span>
     </button>
@@ -53,8 +25,27 @@
   <main id="split">
     <!-- 左：コードエディタ -->
     <section id="left-pane">
-      <div id="editor"></div>
+      <!-- 編集エリア。Markdown プレビュー表示時だけ横2分割になる（既定はエディタのみ）。 -->
+      <div id="edit-area">
+        <div id="editor"></div>
+        <div id="preview" class="md hidden" aria-live="off"></div>
+      </div>
+
+      <!-- 差分プレビュー（Note モードの反映前確認）。左=現在 / 右=提案（右は編集可）。
+           #left-pane を丸ごと覆うので、プレビュー表示中でも差分だけが見える。 -->
+      <div id="diff-overlay" class="hidden">
+        <div id="diff-bar">
+          <span id="diff-label">差分プレビュー：左＝現在 ／ 右＝提案（右は編集して調整可）</span>
+          <span class="spacer"></span>
+          <button id="diff-apply" class="apply-btn">✓ 適用</button>
+          <button id="diff-cancel">キャンセル</button>
+        </div>
+        <div id="diff-editor"></div>
+      </div>
+
       <div id="left-toolbar">
+        <button id="note-btn" class="note-only" title="選択行に付箋を貼る">📌 付箋</button>
+        <button id="preview-btn" title="Markdown プレビューを表示 (Ctrl+Shift+P)">👁 プレビュー</button>
         <span id="sel-info" class="hint">エージェントがファイルを直接編集します（破壊操作は承認制）。</span>
       </div>
     </section>
@@ -81,17 +72,37 @@
         <div id="search-results" class="hidden"></div>
       </div>
 
+      <!-- 関連ファイル（Note モードのみ）: 別ディレクトリの .pptx 等をノートに紐付ける -->
+      <div id="refmgr" class="note-only">
+        <div class="section-head">
+          <span>📎 関連ファイル</span>
+          <span class="fm-actions">
+            <button id="ref-add-btn" title="別ディレクトリのファイル（.pptx 等）を参照に追加">＋参照を追加</button>
+          </span>
+        </div>
+        <ul id="ref-list"></ul>
+        <div id="ref-empty" class="hint">ここにファイルをドラッグ、または「＋参照を追加」で紐付けます。</div>
+      </div>
+
       <div id="chat">
+        <div class="section-head">
+          <span>💬 チャット</span>
+          <span class="fm-actions">
+            <span id="session-info" class="hint code-only" title="この会話のセッションID"></span>
+            <button id="new-session-btn" class="code-only" title="新しい会話を開始（並行セッション）">＋新規会話</button>
+            <button id="chat-clear-btn" class="note-only" title="この保存先の会話履歴を消去する">🗑 履歴を消去</button>
+          </span>
+        </div>
         <div id="messages"></div>
-        <div id="approval" class="hidden"></div>
+        <div id="approval" class="hidden code-only"></div>
         <div id="composer">
+          <div id="chip-bar" class="note-only">
+            <span id="sel-chip" class="chip hidden">選択テキスト添付</span>
+          </div>
           <textarea id="chat-input" rows="3"
             placeholder="例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。"></textarea>
           <div class="composer-actions">
             <span class="hint">Ctrl+Enter で送信</span>
-            <span id="session-info" class="hint" title="この会話のセッションID"></span>
-            <button id="new-session-btn" title="新しい会話を開始（並行セッション）">＋新規会話</button>
-            <button id="interrupt-btn" class="hidden">■ 中断</button>
             <button id="send-btn">送信</button>
           </div>
         </div>
@@ -111,6 +122,21 @@
       <div class="root-actions">
         <button id="root-cancel">キャンセル</button>
         <button id="root-ok" class="apply-btn">✓ このフォルダにする</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 関連ファイル選択ダイアログ（Note モード: 任意ディレクトリのファイルを参照に追加） -->
+  <div id="pick-modal" class="hidden">
+    <div id="pick-dialog">
+      <div class="root-head">📎 参照するファイルを選ぶ</div>
+      <div id="pick-drives"></div>
+      <input id="pick-input" type="text" spellcheck="false"
+        placeholder="例: C:\Users\you\decks（Enter でフォルダへ移動）" />
+      <ul id="pick-list"></ul>
+      <div class="root-hint hint">📂 フォルダをクリックで移動 ／ 📄 ファイルをクリックで参照に追加します。</div>
+      <div class="root-actions">
+        <button id="pick-cancel">閉じる</button>
       </div>
     </div>
   </div>
@@ -143,6 +169,12 @@
   <script>
     window.__MONACO_VS__ = "/static/vendor/monaco/min/vs";
   </script>
+  <!-- markdown-it / mermaid（UMD）。scripts/fetch_markdown_it.py と fetch_mermaid.py で取得する。
+       未取得なら 404 になるが、その場合それぞれの機能が無効化されるだけで編集は続けられる。 -->
+  <script src="/static/vendor/markdown-it/markdown-it.min.js"></script>
+  <script src="/static/vendor/mermaid/mermaid.min.js"></script>
+  <!-- js-yaml（UMD）。scripts/fetch_js_yaml.py で取得。mdflow 条件マッピングの解析に使う（Note モード）。 -->
+  <script src="/static/vendor/js-yaml/js-yaml.min.js"></script>
   <script src="/static/js/monaco-loader.js"></script>
   <script src="/static/js/app.js" type="module"></script>
 </body>

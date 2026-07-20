@@ -19,3 +19,7 @@ config.json
 static/vendor/*
 !static/vendor/monaco/
 
+# pixie_core が workspace に作るランタイム状態（state_board 等）。
+# Note の付箋 .pixie_notes.json（ファイル）は別物で保存対象なので除外しないこと。
+.pixie_notes/
+
