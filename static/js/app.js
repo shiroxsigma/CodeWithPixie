@@ -1848,8 +1848,8 @@ async function loadModelOptions() {
   sel.disabled = false;
   models.forEach((m) => {
     const opt = document.createElement("option");
-    opt.value = m;
-    opt.textContent = m;
+    opt.value = m;  // LM Studio は /v1/models の id（フルパス）でないとロード失敗する
+    opt.textContent = m.split("/").pop();  // 見やすさ: 最後のファイル名部分を表示
     if (m === r.current) opt.selected = true;
     sel.appendChild(opt);
   });
