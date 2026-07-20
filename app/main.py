@@ -76,6 +76,11 @@ class SessionManager:
     def count(self) -> int:
         return len(self._sessions)
 
+    def all(self) -> list[AgentSession]:
+        """生きているセッションの一覧（実行中設定を全セッションへ反映する用）。"""
+        with self._lock:
+            return list(self._sessions.values())
+
 
 # startup で構築するプロセス共有のマネージャ。
 _manager: SessionManager | None = None
@@ -380,6 +385,7 @@ def api_workspace_dirs(path: str = "", files: bool = False):
 class SettingsReq(BaseModel):
     active_server: int | None = None
     model: str | None = None
+    think_budget_sec: int | None = None   # 思考許容時間（deep 思考の <think> 上限秒）
 
 
 @app.get("/api/servers")
@@ -429,9 +435,31 @@ async def api_models():
     return {"models": models, "current": srv.get("model")}
 
 
+@app.get("/api/settings")
+def api_settings_get():
+    """⚙️ 設定画面の現在値（数値系。サーバ/モデルは /api/servers、Copilot は /api/copilot）。"""
+    return {
+        "active": config.get_active_server_index(),
+        "model": config.active_server().get("model"),
+        "think_budget_sec": settings.think_budget_sec,
+        "think_budget_min": config.THINK_BUDGET_MIN,
+        "think_budget_max": config.THINK_BUDGET_MAX,
+    }
+
+
 @app.post("/api/settings")
 def api_settings(req: SettingsReq):
-    """アクティブなサーバ、またはそのモデルを切り替える。以降の新規セッションに反映。"""
+    """アクティブなサーバ、モデル、思考許容時間を更新する。
+
+    思考許容時間はセッションを作り直さずに反映できる（プロセス全体の思考上限＋既存
+    セッションのストリーム打ち切り秒を書き換えるだけ）ので、下のリセット対象に含めない。"""
+    if req.think_budget_sec is not None:
+        try:
+            v = config.set_think_budget_sec(req.think_budget_sec)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        sessions = _manager.all() if _manager is not None else ()
+        engine_adapter.apply_think_budget(v, sessions=sessions)
     if req.active_server is not None:
         try:
             config.set_active_server_index(req.active_server)
@@ -443,15 +471,17 @@ def api_settings(req: SettingsReq):
     # セッションが残っていると、config を更新してもそちらが使われ続け（LM Studio が
     # 解決できない旧 model 名で 400 になる）、反映されたように見えない。
     # Note は get 時に再生成、Code は次のチャットで新規セッションになる。
+    # 思考許容時間だけの更新では破棄しない（Note の会話文脈を無用に失わせない）。
     changed = (req.active_server is not None) or bool(req.model and req.model.strip())
-    engine_adapter.reset_note_session()
     if changed:
+        engine_adapter.reset_note_session()
         try:
             _require_manager().clear()
         except Exception:
             pass  # engine 未初期化時などは無害（次回起動で新 model が使われる）
     return {"ok": True, "active": config.get_active_server_index(),
-            "model": config.active_server().get("model")}
+            "model": config.active_server().get("model"),
+            "think_budget_sec": settings.think_budget_sec}
 
 
 # --- Copilot 連携（PrayLight 経由）--------------------------------------------

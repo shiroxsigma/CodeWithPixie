@@ -472,6 +472,11 @@ details.mdflow-mapping pre {
 #copilot-bar button { font-size: 12px; padding: 4px 10px; }
 #copilot-status, #cp-bar-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
+/* 設定ダイアログ内の「数値入力＋保存ボタン＋状態」の横並び（思考許容時間など） */
+.settings-inline { display: flex; align-items: center; gap: 8px; }
+.settings-inline input[type="number"] { width: 90px; }
+.settings-inline .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
 /* 反映先として追跡中の範囲 */
 .pixie-pending-target { background: rgba(90, 209, 201, 0.14); }
 

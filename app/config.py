@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     # Note モードの思考ストリーム表示（<think> はフロントの splitThink が分離する）。
     show_thinking: bool = True
 
+    # --- 思考許容時間（⚙️ 設定で変更可・両モード共通）---
+    # deep 思考モードの <think> フェーズ最大継続秒数（AWP の DEEP_THINK_BUDGET_SEC 既定 90）。
+    # 超えると engine が思考を打ち切り「結論生成に移ります」で締める。難しい依頼で打ち切られる
+    # なら伸ばす。伸ばすほど1ターンの待ち時間が延びる（pixie_core API 1.5 で実行時変更）。
+    think_budget_sec: int = 90
+
 
 settings = Settings()
 
@@ -180,6 +186,28 @@ def set_copilot_enabled(enabled: bool) -> bool:
     _write_config_json(data)
     settings.copilot_enabled = bool(enabled)
     return settings.copilot_enabled
+
+
+#: 思考許容時間の許容範囲（秒）。下限は engine 側の最小値、上限は「事故で無限待ちにしない」ため。
+THINK_BUDGET_MIN = 10
+THINK_BUDGET_MAX = 1800
+
+
+def set_think_budget_sec(seconds) -> int:
+    """思考許容時間（deep 思考の <think> 上限秒）を更新し config.json に永続化する。
+
+    エンジンへの反映は engine_adapter.apply_think_budget（pixie_core API 1.5）が行う。"""
+    try:
+        v = int(seconds)
+    except (TypeError, ValueError):
+        raise ValueError(f"思考許容時間は秒数で指定してください: {seconds!r}")
+    if not (THINK_BUDGET_MIN <= v <= THINK_BUDGET_MAX):
+        raise ValueError(f"思考許容時間は {THINK_BUDGET_MIN}〜{THINK_BUDGET_MAX} 秒で指定してください: {v}")
+    data = _read_config_json()
+    data["think_budget_sec"] = v
+    _write_config_json(data)
+    settings.think_budget_sec = v
+    return v
 
 
 def set_workspace(raw: str) -> Path:

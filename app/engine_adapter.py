@@ -135,7 +135,37 @@ def bootstrap(awp_src):
     _register_note_tools(pixie_core)
 
     _core = pixie_core
+    # 設定の思考許容時間をエンジンへ反映（API 1.5 未満なら黙って既定値のまま動く）。
+    apply_think_budget(settings.think_budget_sec)
     return _core
+
+
+def stream_timeout_sec(budget_sec) -> float:
+    """思考許容時間に見合う LLM ストリーム打ち切り秒。
+
+    overall_timeout（既定 180）は思考も生成もまとめて打ち切るため、思考許容時間だけ伸ばしても
+    こちらに先に引っかかって意味がない。思考の後に結論生成の時間が要るので +60 秒の余裕を足す
+    （既定 180 秒を下回らせない）。"""
+    return max(180.0, float(budget_sec) + 60.0)
+
+
+def apply_think_budget(seconds, sessions=()) -> int:
+    """思考許容時間をエンジンへ反映する（プロセス全体＋生きているセッションのストリーム上限）。
+
+    pixie_core.set_think_budget はプロセス全体（engine のモジュール変数）に効くが、
+    LLM ストリームの打ち切り秒はセッション（＝Engine）ごとなので、既存セッションには
+    個別に適用する。新規セッションは構築時に自分で適用する。
+
+    API 1.5 未満の pixie_core では何もしない（設定画面は出るが効かない、で止める）。"""
+    v = int(seconds)
+    if _core is None or not hasattr(_core, "set_think_budget"):
+        return v
+    v = _core.set_think_budget(v)
+    timeout = stream_timeout_sec(v)
+    for s in (*sessions, _note_session):
+        if s is not None:
+            s.set_stream_timeout(timeout)
+    return v
 
 
 def _register_copilot_tool(pixie_core) -> None:
@@ -209,6 +239,7 @@ class AgentSession:
         self._core = core
         self._CancelTurn = core.CancelTurn
         self._engine = core.create_engine(server, str(workspace))  # 自セッション専用の Engine
+        self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))
 
         self._approval_required = frozenset(core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
         self.tool_count = self._engine.tool_count
@@ -330,6 +361,12 @@ class AgentSession:
         ctx = self._engine.context
         ctx.active_packs = {"copilot"} if enabled else set()
 
+    def set_stream_timeout(self, overall: float) -> None:
+        """LLM ストリームの打ち切り秒（思考許容時間に追随させる）。API 1.5 未満では無視。"""
+        setter = getattr(self._engine, "set_stream_timeout", None)
+        if setter is not None:
+            setter(overall)
+
     def cancel(self) -> None:
         self._cancel = True
         self._approval_event.set()  # 承認待ちを解放（_approve が [] を返して終了）
@@ -361,6 +398,7 @@ class NoteSession:
         )
         self.workspace = getattr(self._engine, "workspace", workspace)
         self.model_name = self._engine.model_name
+        self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))
 
         # ターン実行の排他（1セッション1ターン）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()
@@ -386,6 +424,9 @@ class NoteSession:
         """ask_copilot の提示を on/off する。次ターン（次の run_turn）から反映される。"""
         self._allowed = self._allowed_set(enabled)
         self._engine.context.fixed_tool_set = self._allowed
+
+    #: LLM ストリーム打ち切り秒の設定（AgentSession と同一実装を共有）。
+    set_stream_timeout = AgentSession.set_stream_timeout
 
     # ---- ターン実行（worker スレッドで呼ばれる） ----
     def run_turn(self, user_text: str, emit_event) -> None:

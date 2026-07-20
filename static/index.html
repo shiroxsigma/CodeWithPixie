@@ -160,6 +160,15 @@
         <span><b>ロード済みモデル</b><span class="hint">LM Studio でロード済みのモデルから選択（起動中のみ取得可）。</span></span>
         <select id="settings-llm-model"></select>
       </label>
+      <!-- label ではなく div: 中の「保存」ボタンを押したとき input へのフォーカス移動が起きないように -->
+      <div class="settings-row" style="flex-direction:column; align-items:stretch; gap:6px">
+        <span><b>思考許容時間（秒）</b><span class="hint">AI が <code>&lt;think&gt;</code> で考え込める上限。超えると打ち切って結論生成に移ります。長くするほど1回の待ち時間が延びます（既定 90）。</span></span>
+        <span class="settings-inline">
+          <input id="settings-think-budget" type="number" min="10" max="1800" step="10" />
+          <button id="settings-think-budget-save">保存</button>
+          <span id="settings-think-budget-status" class="hint"></span>
+        </span>
+      </div>
       <label class="settings-row toggle">
         <input type="checkbox" id="settings-copilot" />
         <span>

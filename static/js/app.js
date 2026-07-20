@@ -1892,8 +1892,34 @@ async function openSettings() {
     await loadStatus();
   };
   await loadModelOptions();
+  await loadThinkBudget();
   await refreshCopilot();
   $("settings-modal").classList.remove("hidden");
+}
+
+// 思考許容時間（deep 思考の <think> 上限秒）。保存すると実行中のセッションにも即反映される
+// （セッションは作り直さないので会話文脈は保たれる）。
+async function loadThinkBudget() {
+  const inp = $("settings-think-budget");
+  if (!inp) return;
+  const s = await getJSON("/api/settings").catch(() => ({}));
+  if (s.think_budget_min != null) inp.min = s.think_budget_min;
+  if (s.think_budget_max != null) inp.max = s.think_budget_max;
+  if (s.think_budget_sec != null) inp.value = s.think_budget_sec;
+  $("settings-think-budget-status").textContent = "";
+}
+
+async function saveThinkBudget() {
+  const inp = $("settings-think-budget");
+  const st = $("settings-think-budget-status");
+  st.textContent = "保存中…";
+  try {
+    const r = await postJSON("/api/settings", { think_budget_sec: Number(inp.value) });
+    inp.value = r.think_budget_sec;
+    st.textContent = `✓ ${r.think_budget_sec} 秒にしました`;
+  } catch (e) {
+    st.textContent = "⚠ " + e.message;
+  }
 }
 
 // LM Studio の /v1/models からロード済みモデル一覧を取得して選択ドロップダウンに並べる。
@@ -2016,6 +2042,10 @@ function bindUI() {
   // 設定（モデル・Copilot）
   $("settings-btn").addEventListener("click", openSettings);
   $("settings-close").addEventListener("click", closeSettings);
+  $("settings-think-budget-save").addEventListener("click", saveThinkBudget);
+  $("settings-think-budget").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); saveThinkBudget(); }
+  });
   $("settings-copilot").addEventListener("change", toggleCopilot);
   $("copilot-open-btn").addEventListener("click", openCopilotBrowser);
   $("settings-modal").addEventListener("click", (e) => {
