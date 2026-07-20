@@ -1316,6 +1316,25 @@ function beginAssistantStream(el) {
     scrollMessages();
   };
 
+  // 思考（<think>）は本文と混ぜず、折りたたみに入れる（NWP と同じ見せ方・同じ .think-box）。
+  // 読みたい人だけ開ける。整形はしない（モデルが吐いたままを見せたい）。
+  const startedAt = performance.now();
+  let thinkBox = null;
+  const showThink = (think, done = false) => {
+    if (!think.trim()) return;
+    if (!thinkBox) {
+      thinkBox = document.createElement("details");
+      thinkBox.className = "think-box";
+      thinkBox.innerHTML = '<summary></summary><div class="think-body"></div>';
+      el.insertBefore(thinkBox, el.querySelector(".body"));
+    }
+    const sec = ((performance.now() - startedAt) / 1000).toFixed(1);
+    thinkBox.querySelector("summary").textContent =
+      done ? `💭 思考ログ（${think.length}文字・${sec}s）` : "💭 思考中…";
+    thinkBox.querySelector(".think-body").textContent = think;
+    if (done) thinkBox.open = false;
+  };
+
   showWait();
   paint();
   const timer = setInterval(() => { paint(); scrollMessages(); }, 200);
@@ -1324,9 +1343,12 @@ function beginAssistantStream(el) {
     onToken(t) {
       raw += t;
       wait.remove();  // 本文が出ている間は待機表示は不要
-      // ストリーミング中は生テキストのまま。トークンごとに Markdown を組み直すと
-      // 重いうえ、閉じていないフェンスが崩れて見える。整形は finish() で一度だけ行う。
-      renderPlain(el.querySelector(".body"), raw);
+      // 思考は折りたたみへ、本文だけを吹き出しに出す。ストリーミング中の本文は生テキスト
+      // のまま（トークンごとに Markdown を組み直すと重いうえ、閉じていないフェンスが
+      // 崩れて見える）。整形は finish() で一度だけ行う。
+      const { think, visible } = splitThink(raw);
+      showThink(think);
+      renderPlain(el.querySelector(".body"), visible);
       scrollMessages();
     },
     /** エンジンのインジケータ（⏳ Prefill / 🧠 Thinking...）を待機表示のフェーズに反映する。 */
@@ -1334,9 +1356,10 @@ function beginAssistantStream(el) {
     finish() {
       clearInterval(timer);
       wait.remove();
-      // 本文先頭の <think>...</think>（qwen 系が content に混ぜる形式）は表示・履歴・
-      // 差分反映の対象から外す。無ければ splitThink は素通しなので Code モードにも無害。
-      const { visible } = splitThink(raw);
+      // <think>...</think>（qwen 系が content に混ぜる形式）は表示・履歴・差分反映の
+      // 対象から外す。無ければ splitThink は素通しなので Code モードにも無害。
+      const { think, visible } = splitThink(raw);
+      showThink(think, true);   // 完了したら折りたたむ
       // 本文が出揃ったのでここで一度だけ Markdown へ
       if (visible.trim()) renderInto(el.querySelector(".body"), visible);
       return visible;
