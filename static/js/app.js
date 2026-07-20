@@ -3,7 +3,10 @@
 //   破壊操作は approval イベントで承認バーを出し、POST /api/approve で解放する。
 // Note モード: read 専用エージェント。応答の search/replace 提案を extractEdits で拾い、
 //   POST /api/patch → Monaco DiffEditor プレビュー → 人間のクリックで反映する（NWP 移植）。
-// モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code で出し分け。
+// Plan モード: read 専用エージェントに実行計画だけを立てさせる。```plan フェンスを左ペインの
+//   計画ビューに出し、承認したら Code モードへ切り替えてその計画を最初の指示として送る。
+// モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code /
+//   mode-plan で出し分け。
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
 import { available as mdAvailable, renderInto, renderPlain, setAssetBase } from "./markdown.js";
 import * as mdflow from "./mdflow.js";
@@ -36,9 +39,14 @@ const state = {
   sessionId: newSessionId(),  // このタブ/会話のセッション。並行セッションはサーバ側で分離される。
 
   // --- モード（統合シェル）---
-  mode: "code",             // "code" | "note"。GET /api/mode で起動時に取得
+  mode: "code",             // "code" | "note" | "plan"。GET /api/mode で起動時に取得
   features: {},             // /api/mode の features フラグ（UI 出し分けの判定に使う）
   copilotEnabled: false,    // Copilot 連携（features.copilot / /api/copilot で同期）
+
+  // --- Plan モード専用 ---
+  planText: "",             // 直近の実行計画（承認時に Code モードへ渡す本文）。
+                            // ファイルには書かない: 承認して実行したら役目が終わるものなので、
+                            // ワークスペースに計画ファイルの残骸を増やさない。
 
   // --- Note モード専用（NWP 移植）---
   history: [],              // chat history [{role, content}]（Note のみ。サーバ側サイドカーと同期）
@@ -54,6 +62,8 @@ const state = {
 };
 
 const isNote = () => state.mode === "note";
+const isPlan = () => state.mode === "plan";
+const isCode = () => state.mode === "code";
 
 // 拡張子 → Monaco 言語 ID
 const LANG = {
@@ -159,8 +169,11 @@ async function loadMode() {
   }
 }
 
+const MODES = ["code", "plan", "note"];  // モードバッジのクリックで循環する順
+const MODE_LABEL = { code: "🛠 Code", plan: "📋 Plan", note: "📝 Note" };
+
 function setModeState(m) {
-  state.mode = m.mode === "note" ? "note" : "code";
+  state.mode = MODES.includes(m.mode) ? m.mode : "code";  // 未知の値は Code に倒す
   state.features = m.features || {};
   if (Array.isArray(state.features.extract_exts)) {
     extractExts = new Set(state.features.extract_exts);
@@ -171,13 +184,14 @@ function setModeState(m) {
 /** モードに応じた見た目の唯一の反映点。body クラス・バッジ・エディタオプションを揃える。 */
 function applyModeUI() {
   const note = isNote();
-  document.body.classList.toggle("mode-note", note);
-  document.body.classList.toggle("mode-code", !note);
   const btn = $("mode-btn");
-  btn.textContent = note ? "📝 Note" : "🛠 Code";
-  btn.classList.toggle("mode-note", note);
-  btn.classList.toggle("mode-code", !note);
-  btn.title = `現在: ${note ? "Note" : "Code"} モード（クリックで切替）`;
+  for (const m of MODES) {
+    document.body.classList.toggle("mode-" + m, state.mode === m);
+    btn.classList.toggle("mode-" + m, state.mode === m);
+  }
+  btn.textContent = MODE_LABEL[state.mode];
+  btn.title = `現在: ${MODE_LABEL[state.mode]} モード（クリックで次のモードへ切替）`;
+  if (!isPlan()) closePlanView();  // 計画ビューは Plan モードの持ち物
   state.editor?.updateOptions({ glyphMargin: note });  // 付箋グリフの余白
   updateSelectionChip();  // #sel-info の文言と選択チップ（両モード共通）
   applyCopilotVisibility();  // Copilot バー・placeholder の /copilot 案内はトグル次第
@@ -196,9 +210,12 @@ function applyCopilotVisibility() {
   // オフのまま案内すると「書いてもエラーになる使い方」を教えることになる。
   // モードとトグルの両方で文言が変わるため、applyModeUI からもここを通す。
   const hint = on ? "\n（先頭に /copilot と書くと、エージェントを介さず Copilot に直接質問できます）" : "";
-  $("chat-input").placeholder = (isNote()
-    ? "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。"
-    : "例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。") + hint;
+  const PLACEHOLDER = {
+    note: "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。",
+    plan: "例）設定画面にダークモードの切替を足したい。まず調べて実行計画を立てて。",
+    code: "例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。",
+  };
+  $("chat-input").placeholder = PLACEHOLDER[state.mode] + hint;
 }
 
 /** Note モード固有の一時状態を捨てる（モード切替・ワークスペース切替時）。 */
@@ -218,12 +235,26 @@ function clearNoteState() {
   renderRefList();
 }
 
-async function toggleMode() {
-  if (state.streaming) { alert("⚠️ 実行中はモードを切り替えられません。中断してから切り替えてください。"); return; }
-  const next = isNote() ? "code" : "note";
-  const label = next === "note" ? "📝 Note" : "🛠 Code";
-  if (!confirm(`${label} モードに切り替えますか？\n（会話セッションはリセットされます）`)) return;
-  // 自動保存は Note でしか動かない。Note → Code へ抜けると予約が宙に浮くので、
+/** モードバッジのクリック: Code → Plan → Note → Code と循環する。
+    3モードになったのでトグルでは足りない。メニューを出すより、常時表示のバッジを
+    押すたびに次へ進む方が「今どのモードか」を見失わずに済む。 */
+async function cycleMode() {
+  const next = MODES[(MODES.indexOf(state.mode) + 1) % MODES.length];
+  await switchMode(next, { confirm: true });
+}
+
+/**
+ * モードを切り替える（サーバ側のセッションもリセットされる）。
+ * opts.confirm: 確認ダイアログを出す（承認フローからの自動切替では出さない）。
+ * opts.keepMessages: チャットログを残す（計画承認 → Code の流れは会話の続きとして見せたい）。
+ * 戻り値: 切り替えられたか。
+ */
+async function switchMode(next, opts = {}) {
+  if (state.streaming) { alert("⚠️ 実行中はモードを切り替えられません。中断してから切り替えてください。"); return false; }
+  if (next === state.mode) return true;
+  if (opts.confirm &&
+      !confirm(`${MODE_LABEL[next]} モードに切り替えますか？\n（会話セッションはリセットされます）`)) return false;
+  // 自動保存は Note でしか動かない。Note から抜けると予約が宙に浮くので、
   // まだ Note のうちに確定させる（タイマーもここで落ちる）。
   await flushAutosave();
   let m;
@@ -231,11 +262,12 @@ async function toggleMode() {
     m = await postJSON("/api/mode", { mode: next });
   } catch (e) {
     alert("⚠️ モードを切り替えられません: " + e.message);
-    return;
+    return false;
   }
   setModeState(m);
-  // 旧モードの会話表示・承認バーを持ち越さない（サーバ側もセッションリセット済み）
-  $("messages").innerHTML = "";
+  // 旧モードの会話表示・承認バーを持ち越さない（サーバ側もセッションリセット済み）。
+  // 計画の承認から Code へ移るときだけはログを残す（何を承認した流れなのかが読めるように）。
+  if (!opts.keepMessages) $("messages").innerHTML = "";
   $("approval").classList.add("hidden");
   $("approval").innerHTML = "";
   state.assistantEl = null;
@@ -248,9 +280,13 @@ async function toggleMode() {
     await loadHistory();  // Note の履歴はワークスペースのサイドカーから復元
     if (state.currentFile) { await loadNotes(); await loadRefs(); }
     addMessage("system", "📝 Note モードに切り替えました（読み取り専用エージェント・クリック反映）。");
+  } else if (isPlan()) {
+    addMessage("system", "📋 Plan モードに切り替えました"
+      + "（調べて実行計画を立てるだけ。承認するまでファイルは変更されません）。");
   } else {
     addMessage("system", "🛠 Code モードに切り替えました（自律エージェント・破壊操作は承認制）。");
   }
+  return true;
 }
 
 // ---- 会話履歴の永続化（Note モードのみ） -------------------------------------
@@ -936,9 +972,9 @@ function getSelection() {
 
 /** 選択が無いときの #sel-info の文言（モードで違う）。applyModeUI と共用。 */
 function selInfoIdleText() {
-  return isNote()
-    ? "テキストを選択してAIに送れます"
-    : "エージェントがファイルを直接編集します（破壊操作は承認制）。";
+  if (isNote()) return "テキストを選択してAIに送れます";
+  if (isPlan()) return "計画モード：エージェントは調査だけを行い、ファイルは変更しません。";
+  return "エージェントがファイルを直接編集します（破壊操作は承認制）。";
 }
 
 // 選択テキストの添付は両モード共通。Code モードでも「この関数を直して」の「この」を
@@ -1430,12 +1466,22 @@ async function sendChat() {
   if (!msg) return;
 
   const note = isNote();
+  const plan = isPlan();
   // 反映先の追跡は「送信時の選択範囲」。以降の編集にデコレーションで追随する。
   const applyTarget = note ? trackApplyTarget() : null;
-  const body = note
-    ? await buildNotePayload(msg)
-    : { message: msg, session_id: state.sessionId, current_file: state.currentFile,
-        selection: getSelection() };
+  let body;
+  if (note) {
+    body = await buildNotePayload(msg);
+  } else if (plan) {
+    // Plan もサーバ側で note_prompts.build_user_text を通るので、開いているファイルは
+    // 本文込みで渡す（未保存の編集を前提にした計画を立てさせるため）。
+    body = { message: msg, session_id: state.sessionId, selection: getSelection(),
+             current_file: state.currentFile || "",
+             current_content: state.currentFile ? state.editor.getValue() : "" };
+  } else {
+    body = { message: msg, session_id: state.sessionId, current_file: state.currentFile,
+             selection: getSelection() };
+  }
 
   input.value = "";
   addMessage("user", msg);
@@ -1495,6 +1541,24 @@ async function sendChat() {
   const assistantEl = state.assistantEl;  // finishStream が空箱を畳む前に確保
   const visible = finishStream();
   if (note) noteAfterTurn(assistantEl, msg, visible, applyTarget, cancelled);
+  else if (plan && !cancelled) planAfterTurn(visible);
+}
+
+/** ```plan フェンスの中身を取り出す。無ければ null。 */
+function extractPlan(text) {
+  const m = /```plan[^\n]*\n([\s\S]*?)```/.exec(text || "");
+  return m ? m[1].trim() : null;
+}
+
+/** Plan モードのターン確定処理: 計画が出ていれば左ペインの承認ビューへ載せる。 */
+function planAfterTurn(visible) {
+  // フェンスが基本形。ただしフェンスを付け忘れるモデルもあるので、番号付きリストが
+  // 立っていれば本文全体を計画とみなす（承認前に必ず人が読むので、拾いすぎても害はない。
+  // 逆に取り逃がすと「計画は出たのに承認ボタンが出ない」で機能が死んで見える）。
+  let planText = extractPlan(visible);
+  if (!planText && /^\s*1[.)]\s/m.test(visible || "")) planText = (visible || "").trim();
+  if (!planText) return;
+  openPlanView(planText);
 }
 
 /** Note モードのターン確定処理: 履歴の永続化と差分反映トリガー（NWP 移植）。 */
@@ -1640,9 +1704,9 @@ async function onFilesChanged(paths) {
 }
 
 async function interrupt() {
-  // Note セッションは SessionManager 管理外（単一セッション）。fetch の中断で
+  // Note / Plan セッションは SessionManager 管理外（単一セッション）。fetch の中断で
   // SSE ジェネレータの finally が協調キャンセルを送るので、それに任せる。
-  if (!isNote()) await postJSON("/api/interrupt", { session_id: state.sessionId }).catch(() => {});
+  if (isCode()) await postJSON("/api/interrupt", { session_id: state.sessionId }).catch(() => {});
   if (state.abort) state.abort.abort();
 }
 
@@ -1827,6 +1891,46 @@ function closeDiffPreview() {
     diffEditor.setModel(null);
     if (models) { models.original.dispose(); models.modified.dispose(); }
   }
+}
+
+// --- 実行計画ビュー オーバーレイ（Plan モード） -------------------------------
+// 「承認付きの事前計画」の承認 UI。エージェント側には書き込みツールを提示していないので、
+// ここで承認するまでファイルは1字も変わらない（＝この画面が唯一の実行への入口）。
+
+function openPlanView(planText) {
+  state.planText = planText;
+  renderInto($("plan-body"), planText);   // 計画は Markdown（番号付きリスト）で書かせている
+  $("plan-label").textContent = "実行計画（承認するまでファイルは変更されません）";
+  $("plan-overlay").classList.remove("hidden");
+}
+
+function closePlanView() {
+  $("plan-overlay").classList.add("hidden");
+  $("plan-body").innerHTML = "";
+  state.planText = "";  // 計画はこのビューの持ち物。閉じたら残さない
+}
+
+/** [✓ この計画で実行]: Code モードへ切り替え、計画をそのまま最初の指示として送る。 */
+async function approvePlan() {
+  const planText = state.planText;  // closePlanView が消すので先に控える
+  if (!planText) return;
+  closePlanView();
+  // 確認ダイアログは出さない（このボタン自体が確認であり、二段確認は承認の意味を薄める）。
+  const ok = await switchMode("code", { keepMessages: true });
+  if (!ok) { openPlanView(planText); return; }  // 切替に失敗したら計画は消さずに戻す
+  addMessage("system", "✓ 計画を承認しました。🛠 Code モードで実行します。");
+  // 送信は通常のチャット経路に乗せる（ユーザー発言として履歴にも残り、中断もできる）。
+  $("chat-input").value =
+    "以下の実行計画を承認しました。この計画のとおりに実装してください。"
+    + "計画から外れる変更が必要になったら、実行する前に知らせてください。\n\n" + planText;
+  await sendChat();
+}
+
+/** [✕ 修正を依頼]: 計画は保持したままチャットへ戻る（Plan モードのまま次のターン）。 */
+function rejectPlan() {
+  $("plan-overlay").classList.add("hidden");  // planText は残す（練り直しの土台）
+  addMessage("system", "✕ 計画の修正を依頼します。どこをどう直したいかチャットに書いてください。");
+  $("chat-input").focus();
 }
 
 // ---- 作業フォルダ選択（フォルダ移動） ----
@@ -2114,8 +2218,11 @@ function bindUI() {
   bindMdflowUI();
   $("refresh-btn").addEventListener("click", () => loadFileList());
   $("file-search").addEventListener("input", onSearch);
-  // モードバッジ（📝 Note / 🛠 Code）
-  $("mode-btn").addEventListener("click", toggleMode);
+  // モードバッジ（🛠 Code → 📋 Plan → 📝 Note の循環）
+  $("mode-btn").addEventListener("click", cycleMode);
+  // 実行計画の承認 / 修正依頼（Plan モード）
+  $("plan-approve").addEventListener("click", approvePlan);
+  $("plan-reject").addEventListener("click", rejectPlan);
   // Note モード（付箋・履歴・関連ファイル・差分プレビュー）
   $("note-btn").addEventListener("click", addNote);
   $("chat-clear-btn").addEventListener("click", clearHistory);
@@ -2183,6 +2290,8 @@ function bindUI() {
     else if (e.key === "Escape" && !$("pick-modal").classList.contains("hidden")) closePickModal();
     else if (e.key === "Escape" && !$("settings-modal").classList.contains("hidden")) closeSettings();
     else if (e.key === "Escape" && !$("diff-overlay").classList.contains("hidden")) closeDiffPreview();
+    // Esc は「修正を依頼」と同じ扱い（計画は捨てずに引っ込めるだけ）
+    else if (e.key === "Escape" && !$("plan-overlay").classList.contains("hidden")) rejectPlan();
   });
 
   // 別ウィンドウへ移るときに保留中の自動保存を確定させる（Note モードのみ動く）。

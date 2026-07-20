@@ -136,6 +136,49 @@ NOTE_SYSTEM_SUFFIX = (
 )
 
 
+#: Plan モードで LLM に提示する調査系ツール。pixie_core.READONLY_TOOLS（副作用なしと
+#: AWP が保証している集合）から、この用途に無関係な manga_identify_cover を除いたもの。
+#: リテラルで持つのは、bootstrap 前（＝pixie_core を import する前）に参照できる形にして
+#: 「書き込みツールが混ざっていないこと」をテストで静的に検証できるようにするため
+#: （READONLY_TOOLS の部分集合であることもテストで突き合わせる）。
+PLAN_TOOLS = frozenset({
+    "get_cwd", "get_file_dir", "list_directory", "read_file",
+    "grep_search", "get_code_outline", "analyze_file",
+    "query_whiteboard", "inspect_tool", "view_tree",
+    "research_code_paths",
+    # 委譲サブエージェントも読み取り専用（pixie_core.DELEGATE_SUBAGENT_TOOLS）なので
+    # 計画立案の調査に使ってよい。
+    "delegate_research",
+})
+
+#: pixie_core の base システムプロンプト末尾に足す静的指示（Plan モード）。セッション内不変。
+#: 計画本文を ```plan フェンスで囲ませるのは、フロントが「計画」と「調査の説明」を確実に
+#: 切り分けて左ペインの承認ビューへ出すため（見出しや箇条書きの体裁に頼ると取り違える）。
+PLAN_SYSTEM_SUFFIX = """
+# 計画モード（最重要・このセクションが他の指示より優先される）
+あなたはコードベースを調べて「実行計画」を立てる担当です。実装は行いません。
+
+守ること:
+- ファイルの作成・変更・削除、コマンド実行は一切できない（そのためのツールは提示されていない）。
+  「修正しました」のような実行済みの言い方をせず、これから何をするかだけを書く。
+- まず read_file / grep_search / list_directory / view_tree などで、変更対象と影響範囲を実際に確認する。
+  推測でパスを書かない。実在を確認できたファイルだけを計画に載せる。
+- 調べ終わったら、日本語の番号付きリストで実行手順を書く。1手順＝1つのまとまった作業とし、
+  「どのファイルを」「どう変えるか」「なぜそうするか」が読んで分かる粒度にする。
+  最後の手順には確認方法（テスト・動作確認）を入れる。
+- 判断が要る点・前提が不確かな点があれば、計画の後に「確認したいこと」として短く挙げる。
+
+出力の形式（重要・アプリはこのブロックだけを取り出して承認ボタンと一緒に表示する）:
+最終的な計画は必ず ```plan フェンスで囲む。フェンスの中は計画本文だけにし、挨拶や調査ログを
+混ぜない。1回の返答にフェンスは1つだけ。
+
+```plan
+1. …（手順）
+2. …（手順）
+```
+"""
+
+
 def _tc_name(tc) -> str:
     if isinstance(tc, dict):
         fn = tc.get("function") or {}
@@ -235,7 +278,7 @@ def apply_think_budget(seconds, sessions=()) -> int:
         return v
     v = _core.set_think_budget(v)
     timeout = stream_timeout_sec(v)
-    for s in (*sessions, _note_session):
+    for s in (*sessions, _note_session, _plan_session):
         if s is not None:
             s.set_stream_timeout(timeout)
     return v
@@ -442,7 +485,16 @@ class NoteSession:
     - **イベント契約**: CWP フロントの {"type": "token"/"status"/"error"} 形式で emit する
       （NWP の {"t"}/{"s"} 形式ではない）。
     - **単一セッション**: ワークスペース1本＝会話1本（get_note_session / reset_note_session）。
+
+    ツール集合とシステム指示はクラス属性 TOOLS / SYSTEM_SUFFIX で持つ。読み取り専用
+    プロファイルは Note 以外にも要る（Plan モード）ので、差し替え点をここ1箇所にまとめ、
+    PlanSession はこのクラスを継承して2つの属性だけを差し替える。
     """
+
+    #: LLM に提示する固定ツール集合（サブクラスで差し替える）。
+    TOOLS = NOTE_TOOLS
+    #: base システムプロンプト末尾へ静的に足す指示（サブクラスで差し替える）。
+    SYSTEM_SUFFIX = NOTE_SYSTEM_SUFFIX
 
     def __init__(self, core, server: dict, workspace: str, copilot_enabled: bool):
         self._core = core
@@ -451,7 +503,7 @@ class NoteSession:
         self._engine = core.create_engine(
             server, workspace,
             tool_set=self._allowed,
-            system_suffix=NOTE_SYSTEM_SUFFIX,
+            system_suffix=self.SYSTEM_SUFFIX,
         )
         self.workspace = getattr(self._engine, "workspace", workspace)
         self.model_name = self._engine.model_name
@@ -466,9 +518,9 @@ class NoteSession:
         self._cancel = False
         self._classifier = _StreamClassifier()
 
-    @staticmethod
-    def _allowed_set(copilot_enabled: bool) -> frozenset:
-        return frozenset(NOTE_TOOLS | ({"ask_copilot"} if copilot_enabled else set()))
+    @classmethod
+    def _allowed_set(cls, copilot_enabled: bool) -> frozenset:
+        return frozenset(cls.TOOLS | ({"ask_copilot"} if copilot_enabled else set()))
 
     def seed_history(self, messages: list[dict]) -> None:
         """サイドカー保持の履歴（.pixie_chat.json 由来）で LLM 文脈をシードする（初回のみ）。
@@ -514,8 +566,8 @@ class NoteSession:
         """許可外ツールを即時却下する。ブロッキング待機はしない。
 
         fixed_tool_set が正しく効いていれば許可外の tool_call は来ないはずだが、
-        「書き込みツールを一切実行させない」という Note モードの安全設計の最終層として残す
-        （safe_path・read 系限定スキーマと同じ多層防御の一枚）。"""
+        「書き込みツールを一切実行させない」という読み取り専用モード（Note / Plan）の
+        安全設計の最終層として残す（safe_path・read 系限定スキーマと同じ多層防御の一枚）。"""
         if self._cancel:
             return ([], None)
         approved, rejected = [], []
@@ -524,12 +576,28 @@ class NoteSession:
         for tc in rejected:
             self._emit_event({"type": "status",
                               "text": f"⚠️ 許可されていないツール '{_tc_name(tc)}' を却下しました"
-                                      "（Note モードは読み取り専用）"})
+                                      "（このモードは読み取り専用）"})
         return (approved, None)
 
     def cancel(self) -> None:
         """協調キャンセル。次の output_fn / interactive_fn 呼び出しで CancelTurn が飛ぶ。"""
         self._cancel = True
+
+
+class PlanSession(NoteSession):
+    """Plan モード1会話分の埋め込みエンジン（読み取り専用プロファイル）。
+
+    NoteSession との違いはツール集合とシステム指示だけなので継承で差し替える
+    （承認 UI を持たないこと・_guard で許可外ツールを即時却下することは同じ性質であり、
+    二重実装すると片方だけ直る事故になる）。「承認するまでファイルは1字も変えない」は
+    ここで担保する: 書き込みツールをそもそも LLM に提示しないので、承認する対象が無い。
+
+    seed_history / set_copilot も継承するが、計画の会話はサイドカーに永続化しない
+    （計画はその場のもので、承認したら Code モードの最初の指示になって役目を終える）。
+    """
+
+    TOOLS = PLAN_TOOLS
+    SYSTEM_SUFFIX = PLAN_SYSTEM_SUFFIX
 
 
 # --- Note モードの単一セッション管理（ワークスペース1本＝会話1本） ---
@@ -554,5 +622,32 @@ def reset_note_session() -> None:
     global _note_session
     s = _note_session
     _note_session = None
+    if s is not None:
+        s.cancel()
+
+
+# --- Plan モードの単一セッション管理（Note と同じく会話1本） ---
+_plan_session: PlanSession | None = None
+
+
+def get_plan_session() -> PlanSession:
+    """現在のワークスペース・アクティブサーバに束縛した Plan セッションを返す（無ければ作る）。"""
+    global _plan_session
+    if _plan_session is None:
+        if _core is None:
+            raise RuntimeError("pixie_core が初期化されていません（bootstrap 未実行/失敗）")
+        _plan_session = PlanSession(_core, config.active_server(), str(config.WORKSPACE),
+                                    settings.copilot_enabled)
+    return _plan_session
+
+
+def reset_plan_session() -> None:
+    """Plan セッションを破棄する。契機は Note と同じ（ワークスペース切替・モード切替等）。
+
+    特にモード切替では必ず捨てる: 承認して Code へ移ったあと Plan へ戻ったとき、
+    実装済みの前提を引きずった計画を立てさせないため。"""
+    global _plan_session
+    s = _plan_session
+    _plan_session = None
     if s is not None:
         s.cancel()

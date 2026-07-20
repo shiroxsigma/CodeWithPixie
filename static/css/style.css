@@ -14,6 +14,7 @@
   --accent2: #5ad1c9;
   --border: #3a3a52;
   --danger: #ff6b8a;
+  --plan: #e0b341;   /* Plan モード（計画・承認待ち）の識別色 */
 }
 
 * { box-sizing: border-box; }
@@ -114,6 +115,22 @@ button:active { transform: translateY(1px); }
 }
 #diff-bar .spacer { flex: 1; }
 #diff-editor { flex: 1; min-height: 0; }
+
+/* --- 実行計画オーバーレイ（Plan モード）---
+   差分プレビューと同じ「左ペインを覆う」パターン。計画を読みながら承認/修正依頼を
+   決めるので、エディタやプレビューと同居させず前面を占有させる。 */
+#plan-overlay {
+  position: absolute; inset: 0; z-index: 21;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+}
+#plan-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: var(--bg2); border-bottom: 1px solid var(--border);
+  font-size: 12px; color: var(--muted);
+}
+#plan-bar .spacer { flex: 1; }
+#plan-body { flex: 1; min-height: 0; overflow: auto; padding: 14px 18px; font-size: 14px; line-height: 1.75; }
 #left-toolbar {
   display: flex; align-items: center; gap: 12px;
   padding: 6px 10px; background: var(--bg2); border-top: 1px solid var(--border);
@@ -490,13 +507,17 @@ details.mdflow-mapping pre {
 .pixie-note-line { background: rgba(139,124,255,0.10); }
 
 /* ==== モード出し分け（統合シェル Stage C） ====================================
-   統合アプリ（CodeWithPixie）は起動時と切替時に body へ mode-note / mode-code を
-   付与し、.note-only / .code-only の要素を表示・非表示する。
-   NWP には .note-only / .code-only 要素も body.mode-* クラスも無いため影響しない。 */
-body.mode-code .note-only { display: none !important; }
-body.mode-note .code-only { display: none !important; }
+   統合アプリ（CodeWithPixie）は起動時と切替時に body へ mode-note / mode-code /
+   mode-plan を付与し、.note-only / .code-only / .plan-only の要素を表示・非表示する。
+   「そのモードでだけ出す」を素直に書くと3モード×3クラスの否定が要るので、
+   「自分のモード以外では隠す」形で列挙する。
+   NWP には .*-only 要素も body.mode-* クラスも無いため影響しない。 */
+body.mode-code .note-only, body.mode-plan .note-only { display: none !important; }
+body.mode-note .code-only, body.mode-plan .code-only { display: none !important; }
+body.mode-note .plan-only, body.mode-code .plan-only { display: none !important; }
 
-/* トップバーのモードバッジ（クリックで切替） */
+/* トップバーのモードバッジ（クリックで循環切替） */
 #mode-btn { padding: 3px 12px; font-size: 12px; font-weight: 700; border-radius: 12px; }
 #mode-btn.mode-note { border-color: var(--accent2); color: var(--accent2); }
 #mode-btn.mode-code { border-color: var(--accent); color: var(--accent); }
+#mode-btn.mode-plan { border-color: var(--plan); color: var(--plan); }

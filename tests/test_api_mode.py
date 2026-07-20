@@ -34,7 +34,7 @@ def test_mode_default_is_code(workspace):
     assert r.status_code == 200
     body = r.json()
     assert body["mode"] == "code"
-    assert set(body["modes"]) == {"note", "code"}
+    assert set(body["modes"]) == {"note", "code", "plan"}  # plan の詳細は test_plan_mode.py
     assert body["features"]["approval"] is True
     assert body["features"]["edit_blocks"] is False
     assert body["features"]["sessions"] == "multi"

@@ -43,6 +43,19 @@
         <div id="diff-editor"></div>
       </div>
 
+      <!-- 実行計画（Plan モード）。承認するまでファイルは1字も変わらない（エージェントに
+           書き込みツールを提示していない）。承認すると Code モードへ切り替えて、この計画を
+           最初の指示として実行させる。#left-pane を覆うのは差分プレビューと同じ理由。 -->
+      <div id="plan-overlay" class="hidden">
+        <div id="plan-bar">
+          <span id="plan-label">実行計画（承認するまでファイルは変更されません）</span>
+          <span class="spacer"></span>
+          <button id="plan-approve" class="apply-btn">✓ この計画で実行</button>
+          <button id="plan-reject">✕ 修正を依頼</button>
+        </div>
+        <div id="plan-body" class="md"></div>
+      </div>
+
       <div id="left-toolbar">
         <button id="note-btn" class="note-only" title="選択行に付箋を貼る">📌 付箋</button>
         <button id="preview-btn" title="Markdown プレビューを表示 (Ctrl+Shift+P)">👁 プレビュー</button>

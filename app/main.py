@@ -668,6 +668,34 @@ def _note_chat(req: ChatReq) -> StreamingResponse:
     return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit))
 
 
+def _plan_chat(req: ChatReq) -> StreamingResponse:
+    """Plan モードのチャット経路（承認付きの事前計画）。
+
+    Note モードと同じ「読み取り専用の単一セッション」構造だが、履歴サイドカーは使わない
+    （計画は承認して Code モードへ渡した時点で役目を終わるもので、ワークスペースに
+    残す性質のものではない）。ファイル素材の組み立ては note_prompts.build_user_text を
+    共用する — あれは「現在ファイル・参考ファイル・選択範囲を予算内でユーザーテキストへ
+    載せる」汎用処理で、Note 固有の指示は system_suffix 側にあるため。
+    """
+    _require_manager()  # bootstrap 済み（= pixie_core 初期化済み）の確認
+    try:
+        sess = engine_adapter.get_plan_session()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    sess.set_copilot(settings.copilot_enabled)
+    # Plan も単一セッション直列。実行中なら 409（他モードと同じフロント契約）。
+    if not sess.busy.acquire(blocking=False):
+        raise HTTPException(409, "Plan セッションは別のターンを実行中です。")
+
+    context = [{"path": c.path, "content": c.content}
+               for c in req.context_files + req.ref_texts]
+    user_text = note_prompts.build_user_text(
+        req.message, req.selection, context,
+        req.current_file or "", req.current_content, req.attach_files)
+
+    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit))
+
+
 @app.post("/api/chat")
 async def api_chat(req: ChatReq):
     if not req.message.strip():
@@ -676,8 +704,11 @@ async def api_chat(req: ChatReq):
     msg = req.message.strip()
     if msg.lower().startswith("/copilot"):
         return _copilot_direct(msg[len("/copilot"):].strip(), req)
-    if mode.current_mode() == "note":
+    current = mode.current_mode()
+    if current == "note":
         return _note_chat(req)
+    if current == "plan":
+        return _plan_chat(req)
 
     manager = _require_manager()
     sess = manager.get_or_create(_valid_sid(req.session_id))
@@ -737,6 +768,7 @@ app.include_router(mode.router)
 
 # モード切替時に旧モードの LLM 文脈を持ち越さない（mode.py の POST /api/mode が呼ぶ）。
 mode.register_reset_hook(engine_adapter.reset_note_session)
+mode.register_reset_hook(engine_adapter.reset_plan_session)
 mode.register_reset_hook(lambda: _manager.clear() if _manager is not None else None)
 
 

@@ -1,4 +1,4 @@
-"""モード切替（Note / Code）と最終使用モードの永続化（Stage C）。
+"""モード切替（Note / Code / Plan）と最終使用モードの永続化（Stage C）。
 
 モードは「そのワークスペースで前回使っていたもの」なので、アプリ設定ではなく
 ワークスペースのサイドカー `.pixie_workspace.json` に `{"last_mode": "note"}` として
@@ -19,7 +19,7 @@ from . import config, extract
 from .config import settings
 from .note_api import _load_sidecar, _save_sidecar
 
-VALID_MODES = ("code", "note")
+VALID_MODES = ("code", "note", "plan")
 SIDECAR_NAME = ".pixie_workspace.json"
 
 router = APIRouter()
@@ -56,13 +56,22 @@ def _save_last_mode(mode: str) -> None:
 
 
 def _features(mode: str) -> dict:
-    """フロント（C-3）がモード別 UI を出し分けるための機能フラグ。"""
+    """フロント（C-3）がモード別 UI を出し分けるための機能フラグ。
+
+    Plan モードは「承認付きの事前計画」: エージェントには読み取りツールしか提示しないので
+    承認バーも編集ブロックも要らない（承認するのはツール1回ではなく計画そのもので、
+    それは左ペインの計画ビューが担当する）。writes=False は「このモードのエージェントは
+    ファイルを変更しない」という約束で、フロントの文言・注意書きの根拠になる。
+    """
     note = mode == "note"
+    plan = mode == "plan"
     return {
-        "approval": not note,          # ツール実行の承認バー（Code のみ）
+        "approval": not (note or plan),  # ツール実行の承認バー（Code のみ）
         "edit_blocks": note,           # search/replace → 差分プレビュー → クリック反映（Note のみ）
         "mdflow": note,                # mdflow プレビュー・警告（Note のみ）
-        "sessions": "single" if note else "multi",  # チャットセッションの方針
+        "plan_view": plan,             # 左ペインの計画ビュー（承認/修正依頼のボタン）
+        "writes": not (note or plan),  # エージェントがファイルを書き換えうるか（Code のみ）
+        "sessions": "multi" if not (note or plan) else "single",  # チャットセッションの方針
         "copilot": settings.copilot_enabled,
         # Office 抽出可能な形式（フロントがハードコードしなくて済むよう公開）
         "extract_exts": sorted(extract.SUPPORTED_EXTS),
@@ -95,7 +104,7 @@ def api_mode_set(req: ModeReq):
     """モードを切り替える: サイドカー更新 + 該当エンジンセッションのリセット。"""
     mode = (req.mode or "").strip().lower()
     if mode not in VALID_MODES:
-        raise HTTPException(400, f"不明なモードです: {req.mode}（note | code）")
+        raise HTTPException(400, f"不明なモードです: {req.mode}（note | code | plan）")
     changed = mode != current_mode()
     _save_last_mode(mode)
     if changed:
