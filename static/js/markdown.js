@@ -30,6 +30,14 @@ if (mermaid) {
     // securityLevel はラベルに埋め込まれた HTML の扱いを決める。strict なら
     // DOMPurify が onerror 等のハンドラを剥がす。AI の生成物を描く以上ここは緩められない。
     securityLevel: "strict",
+    // ラベルは HTML（<foreignObject>）でなく SVG の <text> で描かせる。foreignObject を
+    // 含む SVG を canvas に描くと canvas が汚染扱いになり、PNG 書き出し（🖼 保存 / 📋 コピー）
+    // が "Tainted canvases may not be exported" で全滅するため。見た目の差はラベルの
+    // 折返し規則が変わる程度。トップレベルの htmlLabels は旧形式だが、図種別ごとの
+    // キーを知らない版への保険として両方置く。
+    htmlLabels: false,
+    flowchart: { htmlLabels: false },
+    class: { htmlLabels: false },
   });
 }
 
@@ -155,9 +163,14 @@ function buildExportBar(box, id) {
     } finally {
       btn.disabled = false;
       btn.textContent = orig;
-      // 結果表示は数秒で消す（図の上に貼り付いたままにしない）。
+      // 結果表示は数秒で消す（図の上に貼り付いたままにしない）。文言と一緒に
+      // error クラスも戻す（残すと空のバーが赤いままになる）。
       const shown = status.textContent;
-      setTimeout(() => { if (status.textContent === shown) status.textContent = ""; }, 6000);
+      setTimeout(() => {
+        if (status.textContent !== shown) return;
+        status.textContent = "";
+        status.className = "mermaid-tools-status";
+      }, 6000);
     }
   };
 
