@@ -38,6 +38,79 @@ APPROVAL_SKIP = frozenset({
 _INDICATOR_HINTS = ("🧠", "⏳", "Prefill", "Thinking...")
 _STATUS_PREFIXES = ("🔧", "✅", "⚠️", "🕊️", "🔍", "[System]", "[システム", "[Warning]", "[警告]")
 
+def _looks_like_status_line(line: str) -> bool:
+    """行頭からの文字列がツール/システム行かどうか（本文と区別する）。"""
+    t = line.lstrip()
+    return bool(t) and (t.startswith(_STATUS_PREFIXES) or re.match(r"^\[\d+\]", t) is not None)
+
+
+class _StreamClassifier:
+    """engine の output_fn が渡すチャンク列を、本文(token)とステータス行(status)に分ける。
+
+    **行単位**で判定するのが要点。以前はチャンク単位で判定しており、
+      1. 改行だけのチャンク（"\\n" は多くのモデルで単独トークン）が「空白のみ」として
+         捨てられ、本文の改行が消えた
+      2. 行の途中のチャンクが status プレフィックスに誤爆し、本文から丸ごと消えた
+    という2つの欠落が起きていた。どちらも ```search ブロックを壊すため、差分反映が
+    「見つからない」か、ファジーマッチで**別の場所に当たって差分の中身がおかしくなる**。
+    本文は1文字も落とさないことが編集プロトコルの前提なので、ここは可逆であること。
+
+    使い方: ターンごとに1つ作り、feed() の戻り（(種別, テキスト) の並び）をそのまま
+    emit する。ターン終了時に flush() で組み立て途中のステータス行を出し切る。
+    """
+
+    def __init__(self):
+        self._at_line_start = True   # 次の文字が行頭か（status 判定は行頭でのみ行う）
+        self._pending = None         # 組み立て中のステータス行（改行が来たら確定）
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        s = _ANSI.sub("", text)
+        # インジケータ（"\r  🧠 Thinking...  " のような端末の行上書き）は本文ではない。
+        # 判定に生の "\r" を使う: これがあるチャンクだけが端末制御で、本文の "Thinking..."
+        # という語を誤ってステータスに送らないための識別子になる。
+        if "\r" in text:
+            cleaned = s.replace("\r", "").strip()
+            if cleaned and any(h in cleaned for h in _INDICATOR_HINTS):
+                return [("status", cleaned)]
+            s = s.replace("\r", "")
+        while s:
+            if self._pending is not None:      # ステータス行を組み立て中
+                nl = s.find("\n")
+                if nl < 0:
+                    self._pending += s
+                    break
+                self._pending += s[:nl]
+                out.append(("status", self._pending.strip()))
+                self._pending, self._at_line_start = None, True
+                s = s[nl + 1:]
+                continue
+            if self._at_line_start:
+                # "AI: " は engine が各プランステップの本文頭に付ける飾り。行頭でのみ剥がす。
+                if s.startswith("AI: "):
+                    s = s[4:]
+                    continue
+                if s in ("AI:", "AI"):         # 分割されて届いた場合
+                    break
+                if _looks_like_status_line(s):
+                    self._pending = ""         # 次のループでステータス経路へ
+                    continue
+            nl = s.find("\n")
+            piece, s = (s, "") if nl < 0 else (s[:nl + 1], s[nl + 1:])
+            self._at_line_start = piece.endswith("\n")
+            out.append(("token", piece))       # 空白のみでも落とさない（改行は本文の一部）
+        return out
+
+    def flush(self) -> list[tuple[str, str]]:
+        """改行で終わらなかったステータス行を出し切る（ターン終了時）。"""
+        if self._pending:
+            line, self._pending = self._pending.strip(), None
+            if line:
+                return [("status", line)]
+        self._pending = None
+        return []
+
+
 #: Note モードで LLM に提示する read 系ツール（ask_copilot は設定で加わる）。NWP から移植。
 NOTE_TOOLS = frozenset({"list_workspace", "read_note", "grep_workspace", "describe_flows"})
 
@@ -258,11 +331,13 @@ class AgentSession:
         # ターン単位の状態。
         self._emit_event = None
         self._cancel = False
+        self._classifier = _StreamClassifier()
 
     # ---- ターン実行（worker スレッドで呼ばれる） ----
     def run_turn(self, message: str, emit_event, approval_timeout: float = 0.0) -> None:
         self._emit_event = emit_event
         self._cancel = False
+        self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         self._approval_timeout = approval_timeout if approval_timeout and approval_timeout > 0 else None
 
         before = files.snapshot_mtimes()
@@ -274,6 +349,7 @@ class AgentSession:
         except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
             emit_event({"type": "error", "text": f"{type(e).__name__}: {e}"})
         finally:
+            self._emit_flush()
             changed = files.diff_changed(before)
             if changed:
                 emit_event({"type": "files_changed", "paths": changed})
@@ -284,32 +360,13 @@ class AgentSession:
             raise self._CancelTurn()
         if not text:
             return
-        s = _ANSI.sub("", text).replace("\r", "")
-        if not s or not s.strip():
-            return
-        stripped = s.strip()
+        for kind, out in self._classifier.feed(text):
+            self._emit_event({"type": "token" if kind == "token" else "status", "text": out})
 
-        # "AI: " プレフィックスは engine が各プランステップの本文頭に付ける（ターン毎ではない）。
-        # 単独ピースなら捨て、先頭に付いていれば毎回剥がす。
-        if stripped == "AI:":
-            return
-        if s.startswith("AI: "):
-            s = s[4:]
-            stripped = s.strip()
-            if not stripped:
-                return
-
-        # 思考インジケータ（🧠 Thinking... 等）は status へ。
-        if any(h in stripped for h in _INDICATOR_HINTS):
-            self._emit_event({"type": "status", "text": stripped})
-            return
-        # ツール/システム行は status へ。
-        if stripped.startswith(_STATUS_PREFIXES) or re.match(r"^\[\d+\]", stripped):
-            self._emit_event({"type": "status", "text": stripped})
-            return
-
-        # 本文トークン（整形を壊さないよう s は strip しない）。
-        self._emit_event({"type": "token", "text": s})
+    def _emit_flush(self) -> None:
+        """ターン終了時に分類器の残り（改行で終わらなかったステータス行）を出す。"""
+        for kind, out in self._classifier.flush():
+            self._emit_event({"type": "token" if kind == "token" else "status", "text": out})
 
     # ---- interactive_fn: ツール実行直前の承認 ----
     def _approve(self, tool_calls, content):
@@ -407,6 +464,7 @@ class NoteSession:
         # ターン単位の状態。
         self._emit_event = None
         self._cancel = False
+        self._classifier = _StreamClassifier()
 
     @staticmethod
     def _allowed_set(copilot_enabled: bool) -> frozenset:
@@ -432,6 +490,7 @@ class NoteSession:
     def run_turn(self, user_text: str, emit_event) -> None:
         self._emit_event = emit_event
         self._cancel = False
+        self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         try:
             self._engine.run_turn(
                 user_text,
@@ -443,9 +502,12 @@ class NoteSession:
             emit_event({"type": "status", "text": "⏹ 中断しました。"})
         except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
             emit_event({"type": "error", "text": f"{type(e).__name__}: {e}"})
+        finally:
+            self._emit_flush()  # 改行で終わらなかったステータス行を出し切る
 
     # ---- output_fn: engine → SSE イベント分類（AgentSession と同一ロジックを共有） ----
     _emit = AgentSession._emit
+    _emit_flush = AgentSession._emit_flush
 
     # ---- interactive_fn: read 専用の最終防衛線（承認 UI ではない） ----
     def _guard(self, tool_calls, content):

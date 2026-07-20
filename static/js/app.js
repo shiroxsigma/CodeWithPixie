@@ -1476,7 +1476,8 @@ function noteAfterTurn(assistantEl, message, visible, applyTarget, cancelled) {
 function handleEvent(ev) {
   switch (ev.type) {
     case "token":
-      state.assistantUi?.onToken(ev.text);
+      // text 欠落のイベントで文字列 "undefined" を本文へ混ぜない（search ブロックが壊れる）
+      if (ev.text) state.assistantUi?.onToken(ev.text);
       break;
     case "status": {
       const phase = phaseOf(ev.text);
