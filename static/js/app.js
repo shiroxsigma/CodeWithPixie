@@ -920,9 +920,19 @@ function syncPreviewScroll() {
   pv.scrollTop = ratio * (pv.scrollHeight - pv.clientHeight);
 }
 
+/** プレビューの表示/非表示（仕切りも道連れ・幅の記憶を復元/解除する）。 */
+function setPreviewVisible(on) {
+  $("preview").classList.toggle("hidden", !on);
+  $("preview-divider").classList.toggle("hidden", !on);
+  $("preview-btn").classList.toggle("active", on);
+  // 閉じるときはエディタの固定幅を外す。付けたままだと、プレビューが消えた分の
+  // 幅がどこにも配分されず編集エリアの右側が空白のまま残る。
+  if (on) restorePreviewSplit(); else $("editor").style.flex = "";
+  state.editor?.layout();
+}
+
 function closePreview() {
-  $("preview").classList.add("hidden");
-  $("preview-btn").classList.remove("active");
+  setPreviewVisible(false);
 }
 
 function togglePreview() {
@@ -933,8 +943,7 @@ function togglePreview() {
     return;
   }
   if (isPreviewOpen()) { closePreview(); return; }
-  $("preview").classList.remove("hidden");
-  $("preview-btn").classList.add("active");
+  setPreviewVisible(true);
   renderPreview();
   // automaticLayout: true なので Monaco 側の再計算は自動で追従する
 }
@@ -2536,22 +2545,99 @@ function bindUI() {
   });
 
   setupDivider();
+  setupPreviewDivider();
   setupVDivider();
 }
 
-function setupDivider() {
-  const divider = $("divider");
-  const left = $("left-pane");
+//: 左右の分割位置は px ではなく比率で覚える（ウィンドウ幅が変わっても配分が保たれる）。
+const SPLIT_RATIO_KEY = "pixie.splitRatio";      // #split に対する左ペインの割合
+const PREVIEW_RATIO_KEY = "pixie.previewRatio";  // #edit-area に対するエディタの割合
+
+//: #left-pane / #right-pane の min-width（style.css と一致させること）。
+const PANE_MIN_W = 320;
+//: エディタ／プレビューそれぞれに残す最小幅。
+const EDIT_MIN_W = 160;
+
+/**
+ * 左右ドラッグの共通実装。仕切りの前にあるペインへ inline の固定幅を書き込む。
+ *
+ * 可動域から**仕切り自身の幅を引く**のが要点。引かないと右端で合計幅がコンテナを
+ * 数 px 超え、min-width で守られた両ペインの代わりに仕切りが 0px まで潰されて
+ * 二度と掴めなくなる（style.css 側の flex-shrink:0 と合わせて二重に防ぐ）。
+ *
+ * @param opts.divider 仕切り要素 / opts.pane 幅を与える側（仕切りの左）
+ * @param opts.container 2ペインを収める flex コンテナ
+ * @param opts.min 両側に残す最小幅(px) / opts.key 比率の保存キー
+ * @param opts.after 反映後に呼ぶ処理（入れ子の分割を追従させる用）
+ */
+function bindHDivider({ divider, pane, container, min, key, after }) {
+  const apply = (px) => {
+    // 仕切りが display:none のときは offsetWidth が 0 になるので実測でよい。
+    const max = container.clientWidth - min - divider.offsetWidth;
+    pane.style.flex = `0 0 ${Math.max(min, Math.min(px, Math.max(min, max)))}px`;
+    state.editor?.layout();
+    after?.();
+  };
+  const restore = () => {
+    const r = Number(localStorage.getItem(key));
+    if (r > 0 && r < 1) apply(container.clientWidth * r);
+  };
+
   let dragging = false;
-  divider.addEventListener("mousedown", () => { dragging = true; document.body.style.cursor = "col-resize"; });
-  window.addEventListener("mouseup", () => { dragging = false; document.body.style.cursor = ""; });
+  divider.addEventListener("mousedown", (e) => {
+    e.preventDefault();  // ドラッグ中にテキスト選択が走らないように
+    dragging = true;
+    document.body.style.cursor = "col-resize";
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = "";
+    localStorage.setItem(key,
+      String(pane.getBoundingClientRect().width / container.clientWidth));
+  });
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return;
-    const total = $("split").clientWidth;
-    const w = Math.max(320, Math.min(e.clientX, total - 320));
-    left.style.flex = `0 0 ${w}px`;
-    state.editor.layout();
+    apply(e.clientX - container.getBoundingClientRect().left);
   });
+  divider.addEventListener("dblclick", () => {
+    pane.style.flex = "";  // スタイルシートの既定（等分 / 55%）へ戻す
+    localStorage.removeItem(key);
+    state.editor?.layout();
+  });
+  // ウィンドウが狭くなると保存済みの幅が可動域を外れる（反対側が min を割る）。
+  // 現在幅を入れ直すと apply が clamp してくれる。
+  const reclamp = () => { if (pane.style.flex) apply(pane.getBoundingClientRect().width); };
+  window.addEventListener("resize", reclamp);
+  return { restore, reclamp };
+}
+
+let _previewSplit = null;  // プレビュー仕切りの操作口（開いたときに幅を復元する）
+
+/** プレビューを開いたときに、記憶している分割比を復元する。 */
+function restorePreviewSplit() {
+  _previewSplit?.restore();
+}
+
+/** 左ペイン（エディタ）とチャット欄の境界。 */
+function setupDivider() {
+  const { restore } = bindHDivider({
+    divider: $("divider"), pane: $("left-pane"), container: $("split"),
+    min: PANE_MIN_W, key: SPLIT_RATIO_KEY,
+    // 左ペインが細くなるとプレビュー側が押し出される。エディタは固定幅（flex-shrink:0）
+    // なので放っておくとプレビューが 0px に潰れる。現在幅を入れ直して再クランプする。
+    after: () => { if (isPreviewOpen()) _previewSplit?.reclamp(); },
+  });
+  restore();
+}
+
+/** エディタと Markdown プレビューの境界（プレビュー表示中のみ有効）。 */
+function setupPreviewDivider() {
+  _previewSplit = bindHDivider({
+    divider: $("preview-divider"), pane: $("editor"), container: $("edit-area"),
+    min: EDIT_MIN_W, key: PREVIEW_RATIO_KEY,
+  });
+  // 復元は「プレビューを開いたとき」に行う（閉じている間はエディタが全幅）。
 }
 
 //: ファイル欄の高さ（px）の保存キー。作業フォルダをまたいで同じ使い勝手にしたいので

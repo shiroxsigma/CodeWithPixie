@@ -87,10 +87,15 @@ button:active { transform: translateY(1px); }
 /* Markdown プレビューは表示時のみエディタと横並びで半分ずつ。既定は hidden。 */
 #preview {
   flex: 1 1 50%; min-width: 0; overflow-y: auto; padding: 12px 16px;
-  background: var(--bg); border-left: 1px solid var(--border);
+  background: var(--bg);
   font-size: 14px; line-height: 1.7;
 }
 #preview.hidden { display: none; }
+/* エディタとプレビューの境界。#divider と同じ理由で flex-shrink:0（潰れると掴めない）。
+   境界線は仕切り自身が兼ねるので #preview 側の border-left は持たせない。 */
+#preview-divider { flex: 0 0 5px; cursor: col-resize; background: var(--border); }
+#preview-divider:hover { background: var(--accent); }
+#preview-divider.hidden { display: none; }
 #preview-btn.active { background: var(--accent); color: #17131f; border-color: var(--accent); }
 /* Code モード: .md 以外を開いている間はプレビュー不可 */
 #preview-btn:disabled { opacity: .45; cursor: default; }
@@ -131,7 +136,11 @@ button:active { transform: translateY(1px); }
 }
 .hint { color: var(--muted); font-size: 12px; }
 
-#divider { width: 5px; cursor: col-resize; background: var(--border); }
+/* flex: 0 0 5px（＝flex-shrink:0）が要点。既定の flex-shrink:1 のままだと、仕切りを
+   右端まで寄せて合計幅が #split を超えたとき、min-width で守られている両ペインの代わりに
+   **仕切りだけが 0px まで潰され**、二度と掴めなくなる。JS 側でも仕切りの幅を可動域から
+   引いてはみ出させないようにしているが、CSS でも潰れない保証を置く。 */
+#divider { flex: 0 0 5px; cursor: col-resize; background: var(--border); }
 #divider:hover { background: var(--accent); }
 
 #right-pane {
