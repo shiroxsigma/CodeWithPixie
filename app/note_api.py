@@ -9,6 +9,7 @@ Code モードでも常に mount されるが追加のみで、既存の Code �
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -16,6 +17,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -300,3 +302,45 @@ def api_asset(path: str):
     if not p.is_file():
         raise HTTPException(404, "not found")
     return FileResponse(p, headers={"Content-Security-Policy": "script-src 'none'"})
+
+
+# --- web2md（URL → Markdown 取り込み・🌐+） ------------------------------------
+class Web2MdReq(BaseModel):
+    url: str
+
+
+def _unique_md_path(title: str, fallback: str) -> str:
+    """タイトルからワークスペース内の未使用ファイル名（web/ 配下）を作る。"""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip().rstrip(".") or fallback
+    cleaned = cleaned[:80]  # 長すぎるタイトルはファイル名として切り詰める
+    base = f"web/{cleaned}"
+    rel = base + ".md"
+    n = 2
+    while files.safe_path(rel).exists():
+        rel = f"{base}-{n}.md"
+        n += 1
+    return rel
+
+
+@router.post("/api/web2md")
+async def api_web2md(req: Web2MdReq):
+    """URL を Markdown 化してワークスペース（web/）に保存し、相対パスを返す。
+
+    PrayLight の url2md.py（subprocess）で変換。5分強のタイムアウト（ログイン待ち込）。"""
+    from . import copilot
+
+    url = req.url.strip()
+    if not re.match(r"^https?://", url):
+        return {"ok": False, "error": "http(s):// で始まる URL を指定してください。", "path": ""}
+    markdown = await asyncio.to_thread(copilot.url_to_markdown, url)
+    if markdown.startswith("エラー"):
+        return {"ok": False, "error": markdown, "path": ""}
+
+    # 先頭の「# タイトル」行をファイル名に使う
+    lines = markdown.splitlines()
+    first = lines[0] if lines else ""
+    title = first.lstrip("# ").strip() if first.startswith("#") else ""
+    netloc = urlparse(url).netloc
+    rel = _unique_md_path(title or netloc, netloc or "page")
+    files.write_file(rel, markdown)
+    return {"ok": True, "error": "", "path": rel}

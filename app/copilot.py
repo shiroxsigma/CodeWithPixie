@@ -128,3 +128,26 @@ def open_browser() -> str:
     if proc.returncode != 0:
         return f"エラー: ブラウザを起動できませんでした（{_last_error_line(proc.stderr, '詳細不明')}）。"
     return ""
+
+
+def url_to_markdown(url: str) -> str:
+    """PrayLight の url2md.py で URL のページを Markdown 化する（🌐+ web2md）。
+
+    成功なら Markdown 本文、失敗なら「エラー: ...」。保存が目的なので切り詰めない
+    （NWP の url_to_markdown と同一仕様）。同期関数: /api/web2md から asyncio.to_thread 経由で呼ぶ。"""
+    script, py = _praylight_paths("url2md.py")
+    if not script.exists():
+        return f"エラー: url2md.py が見つかりません（{script}）。PrayLight の url2md.py を確認してください。"
+    if not py.exists():
+        return f"エラー: PrayLight の Python が見つかりません（{py}）。"
+    try:
+        proc = subprocess.run([str(py), str(script), url], capture_output=True,
+                              cwd=str(script.parent), timeout=330)
+    except subprocess.TimeoutExpired:
+        return "エラー: 変換がタイムアウトしました（ログイン待ちを含め5分超）。"
+    except OSError as e:
+        return f"エラー: PrayLight を起動できません: {e}"
+    markdown = proc.stdout.decode("utf-8", "replace").strip()
+    if proc.returncode != 0 or not markdown:
+        return _last_error_line(proc.stderr, "エラー: 変換に失敗しました。")
+    return markdown

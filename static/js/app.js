@@ -1802,6 +1802,31 @@ async function chooseWorkspace() {
   addMessage("system", "作業フォルダを変更: " + (r.workspace || path));
 }
 
+// URL のページを Markdown 化して web/ に保存（🌐+）。Note モード専用。
+async function importUrlAsMarkdown() {
+  const url = prompt("Markdown にする URL（ログインが必要なページはブラウザで手動ログイン）");
+  if (!url || !url.trim()) return;
+  const btn = $("web2md-btn");
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = "⏳";
+  try {
+    const r = await (await fetch("/api/web2md", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: url.trim() }),
+    })).json();
+    if (!r.ok) { alert(r.error); return; }
+    await loadFileList();
+    await openFile(r.path);
+  } catch (e) {
+    alert("エラー: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🌐+";
+  }
+}
+
 // ---- 設定（モデル/サーバ） ----
 async function openSettings() {
   const data = await getJSON("/api/servers").catch(() => ({ servers: [], active: 0 }));
@@ -1929,6 +1954,7 @@ function bindUI() {
   // ファイル操作
   $("new-file-btn").addEventListener("click", () => createEntry("file"));
   $("new-folder-btn").addEventListener("click", () => createEntry("dir"));
+  $("web2md-btn").addEventListener("click", importUrlAsMarkdown);
   document.addEventListener("click", closeFsMenu);
   setupRootDrop();
   // ルートプロジェクト（作業フォルダ）変更
