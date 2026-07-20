@@ -20,7 +20,8 @@ NoteWithPixie（安全・読取専用の Web エディタ）  … 不変
 - **CWP は AWP 内部に直接触れず、公開境界 `pixie_core` だけに依存**する。接点は
   「AWP/src を sys.path に前置して `import pixie_core` する」1点のみ（`app/engine_adapter.py`）。
 - `pixie_core` は engine/tools/state/registry/config 等14モジュールを収めた **`src/pixie_core/` パッケージ**。
-  `create_engine()` / `Engine.run_turn(output_fn, interactive_fn)` / `CancelTurn` / ツール分類 / `API_VERSION`(1.1) を公開。
+  `create_engine()` / `Engine.run_turn(output_fn, interactive_fn)` / `CancelTurn` / ツール分類 /
+  履歴編集（`history_drop` / `history_replace`）/ `API_VERSION`(1.6) を公開。
 - AWP の CLI・テストは `src/<name>.py` の **sys.modules エイリアスシム**でフラット import を維持
   （モジュール同一性を保持）。この物理移動で **CWP・NWP・AWP いずれも挙動不変**（AWP は 394 テストがグリーン）。
 
@@ -99,6 +100,62 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
 - 実装: AWP コアは無改修。CWP が起動時に `pixie_core.register_tool(pack="copilot")` で ask_copilot を
   登録し、on の会話だけ `context.active_packs={"copilot"}` にして提示する（off の会話には出ない）。
 
+#### `/copilot`（組み立て → 質問 → 反映）
+メッセージの先頭に `/copilot` と書くと、1ターンが3フェーズになる（`app/copilot_flow.py`）:
+
+1. **組み立て** — エージェントが、これまでの会話と開いているファイルを踏まえ、必要なら
+   read_file / grep_search で裏を取ったうえで、**自己完結した質問文**を組み立てる
+   （Copilot にはワークスペースが見えないので、関連コードは本文に貼らせる）。
+   出力は ````copilot-question フェンス1つ。
+2. **質問** — その質問文を Copilot へ送る。質問文と回答はチャットに残る。
+3. **反映** — 回答を同じセッションへ戻し、実物と突き合わせて採否を判断させ、
+   採用分をコードへ反映させる。反映のされ方はモード次第（Code=編集ツール＋承認、
+   Note/Plan=編集ブロック → 差分プレビュー）。
+
+3フェーズは同一セッション・同一ロックで走るので、Copilot とのやりとりは会話履歴に残り、
+以降のターンの文脈としても効く。組み立ての間だけ `ask_copilot` ツールは伏せる（二重質問防止）。
+
+組み立てを挟まず素で聞きたいときは **`/copilot!`**（旧 `/copilot` の挙動）。
+回答は表示するだけでコードには反映されない。
+
+## コンテキスト管理（会話の文脈を人が減らす）
+
+会話が伸びると LLM の文脈が埋まり、エンジンは**古い側から勝手に切り捨てる**（＝最初に決めた
+前提が静かに消える）。何が消えるかを人が決められるようにするための機能。Code / Note / Plan の
+どのモードでも同じように効く。
+
+- **🗑 この往復を削除** — 各返信の右上（hover で出る）。回答が不要だったやりとりを
+  **表示からも LLM の文脈からも**消す。ツール実行の結果ごと消えるので、
+  「巨大なファイルを読ませたが役に立たなかった」ターンほど効く。
+  他の往復のツール結果・ホワイトボードには触らない（`pixie_core` API 1.6 の外科的削除）。
+- **`/compact [焦点]`** — 会話を「目的・決定事項・分かった事実・やったこと・残り」の
+  引き継ぎメモに要約し、履歴をそれ1件に差し替える。逐語は失われるが決定事項は残るので、
+  そのまま続きを話せる。`/compact 認証まわり` のように残したい焦点を足せる。
+
+### スラッシュコマンド
+
+| コマンド | 何をするか |
+|---|---|
+| `/help` | コマンド一覧（チャットに表示） |
+| `/context` | いまの文脈の量（件数・概算文字数・文脈を食っている往復の上位5件） |
+| `/compact [焦点]` | 会話を要約して文脈を畳む |
+| `/undo` | 直前の往復を削除（🗑 と同じ） |
+| `/clear` | 会話をリセット（Note は保存履歴も消す） |
+| `/code` `/note` `/plan` | モード切替（バッジのクリックと同じ。狙ったモードへ一発で） |
+| `/copilot` `/copilot!` | 上記の Copilot 連携 |
+
+`/help` `/undo` などブラウザで完結するものは `static/js/app.js` の `LOCAL_COMMANDS`、
+`/compact` `/copilot` などエージェントを動かすものは `POST /api/chat` の先頭で分岐する。
+**知らない `/...` はコマンド扱いしない**（`/api/chat のバグを直して` のような依頼を拒まないため）。
+
+### 実装メモ（ターン境界の持ち方）
+削除の単位は「ユーザーから見た1往復」なので、境界は `run_turn` ではなく `_turn_stream`
+（＝1回の HTTP チャット要求）で開閉する — `/copilot` のように1往復の中で `run_turn` が
+2回走る経路があるため。往復は**index ではなくメッセージオブジェクトの同一性**で覚える
+（`app/engine_adapter.py` の `HistoryOps`）: エンジンの自動トリムが古い側を落とすと
+index は後からずれ、別の往復を消してしまうため。ターン ID は SSE の最初のイベント
+（`{"type":"turn","id":n}`）でフロントへ渡す。
+
 ## 設計メモ（安全性）
 
 - エージェントの書き込みは AWP のツールが行い、パスはセッションのルートプロジェクト基準に
@@ -113,7 +170,8 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
 |---|---|
 | `app/engine_adapter.py` | **AWP との唯一の接点**。`pixie_core` だけを import し、出力の SSE 分類・承認ブリッジ・協調キャンセル・変更検知という **Web 固有部分**を担う（エンジン構築とターン制御は `pixie_core` に委譲） |
 | `pixie_core`（AWP 側）| AWP が公開する UI 非依存の埋め込み API。`create_engine()` / `Engine.run_turn()` / `CancelTurn` / ツール分類。AWP 内部への依存を1枚に集約した安定境界 |
-| `app/main.py` | FastAPI。静的配信・ファイル API・SSE チャット・`/api/approve`・`/api/interrupt` |
+| `app/main.py` | FastAPI。静的配信・ファイル API・SSE チャット・`/api/approve`・`/api/interrupt`・文脈操作（`/api/chat/turn/delete`・`/api/context`・`/api/session/clear`） |
+| `app/compact.py` | `/compact`（会話の要約 → 履歴の差し替え）|
 | `app/files.py` | ワークスペース安全アクセス（表示・エディタ読み書き用） |
 | `app/search.py` | ripgrep 全文検索 |
 | `app/patch.py` | search/replace の3層ファジー適用（手動レビュー用・NWP 由来） |
@@ -164,4 +222,6 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
 ## AWP 依存メモ
 - 参照境界: `../AnythingWithPixie/src/pixie_core.py`（`API_VERSION` と `Engine.run_turn` シグネチャに依存）。
 - CWP は起動時に `pixie_core.API_VERSION`（`1.x`）とツール登録数を検証する（`app/engine_adapter.py`）。
+  **1.4 以上が必須**（Note の固定ツールプロファイル）。**1.6 以上でコンテキスト管理が有効**になる
+  （往復の削除・`/compact`。1.6 未満では機能が無効化されるだけで、それ以外は従来どおり動く）。
 - AWP を更新して境界 API を変えた場合は `pixie_core.API_VERSION` を上げ、本 README も更新すること。

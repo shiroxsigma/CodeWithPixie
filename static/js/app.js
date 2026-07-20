@@ -11,7 +11,7 @@ import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
 import { available as mdAvailable, renderInto, renderPlain, setAssetBase } from "./markdown.js";
 import * as mdflow from "./mdflow.js";
 import { $ } from "./dom.js";
-import { addMessage, addToolStatus, scrollMessages } from "./chat-log.js";
+import { addDeleteButton, addMessage, addToolStatus, scrollMessages } from "./chat-log.js";
 import { splitThink, scanEditBlocks, extractEdits, extractProposed } from "./edit-blocks.js";
 
 function newSessionId() {
@@ -36,6 +36,8 @@ const state = {
   abort: null,
   assistantEl: null,        // 進行中ターンのアシスタント吹き出し
   assistantUi: null,        // beginAssistantStream のハンドル
+  turnId: 0,                // 進行中ターンのサーバ側 ID（turn イベント。0 = 文脈編集不可）
+  compacted: null,          // /compact の結果（compacted イベント）。ターン確定時に畳む
   sessionId: newSessionId(),  // このタブ/会話のセッション。並行セッションはサーバ側で分離される。
 
   // --- モード（統合シェル）---
@@ -209,13 +211,16 @@ function applyCopilotVisibility() {
   // placeholder もここで決める。/copilot は Copilot 連携がオンのときだけ通る経路なので、
   // オフのまま案内すると「書いてもエラーになる使い方」を教えることになる。
   // モードとトグルの両方で文言が変わるため、applyModeUI からもここを通す。
-  const hint = on ? "\n（先頭に /copilot と書くと、エージェントを介さず Copilot に直接質問できます）" : "";
+  const hint = on
+    ? "\n（先頭に /copilot と書くと、これまでの調査をまとめて Copilot に質問し、回答を反映します。"
+      + "/copilot! なら組み立てずにそのまま直接質問）"
+    : "";
   const PLACEHOLDER = {
     note: "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。",
     plan: "例）設定画面にダークモードの切替を足したい。まず調べて実行計画を立てて。",
     code: "例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。",
   };
-  $("chat-input").placeholder = PLACEHOLDER[state.mode] + hint;
+  $("chat-input").placeholder = PLACEHOLDER[state.mode] + hint + "\n（/help でコマンド一覧）";
 }
 
 /** Note モード固有の一時状態を捨てる（モード切替・ワークスペース切替時）。 */
@@ -310,9 +315,16 @@ async function loadHistory() {
       + "この保存先の履歴は、取り違えを防ぐため今回は保存しません。");
     return;
   }
+  let lastUserEl = null, lastUserText = "";
   for (const m of r.messages || []) {
     state.history.push({ role: m.role, content: m.content });
-    addMessage(m.role, m.content);
+    const el = addMessage(m.role, m.content);
+    if (m.role === "user") { lastUserEl = el; lastUserText = m.content; continue; }
+    // 復元した履歴にも 🗑 を付ける。turn ID は無い（この往復を積んだセッションはもう
+    // 無い）ので 0 を渡す — deleteExchange が Note 用の経路（履歴から消して再シード）へ落ちる。
+    el._exchange = { userEl: lastUserEl, userText: lastUserText };
+    addDeleteButton(el, () => deleteExchange(el, 0));
+    lastUserEl = null; lastUserText = "";
   }
   state.historyLoaded = true;
 }
@@ -1459,11 +1471,143 @@ async function buildNotePayload(msg) {
   };
 }
 
+// ---- スラッシュコマンド -------------------------------------------------------
+// 会話の文脈は放っておくと膨らみ、古い側からエンジンに切り捨てられる（＝最初に決めた
+// 前提が静かに消える）。それを人が能動的に管理できるようにするための入り口。
+// 「サーバへ送るコマンド」と「ブラウザで完結するコマンド」を分けて持つ。
+
+//: サーバ（/api/chat）が解釈するコマンド。ここでは素通しし、説明だけ /help に載せる。
+const SERVER_COMMANDS = {
+  "/compact": "会話を要約して文脈を畳む。`/compact 認証まわり` のように残したい焦点を足せる",
+  "/copilot": "エージェントが質問文を組み立てて Copilot に聞き、回答を精査して反映する",
+  "/copilot!": "エージェントを介さず Copilot へ直接1回質問する（速いが文脈も反映も無い）",
+};
+
+//: ブラウザ側で完結するコマンド。run(引数) を呼んで終わり（サーバへは送らない）。
+const LOCAL_COMMANDS = {
+  "/help": { desc: "使えるコマンドの一覧を出す", run: () => showHelp() },
+  "/context": { desc: "いまの文脈の量（メッセージ数・概算文字数）を見る", run: () => showContext() },
+  "/undo": { desc: "直前の往復を削除する（🗑 と同じ）", run: () => undoLastExchange() },
+  "/clear": { desc: "会話をリセットする（Note は保存履歴も消す）", run: () => clearConversation() },
+  "/code": { desc: "Code モードへ切り替える", run: () => switchModeCommand("code") },
+  "/note": { desc: "Note モードへ切り替える", run: () => switchModeCommand("note") },
+  "/plan": { desc: "Plan モードへ切り替える", run: () => switchModeCommand("plan") },
+};
+
+/** モード切替コマンド。バッジのクリック（cycleMode）と違い確認は出さない
+    — コマンドを打った時点で「そのモードへ行きたい」は明示されているため。 */
+async function switchModeCommand(next) {
+  if (state.mode === next) {
+    addMessage("system", `既に ${MODE_LABEL[next]} モードです。`);
+    return;
+  }
+  await switchMode(next);
+}
+
+/**
+ * 入力がローカル完結のコマンドなら実行して true を返す。
+ *
+ * 知らない "/..." は**コマンド扱いしない**（false を返して普通のメッセージとして送る）。
+ * 「/api/chat のバグを直して」のような、スラッシュで始まるだけの依頼を拒まないため。
+ */
+async function runLocalCommand(text) {
+  const m = /^(\/\S+)(?:\s+([\s\S]*))?$/.exec(text);
+  if (!m) return false;
+  const name = m[1].toLowerCase();
+  if (name in SERVER_COMMANDS) return false;  // サーバが解釈する（通常の送信経路へ）
+  const cmd = LOCAL_COMMANDS[name];
+  if (!cmd) return false;
+  addMessage("user", text);  // 何をしたかがログに残るよう、打った通りを出す
+  await cmd.run((m[2] || "").trim());
+  return true;
+}
+
+function showHelp() {
+  const rows = [
+    ...Object.entries(SERVER_COMMANDS),
+    ...Object.entries(LOCAL_COMMANDS).map(([k, v]) => [k, v.desc]),
+  ].map(([name, desc]) => `| \`${name}\` | ${desc} |`);
+  addMessage("assistant", [
+    "### 使えるコマンド", "",
+    "| コマンド | 説明 |", "|---|---|", ...rows, "",
+    "各返信の右上に出る 🗑 でも、その往復だけを文脈から消せます"
+    + "（回答が不要だったやりとりを残さないほど、続きの精度が保てます）。",
+  ].join("\n"));
+}
+
+async function showContext() {
+  let r;
+  try {
+    r = await getJSON("/api/context?session_id=" + encodeURIComponent(state.sessionId));
+  } catch (e) {
+    addMessage("error", "⚠ 文脈を取得できません: " + e.message);
+    return;
+  }
+  if (!r.supported) {
+    addMessage("assistant", "このエンジンでは文脈量を測れません"
+      + "（pixie_core API 1.6 以上が必要です）。");
+    return;
+  }
+  const lines = [
+    `### 🧠 いまの文脈（${MODE_LABEL[r.mode] || r.mode} モード）`, "",
+    `- メッセージ: **${r.messages}** 件`,
+    `- 分量: **約 ${r.chars.toLocaleString()} 文字**`,
+    `- モデル: ${r.model || "(未設定)"}`,
+  ];
+  if (r.turns?.length) {
+    const top = [...r.turns].sort((a, b) => b.chars - a.chars).slice(0, 5);
+    lines.push("", "文脈を食っている往復（上位5件）:", "", "| 往復 | 分量 |", "|---|---|",
+      ...top.map(t => `| ${t.label || "(無題)"} | 約 ${t.chars.toLocaleString()} 文字 |`),
+      "", "要らない往復は 🗑 で消せます。全体を畳むなら `/compact`。");
+  }
+  addMessage("assistant", lines.join("\n"));
+}
+
+/** 直前の往復を消す（/undo）。表示に残っている最後のアシスタント発言が対象。 */
+function undoLastExchange() {
+  const msgs = [...$("messages").children].reverse();
+  const target = msgs.find(el => el.classList.contains("assistant") && el._exchange);
+  if (!target) { addMessage("system", "消せる往復がありません。"); return; }
+  const btn = target.querySelector(".msg-del");
+  if (btn) btn.click();  // 削除の実装は1本（🗑）に寄せる
+}
+
+/** 会話を丸ごとリセットする（/clear）。 */
+async function clearConversation() {
+  if (state.streaming) { alert("⚠️ 応答の生成中はリセットできません。"); return; }
+  const extra = isNote() ? "\n（保存されている会話履歴も消えます）" : "";
+  if (!confirm("この会話をリセットしますか？" + extra)) return;
+  try {
+    await postJSON("/api/session/clear", { session_id: state.sessionId });
+  } catch (e) {
+    alert("⚠️ リセットできません: " + e.message);
+    return;
+  }
+  if (isNote()) {
+    try {
+      await jsonFetch("/api/chat/history", { method: "DELETE" });
+      state.history = [];
+      state.historyLoaded = true;
+    } catch (e) {
+      alert("⚠️ 保存履歴を消せませんでした: " + e.message);
+    }
+  }
+  $("messages").innerHTML = "";
+  state.assistantEl = null;
+  state.sessionId = newSessionId();  // Code は以降のターンを新しいセッションで始める
+  updateSessionInfo();
+  addMessage("system", "🧹 会話をリセットしました。");
+}
+
 async function sendChat() {
   if (state.streaming) return;
   const input = $("chat-input");
   const msg = input.value.trim();
   if (!msg) return;
+
+  // ローカル完結のスラッシュコマンド（/help・/undo 等）はここで処理して終わり。
+  // サーバへ送るコマンド（/compact・/copilot）は通常の送信経路に乗る。
+  if (await runLocalCommand(msg)) { input.value = ""; return; }
 
   const note = isNote();
   const plan = isPlan();
@@ -1484,11 +1628,15 @@ async function sendChat() {
   }
 
   input.value = "";
-  addMessage("user", msg);
+  const userEl = addMessage("user", msg);
   // 変更バッジは直近ターンのもの。新しいターンを始めたら畳む。
   if (state.changedPaths.size) { state.changedPaths.clear(); renderFileTree(); }
 
   state.assistantEl = addMessage("assistant", "");
+  state.turnId = 0;         // turn イベントで埋まる（来なければ文脈編集は無いターン）
+  state.compacted = null;
+  // 削除は「1往復」が単位なので、アシスタントの吹き出しから相方のユーザー発言を辿れるようにする。
+  state.assistantEl._exchange = { userEl, userText: msg };
   state.assistantUi = beginAssistantStream(state.assistantEl);
   setStreaming(true);
   state.abort = new AbortController();
@@ -1539,9 +1687,84 @@ async function sendChat() {
   }
   const cancelled = !!state.abort?.signal.aborted;
   const assistantEl = state.assistantEl;  // finishStream が空箱を畳む前に確保
+  const turnId = state.turnId;
   const visible = finishStream();
   if (note) noteAfterTurn(assistantEl, msg, visible, applyTarget, cancelled);
   else if (plan && !cancelled) planAfterTurn(visible);
+  if (state.compacted && assistantEl?.isConnected) collapseToSummary(assistantEl, state.compacted);
+  else if (assistantEl?.isConnected) {
+    // 往復が確定してから削除ボタンを付ける（生成中に消せると文脈と表示がずれる）。
+    addDeleteButton(assistantEl, () => deleteExchange(assistantEl, turnId));
+  }
+}
+
+/**
+ * 1往復（ユーザー発言＋アシスタントの返信）を消す。
+ *
+ * 消すのは表示だけではない — LLM の文脈からも外すのが目的（それがこの機能の存在理由）。
+ * 経路はモードで違う:
+ *   Code / Plan … サーバのセッションが文脈の正。turn ID を渡して該当ターンだけ外す。
+ *   Note      … 保存履歴（.pixie_chat.json）が文脈の正。そこから消して保存し直し、
+ *               turn ID が無い（＝サーバ再起動前の履歴）ときはセッションを捨てて
+ *               次ターンで新しい履歴から復元させる。
+ */
+async function deleteExchange(assistantEl, turnId) {
+  if (state.streaming) { alert("⚠️ 応答の生成中は削除できません。"); return; }
+  const ex = assistantEl?._exchange;
+  const label = (ex?.userText || "").replace(/\s+/g, " ").slice(0, 40);
+  if (!confirm(`この往復を削除しますか？\n「${label}${label.length >= 40 ? "…" : ""}」\n`
+    + "（表示だけでなく AI の文脈からも消えます）")) return;
+
+  let contextCleared = true;
+  if (turnId) {
+    try {
+      const r = await postJSON("/api/chat/turn/delete",
+        { session_id: state.sessionId, turn_id: turnId });
+      contextCleared = !!r.ok;
+    } catch { contextCleared = false; }
+  }
+  if (isNote()) {
+    // 保存履歴からも消す。内容で照合するのは、サーバのトリミングや再読込で
+    // 配列そのものが作り直されるため（index も参照も当てにならない）。
+    const i = state.history.findIndex(m => m.role === "user" && m.content === ex?.userText);
+    if (i >= 0) {
+      const n = (state.history[i + 1]?.role === "assistant") ? 2 : 1;
+      state.history.splice(i, n);
+      await saveHistory();
+    }
+    if (!turnId) {
+      // この履歴を積んだセッションが既に無い / ID が分からない。エンジン内の文脈を捨てて、
+      // 次のターンで消したあとの履歴からシードし直させる。
+      try { await postJSON("/api/session/clear", { session_id: state.sessionId }); }
+      catch { contextCleared = false; }
+    }
+  }
+  ex?.userEl?.remove();
+  assistantEl.remove();
+  if (!contextCleared) {
+    addMessage("system", "⚠️ 表示からは消しましたが、AI の文脈からは消せませんでした"
+      + "（サーバ側の会話が既に入れ替わっています）。");
+  }
+}
+
+/** /compact の後始末: チャット欄を要約1件に畳む（表示と文脈を一致させる）。 */
+function collapseToSummary(assistantEl, info) {
+  const box = $("messages");
+  for (const el of [...box.children]) {
+    if (el !== assistantEl) el.remove();
+  }
+  const head = addMessage("system",
+    `🗜 ここまでの会話（${info.before} 件）を要約に畳みました（約 ${info.saved_chars.toLocaleString()} 文字ぶんの文脈を解放）。`);
+  box.insertBefore(head, assistantEl);
+  if (isNote()) {
+    // Note は保存履歴が表示の正。次に開いたときも要約だけが残るようにする。
+    state.history = [
+      { role: "user", content: "（ここまでの会話は /compact で要約に置き換えました）" },
+      { role: "assistant", content: info.summary },
+    ];
+    saveHistory();
+  }
+  scrollMessages(true);
 }
 
 /** ```plan フェンスの中身を取り出す。無ければ null。 */
@@ -1593,6 +1816,13 @@ function handleEvent(ev) {
       addToolStatus(state.assistantEl, ev.text);
       break;
     }
+    case "turn":
+      // このターンがサーバ側で何番目の往復か。削除（🗑）のときにこの ID を渡す。
+      state.turnId = ev.id || 0;
+      break;
+    case "compacted":
+      state.compacted = ev;  // 畳むのはターン確定後（本文を出し切ってから）
+      break;
     case "approval":
       renderApproval(ev);
       break;

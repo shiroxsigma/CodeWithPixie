@@ -1,13 +1,6 @@
-// ============================================================================
-// 正本: PixieProject/shared/web/js/edit-blocks.js
-// このファイルは shared/scripts/sync_web.py で各アプリ（NoteWithPixie /
-// CodeWithPixie）の static/js/ へコピー配布される。アプリ側のコピーを直接
-// 編集しないこと（次回 sync で上書きされる）。編集は必ずこの正本で行う。
-// ============================================================================
 // AI 応答テキストの編集プロトコル解析（純粋関数のみ・DOM/状態非依存）。
-// システムプロンプト（NWP llm.py の EDIT_PROTOCOL）が指示する ```search/```replace・
-// ```apply ブロックの抽出と、<think> 分離。現在は Note モードのみが使うが、
-// 統合シェル（Stage C）で Code モードにも差分反映 UI を載せるときの共通土台。
+// システムプロンプト（app/note_prompts.py の EDIT_PROTOCOL）が指示する
+// ```search/```replace・```apply ブロックの抽出と、<think> 分離。
 
 /**
  * <think>...</think>（qwen 系のインライン思考）を本文から分離する。

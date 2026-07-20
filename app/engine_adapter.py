@@ -37,6 +37,11 @@ APPROVAL_SKIP = frozenset({
 #: 出力ストリーム中の非本文インジケータ（token ではなく status に回す）。
 _INDICATOR_HINTS = ("🧠", "⏳", "Prefill", "Thinking...")
 _STATUS_PREFIXES = ("🔧", "✅", "⚠️", "🕊️", "🔍", "[System]", "[システム", "[Warning]", "[警告]")
+#: 進捗インジケータの行頭記号。engine は上書き用の `\r` を**最初の "  ⏳ Prefill..." にだけ
+#: 付けない**（行頭で上書き対象が無いため）ので、`\r` 判定だけではこれが本文へ漏れる。
+#: 漏れると本文が "⏳ Prefill...AI: <think>…" になり、行頭でなくなった "AI: " も剥がれず、
+#: splitThink の visible が "⏳ Prefill..." だけになって差分プレビューが空になる。
+_INDICATOR_PREFIXES = ("⏳", "🧠")
 
 def _looks_like_status_line(line: str) -> bool:
     """行頭からの文字列がツール/システム行かどうか（本文と区別する）。"""
@@ -86,6 +91,12 @@ class _StreamClassifier:
                 s = s[nl + 1:]
                 continue
             if self._at_line_start:
+                # `\r` 無しで来た行頭インジケータ。改行が来ないので _pending 経路に入れると
+                # 後続の本文まで飲み込む。チャンク全体を status にして行頭のまま次へ渡す。
+                head = s.lstrip()
+                if "\n" not in s and head.startswith(_INDICATOR_PREFIXES):
+                    out.append(("status", head.strip()))
+                    break
                 # "AI: " は engine が各プランステップの本文頭に付ける飾り。行頭でのみ剥がす。
                 if s.startswith("AI: "):
                     s = s[4:]
@@ -209,6 +220,10 @@ def _tc_args(tc) -> dict:
 # --- プロセス1回だけの AWP ブートストラップ（全セッション共有） ---
 _core = None  # 読み込んだ pixie_core モジュール（キャッシュ）
 
+#: pixie_core が履歴編集 API（1.6）を持つか。持たない AWP でも従来どおり動かし、
+#: 「往復の削除」「/compact」だけを無効化する（bootstrap が判定して立てる）。
+HISTORY_API = False
+
 
 def bootstrap(awp_src):
     """AWP/src を sys.path に前置し、公開境界 pixie_core を読み込む（プロセス1回）。
@@ -241,6 +256,8 @@ def bootstrap(awp_src):
         major, minor = (int(x) for x in ver.split(".")[:2])
     except ValueError:
         major, minor = 0, 0
+    global HISTORY_API
+    HISTORY_API = (major, minor) >= (1, 6)
     if (major, minor) < (1, 4):
         raise RuntimeError(f"pixie_core API 1.4 以上が必要です（現在: {ver or '?'}）。"
                            "AnythingWithPixie を更新してください。")
@@ -344,7 +361,106 @@ def _register_note_tools(pixie_core) -> None:
         )(make_impl(name))
 
 
-class AgentSession:
+class HistoryOps:
+    """会話履歴の編集（pixie_core API 1.6）。Code / Note / Plan の全セッション共通。
+
+    目的は**コンテキストの節約**: 回答が不要だった往復を LLM 文脈から外す（drop_turn）、
+    会話を要約1件に畳んで続きへ引き継ぐ（replace_history）。
+
+    要点は「ターンを index ではなくメッセージ**オブジェクトの同一性**で覚える」こと。
+    エンジンは長い会話を自動トリム（古い側を先頭から落とす）するので、index で覚えると
+    後からずれて別のターンを消してしまう。begin_turn/end_turn で1往復ぶんのメッセージを
+    ハンドルとして掴んでおき、削除時にそれを渡す。
+
+    1ターン（＝1回の HTTP チャット要求）の中で run_turn が複数回走る経路がある
+    （/copilot は 組み立て・反映 の2回）。そこで境界は run_turn ではなく
+    begin_turn/end_turn で切る — ユーザーから見た1往復が、消すときの1単位になる。
+    """
+
+    #: 表示用に覚えておくユーザー発言の長さ（/context の一覧で往復を見分けられれば十分）。
+    TURN_LABEL_CHARS = 60
+
+    def _init_turns(self) -> None:
+        """コンストラクタから呼ぶ（このクラスは __init__ を持たない mixin）。"""
+        self.turns: list[dict] = []   # [{"id", "label", "start", "handles"}]
+        self._turn_seq = 0
+        self._open_turn: dict | None = None
+
+    @property
+    def _history_ok(self) -> bool:
+        # _engine を getattr で見るのは、このクラスを素の mixin として（Engine を持たない
+        # テストダブルにも）混ぜられるようにするため。持たなければ履歴編集は単に無効。
+        return HISTORY_API and hasattr(getattr(self, "_engine", None), "history_size")
+
+    def begin_turn(self, label: str = "") -> int:
+        """1往復の記録を開始し、そのターン ID を返す（0 なら履歴編集は使えない）。"""
+        if not self._history_ok:
+            return 0
+        self._turn_seq += 1
+        self._open_turn = {
+            "id": self._turn_seq,
+            "label": (label or "").strip()[:self.TURN_LABEL_CHARS],
+            "start": self._engine.history_size(),
+            "handles": [],
+        }
+        return self._turn_seq
+
+    def end_turn(self) -> None:
+        """開始後にエンジンが積んだメッセージをこのターンのハンドルとして確定する。
+
+        必ず呼ぶこと（例外・中断時も）。呼ばないと次のターンの start がずれ、
+        削除時に前のターンまで巻き込む。
+        """
+        t, self._open_turn = self._open_turn, None
+        if t is None:
+            return
+        t["handles"] = self._engine.history_tail(t["start"])
+        if t["handles"]:          # 何も積まれなかったターン（即エラー等）は記録しない
+            self.turns.append(t)
+
+    def drop_turn(self, turn_id: int) -> int:
+        """指定ターンのメッセージを LLM 文脈から取り除く。除去件数（未知の ID なら -1）。"""
+        if not self._history_ok:
+            return -1
+        for i, t in enumerate(self.turns):
+            if t["id"] == int(turn_id):
+                removed = self._engine.history_drop(t["handles"])
+                self.turns.pop(i)
+                return removed
+        return -1
+
+    def last_turn_id(self) -> int:
+        """直近ターンの ID（/undo 用）。記録が無ければ 0。"""
+        return self.turns[-1]["id"] if self.turns else 0
+
+    def replace_history(self, messages: list[dict]) -> bool:
+        """履歴を丸ごと差し替える（/compact の引き継ぎ）。ターン記録も作り直す。"""
+        if not self._history_ok:
+            return False
+        self._engine.history_replace(messages)
+        self.turns.clear()        # 旧ハンドルはもう履歴に無い（消しても何も起きない）
+        self._open_turn = None
+        return True
+
+    def history_stats(self) -> dict:
+        """/context 用の概算。文字数はメッセージを JSON 化した長さで測る
+        （ツール結果・tool_calls の引数も文脈を食うため、本文だけでは実態と合わない）。"""
+        if not self._history_ok:
+            return {"supported": False, "messages": 0, "chars": 0, "turns": []}
+        msgs = self._engine.history_tail(0)
+        chars = sum(len(json.dumps(m, ensure_ascii=False)) for m in msgs)
+        return {
+            "supported": True,
+            "messages": len(msgs),
+            "chars": chars,
+            "turns": [{"id": t["id"], "label": t["label"],
+                       "chars": sum(len(json.dumps(m, ensure_ascii=False))
+                                    for m in t["handles"])}
+                      for t in self.turns],
+        }
+
+
+class AgentSession(HistoryOps):
     """1会話（セッション）分の埋め込みエンジン。pixie_core.Engine を1つ保持する。
 
     複数インスタンスを同一プロセスで並行実行できる（state_board は pixie_core 側で ContextVar
@@ -364,6 +480,7 @@ class AgentSession:
 
         # ターン実行の排他（1セッション）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()
+        self._init_turns()  # 往復の記録（削除・/compact 用。HistoryOps）
 
         # 承認の相関 ID とイベント。
         self._approval_event = threading.Event()
@@ -472,7 +589,7 @@ class AgentSession:
         self._approval_event.set()  # 承認待ちを解放（_approve が [] を返して終了）
 
 
-class NoteSession:
+class NoteSession(HistoryOps):
     """Note モード1会話分の埋め込みエンジン（NWP engine_adapter.NoteSession の移植）。
 
     AgentSession（Code モード）との違い:
@@ -511,6 +628,7 @@ class NoteSession:
 
         # ターン実行の排他（1セッション1ターン）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()
+        self._init_turns()  # 往復の記録（削除・/compact 用。HistoryOps）
         self.seeded = False  # サイドカー履歴からのシード済みフラグ（セッション生成後の初回のみ）
 
         # ターン単位の状態。
@@ -615,6 +733,14 @@ def get_note_session() -> NoteSession:
     return _note_session
 
 
+def peek_note_session() -> "NoteSession | None":
+    """生きている Note セッションを返す（無ければ None。作らない）。
+
+    「今ある会話の文脈を見る/削る」用途では、無いなら無いで正しい（文脈が空ということ）。
+    そこで get_ を呼ぶと、見るだけのはずが空セッションを作ってしまう。"""
+    return _note_session
+
+
 def reset_note_session() -> None:
     """Note セッションを破棄する。契機: ワークスペース切替・履歴クリア・モデル変更・モード切替。
 
@@ -638,6 +764,11 @@ def get_plan_session() -> PlanSession:
             raise RuntimeError("pixie_core が初期化されていません（bootstrap 未実行/失敗）")
         _plan_session = PlanSession(_core, config.active_server(), str(config.WORKSPACE),
                                     settings.copilot_enabled)
+    return _plan_session
+
+
+def peek_plan_session() -> "PlanSession | None":
+    """生きている Plan セッションを返す（無ければ None。作らない）。peek_note_session と同趣旨。"""
     return _plan_session
 
 

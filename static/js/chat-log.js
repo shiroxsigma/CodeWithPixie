@@ -1,9 +1,3 @@
-// ============================================================================
-// 正本: PixieProject/shared/web/js/chat-log.js
-// このファイルは shared/scripts/sync_web.py で各アプリ（NoteWithPixie /
-// CodeWithPixie）の static/js/ へコピー配布される。アプリ側のコピーを直接
-// 編集しないこと（次回 sync で上書きされる）。編集は必ずこの正本で行う。
-// ============================================================================
 // チャットログの共通 DOM 操作。#messages コンテナと .msg/.body/.tool-log の
 // DOM 契約は両アプリ共通（index.html / style.css も共有）。
 
@@ -48,6 +42,24 @@ export function addMessage(role, text) {
   // 自分が送信した直後は読み返し位置に関わらず下端へ戻す（送信＝下端に用がある操作）。
   scrollMessages(role === "user");
   return el;
+}
+
+/**
+ * 発言に「この往復を削除」ボタンを付ける（回答が不要だったやりとりの後始末）。
+ *
+ * ボタンは吹き出しの中に置く（外側のラッパを作らない）。#messages の直下は
+ * .msg が並ぶだけ、という DOM 契約が既存コード（履歴の再描画・空箱の畳み込み・
+ * スクロール追従）のあちこちの前提になっているため。
+ */
+export function addDeleteButton(el, onDelete) {
+  if (!el || el.querySelector(".msg-del")) return;
+  const btn = document.createElement("button");
+  btn.className = "msg-del";
+  btn.type = "button";
+  btn.textContent = "🗑";
+  btn.title = "この往復を削除（LLM の文脈からも消してコンテキストを節約する）";
+  btn.addEventListener("click", onDelete);
+  el.appendChild(btn);
 }
 
 /** エージェントのツール実行ステータスを本文の上のログ枠に積む。 */

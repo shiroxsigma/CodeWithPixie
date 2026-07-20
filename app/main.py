@@ -19,7 +19,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, copilot, engine_adapter, extract, files, mdflow, mode, note_api, note_prompts, patch, search
+from . import (compact, config, copilot, copilot_flow, engine_adapter, extract, files, mdflow,
+               mode, note_api, note_prompts, patch, search)
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -532,8 +533,40 @@ def _sse(ev: dict) -> str:
 SELECTION_MAX_CHARS = 8000
 
 
+def _code_user_text(req: ChatReq, message: str) -> str:
+    """Code モードのユーザーテキスト（エディタ側の文脈を前置きする）。
+
+    Note/Plan モードの note_prompts.build_user_text に相当する Code モード版。
+    message を差し替えられるようにしてあるのは、/copilot が同じ文脈のまま「指示」だけを
+    質問組み立て依頼に差し替えて使うため。
+    """
+    # 開いているファイルをコンテキストとして前置する。小型モデルは「このファイル」「今開いて
+    # いるファイル」という指示語からパスを推測できず、ハルシネートしたパスを探し回る実測がある。
+    if req.current_file:
+        message = (
+            f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
+            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。）\n\n"
+            f"{message}"
+        )
+    # 選択範囲も渡す（Note モードと同じ機能を Code モードでも: 「この関数を直して」の「この」）。
+    # 本文（未保存の編集を含むエディタ上の実体）を埋め込むのは、エージェントが read_file で
+    # 読むとディスク上の古い内容になるため。長い選択は前置きが本題を押し流すので切り詰める。
+    sel = (req.selection or "").strip()
+    if sel:
+        if len(sel) > SELECTION_MAX_CHARS:
+            sel = sel[:SELECTION_MAX_CHARS] + "\n…（長いため以降を省略）"
+        where = f"（{req.current_file}）" if req.current_file else ""
+        message = (
+            f"（コンテキスト: ユーザーがエディタで選択中のテキスト{where}。"
+            f"「この関数」「選択部分」等はここを指します。エディタ上の実体なので、"
+            f"ディスク上の内容と異なる場合はこちらが新しいです。）\n"
+            f"```\n{sel}\n```\n\n{message}"
+        )
+    return message
+
+
 # --- /copilot 直行経路（NWP 移植）---------------------------------------------
-COPILOT_QUESTION_MAX_CHARS = 15_000  # NWP と同値。Copilot 側の入力欄が長文を弾くため
+COPILOT_QUESTION_MAX_CHARS = copilot_flow.QUESTION_MAX_CHARS
 
 
 def _build_copilot_question(user_msg: str, selection: str, context_files: list[dict]) -> str:
@@ -555,7 +588,11 @@ def _build_copilot_question(user_msg: str, selection: str, context_files: list[d
 
 
 def _copilot_direct(question_text: str, req: ChatReq) -> StreamingResponse:
-    """「/copilot 質問…」: エージェント（LLM）を介さず Copilot に1回だけ聞いて返す。
+    """「/copilot! 質問…」: エージェント（LLM）を介さず Copilot に1回だけ聞いて返す。
+
+    質問の組み立ても回答の反映もしない素の経路（それが要るときは /copilot →
+    _copilot_orchestrated）。単に外部知識を聞きたいだけのときに、組み立ての待ち時間と
+    ローカル LLM の解釈を挟まずに済ませるために残してある。
 
     エージェントもセッションも使わない直行経路なので、Code/Note どちらのモードでも通す
     （モードで変わるのはエージェントの振る舞いであって、この経路には関係がない）。
@@ -573,8 +610,8 @@ def _copilot_direct(question_text: str, req: ChatReq) -> StreamingResponse:
             return
         if not question_text and not req.selection.strip():
             yield _sse({"type": "error",
-                        "text": "`/copilot` の後に質問を書いてください"
-                                "（例: `/copilot RAG の最新動向は？`）。テキスト選択だけでも送れます。"})
+                        "text": "`/copilot!` の後に質問を書いてください"
+                                "（例: `/copilot! RAG の最新動向は？`）。テキスト選択だけでも送れます。"})
             yield _sse({"type": "done"})
             return
 
@@ -599,14 +636,77 @@ def _copilot_direct(question_text: str, req: ChatReq) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-def _turn_stream(sess, start_turn) -> StreamingResponse:
+def _copilot_orchestrated(user_ask: str, req: ChatReq) -> StreamingResponse:
+    """「/copilot 依頼…」: 組み立て → Copilot に質問 → 回答を反映、を1ターンで回す。
+
+    直行経路（_copilot_direct）との違いは、両端にエージェントを立てること:
+    質問文はこれまでの会話・ワークスペースを見て組み立てられ、回答は事実確認のうえ
+    コードへ反映される。3フェーズとも同じセッション・同じ busy ロックの中で走るので、
+    Copilot とのやりとりは会話履歴に残り、以降のターンの文脈になる。
+
+    セッションの取り方はモードごとに違う（Code=複数セッション / Note・Plan=単一）が、
+    フェーズの中身はモードに依らない — 反映のされ方（直接編集か編集ブロックか）は
+    各モードのツールプロファイルと system_suffix が既に決めているため。
+    """
+    if not settings.copilot_enabled:
+        return _error_stream("Copilot 連携が無効です。⚙️ 設定でオンにしてください。")
+
+    current = mode.current_mode()
+    _require_manager()  # bootstrap 済み（= pixie_core 初期化済み）の確認
+    if current in ("note", "plan"):
+        try:
+            sess = (engine_adapter.get_note_session() if current == "note"
+                    else engine_adapter.get_plan_session())
+        except RuntimeError as e:
+            raise HTTPException(503, str(e))
+        approval_timeout = 0.0
+    else:
+        sess = _require_manager().get_or_create(_valid_sid(req.session_id))
+        approval_timeout = settings.approval_timeout
+
+    if not sess.busy.acquire(blocking=False):
+        raise HTTPException(409, "このセッションは別のターンを実行中です。")
+
+    compose = copilot_flow.build_compose_prompt(user_ask)
+    if current in ("note", "plan"):
+        if current == "note" and not sess.seeded:
+            sess.seed_history(req.history or note_api.load_chat_messages())
+        context = [{"path": c.path, "content": c.content}
+                   for c in req.context_files + req.ref_texts]
+        compose_text = note_prompts.build_user_text(
+            compose, req.selection, context,
+            req.current_file or "", req.current_content, req.attach_files)
+    else:
+        compose_text = _code_user_text(req, compose)
+
+    return _turn_stream(sess, lambda emit: copilot_flow.run(
+        sess, compose_text=compose_text, user_ask=user_ask,
+        attach_files=list(req.attach_files), emit=emit,
+        approval_timeout=approval_timeout), label=req.message)
+
+
+def _error_stream(text: str) -> StreamingResponse:
+    """1件の error → done だけを返す SSE（セッションを取らずに断るとき用）。"""
+    async def gen():
+        yield _sse({"type": "error", "text": text})
+        yield _sse({"type": "done"})
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
     """1ターンを worker スレッドで実行し SSE へ変換する共通部（Code/Note 両モード）。
 
     前提: sess.busy は取得済み（ここで必ず解放する）。start_turn(emit) がターン本体。
     クライアント切断時は協調キャンセルで worker を解放する（Lock 専有を防ぐ）。
+
+    ここで往復の記録（HistoryOps.begin_turn / end_turn）も開閉する。境界を run_turn では
+    なくこの層に置くのは、/copilot のように1往復の中で run_turn が2回走る経路があるため
+    — ユーザーから見た1往復が、後で消すときの1単位になる。ターン ID は最初の SSE
+    イベントとして流し、フロントが吹き出しに紐づけて 🗑 で消せるようにする。
     """
     q: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    turn_id = sess.begin_turn(label)
 
     def emit(ev: dict) -> None:
         # worker スレッド → イベントループへ安全に受け渡し。
@@ -616,6 +716,7 @@ def _turn_stream(sess, start_turn) -> StreamingResponse:
         try:
             start_turn(emit)
         finally:
+            sess.end_turn()  # 中断・例外時も必ず閉じる（次ターンの境界がずれる）
             emit({"type": "__end__"})
             sess.busy.release()
 
@@ -624,6 +725,8 @@ def _turn_stream(sess, start_turn) -> StreamingResponse:
     async def gen():
         done = False
         try:
+            if turn_id:
+                yield _sse({"type": "turn", "id": turn_id})
             while True:
                 ev = await q.get()
                 if ev.get("type") == "__end__":
@@ -665,7 +768,7 @@ def _note_chat(req: ChatReq) -> StreamingResponse:
         req.message, req.selection, context,
         req.current_file or "", req.current_content, req.attach_files)
 
-    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit))
+    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit), label=req.message)
 
 
 def _plan_chat(req: ChatReq) -> StreamingResponse:
@@ -693,17 +796,66 @@ def _plan_chat(req: ChatReq) -> StreamingResponse:
         req.message, req.selection, context,
         req.current_file or "", req.current_content, req.attach_files)
 
-    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit))
+    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit), label=req.message)
+
+
+def _compact_chat(focus: str, req: ChatReq) -> StreamingResponse:
+    """`/compact`: 現在モードのセッションの会話を要約し、履歴をそれ1件に畳む。
+
+    要約は「そのセッションのエンジン」に書かせる必要がある（畳む対象の会話を持っている
+    のがそこだけなので）。モードごとにセッションの取り方だけが違い、中身は共通。
+    """
+    sess, approval_timeout = _mode_session(req.session_id, create=True)
+    if not sess.busy.acquire(blocking=False):
+        raise HTTPException(409, "このセッションは別のターンを実行中です。")
+    # サーバ再起動後いきなり /compact した場合、エンジンの文脈はまだ空。畳む対象は
+    # 画面に見えている会話なので、通常ターンと同じくサイドカー履歴で先に復元する。
+    if mode.current_mode() == "note" and not getattr(sess, "seeded", True):
+        sess.seed_history(req.history or note_api.load_chat_messages())
+    return _turn_stream(sess, lambda emit: compact.run(
+        sess, focus=focus, emit=emit, approval_timeout=approval_timeout), label=req.message)
+
+
+def _mode_session(session_id: str, create: bool = False):
+    """現在モードのセッションと承認タイムアウトを返す（Code は session_id 別、Note/Plan は単一）。
+
+    「今のモードのセッションはどれか」の判断はチャット経路のあちこちで要るので1箇所に集める。
+    create=False で未作成なら (None, 0.0) — 履歴の統計や削除は、まだ会話が無いなら
+    セッションを新規に立てる必要が無い（立てると空セッションが上限枠を食う）。
+    """
+    current = mode.current_mode()
+    _require_manager()  # bootstrap 済み（= pixie_core 初期化済み）の確認
+    if current in ("note", "plan"):
+        if not create:
+            peek = (engine_adapter.peek_note_session if current == "note"
+                    else engine_adapter.peek_plan_session)
+            return peek(), 0.0
+        getter = (engine_adapter.get_note_session if current == "note"
+                  else engine_adapter.get_plan_session)
+        try:
+            return getter(), 0.0
+        except RuntimeError as e:
+            raise HTTPException(503, str(e))
+    manager = _require_manager()
+    sid = _valid_sid(session_id)
+    sess = manager.get_or_create(sid) if create else manager.get(sid)
+    return sess, settings.approval_timeout
 
 
 @app.post("/api/chat")
 async def api_chat(req: ChatReq):
     if not req.message.strip():
         raise HTTPException(400, "空のメッセージです。")
-    # 先頭が "/copilot" なら、モードにもエージェントにも関係なく Copilot へ直接聞きに行く
+    # /copilot 系。"!" 付きはエージェントを介さない直行（速いが文脈も反映も無い）、
+    # 付かない方はエージェントが質問を組み立てて回答を反映するオーケストレーション。
     msg = req.message.strip()
+    if msg.lower().startswith("/copilot!"):
+        return _copilot_direct(msg[len("/copilot!"):].strip(), req)
     if msg.lower().startswith("/copilot"):
-        return _copilot_direct(msg[len("/copilot"):].strip(), req)
+        return _copilot_orchestrated(msg[len("/copilot"):].strip(), req)
+    # /compact はモードに依らず同じ処理（畳む対象は現在モードのセッションの会話）。
+    if msg.lower().startswith("/compact"):
+        return _compact_chat(msg[len("/compact"):].strip(), req)
     current = mode.current_mode()
     if current == "note":
         return _note_chat(req)
@@ -717,31 +869,9 @@ async def api_chat(req: ChatReq):
     if not sess.busy.acquire(blocking=False):
         raise HTTPException(409, "このセッションは別のターンを実行中です。")
 
-    # 開いているファイルをコンテキストとして前置する。小型モデルは「このファイル」「今開いて
-    # いるファイル」という指示語からパスを推測できず、ハルシネートしたパスを探し回る実測がある。
-    message = req.message
-    if req.current_file:
-        message = (
-            f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
-            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。）\n\n"
-            f"{req.message}"
-        )
-    # 選択範囲も渡す（Note モードと同じ機能を Code モードでも: 「この関数を直して」の「この」）。
-    # 本文（未保存の編集を含むエディタ上の実体）を埋め込むのは、エージェントが read_file で
-    # 読むとディスク上の古い内容になるため。長い選択は前置きが本題を押し流すので切り詰める。
-    sel = (req.selection or "").strip()
-    if sel:
-        if len(sel) > SELECTION_MAX_CHARS:
-            sel = sel[:SELECTION_MAX_CHARS] + "\n…（長いため以降を省略）"
-        where = f"（{req.current_file}）" if req.current_file else ""
-        message = (
-            f"（コンテキスト: ユーザーがエディタで選択中のテキスト{where}。"
-            f"「この関数」「選択部分」等はここを指します。エディタ上の実体なので、"
-            f"ディスク上の内容と異なる場合はこちらが新しいです。）\n"
-            f"```\n{sel}\n```\n\n{message}"
-        )
-
-    return _turn_stream(sess, lambda emit: sess.run_turn(message, emit, settings.approval_timeout))
+    message = _code_user_text(req, req.message)
+    return _turn_stream(sess, lambda emit: sess.run_turn(message, emit, settings.approval_timeout),
+                        label=req.message)
 
 
 @app.post("/api/approve")
@@ -760,6 +890,64 @@ def api_interrupt(req: InterruptReq):
         raise HTTPException(404, "session not found")
     sess.cancel()
     return {"ok": True}
+
+
+# --- 会話文脈の節約（往復の削除 / 残量の確認 / まるごとリセット） -----------------
+class TurnDeleteReq(BaseModel):
+    session_id: str
+    turn_id: int
+
+
+class SessionClearReq(BaseModel):
+    session_id: str
+
+
+@app.post("/api/chat/turn/delete")
+def api_turn_delete(req: TurnDeleteReq):
+    """1往復ぶんを LLM 文脈から取り除く（回答が不要だったやりとりの後始末）。
+
+    フロントの吹き出し削除と対で使う。セッションが既に無い（サーバ再起動・モード切替で
+    破棄された）場合は 200 で removed=0 を返す — 消したい文脈がそもそも存在しないので、
+    ユーザーから見れば成功と同じであり、エラーにすると表示だけ消せなくなる。
+    """
+    sess, _ = _mode_session(req.session_id)
+    if sess is None:
+        return {"ok": True, "removed": 0, "reason": "session gone"}
+    removed = sess.drop_turn(req.turn_id)
+    if removed < 0:
+        return {"ok": False, "removed": 0,
+                "reason": "unknown turn (already dropped / summarized / engine too old)"}
+    return {"ok": True, "removed": removed}
+
+
+@app.get("/api/context")
+def api_context(session_id: str = ""):
+    """現在モードのセッションが抱えている文脈の量（/context 表示用）。
+
+    会話が始まっていなければセッションは作らずに空を返す。"""
+    sess, _ = _mode_session(session_id)
+    stats = sess.history_stats() if sess is not None else {
+        "supported": engine_adapter.HISTORY_API, "messages": 0, "chars": 0, "turns": []}
+    stats["mode"] = mode.current_mode()
+    stats["model"] = config.active_server().get("model") or ""
+    return stats
+
+
+@app.post("/api/session/clear")
+def api_session_clear(req: SessionClearReq):
+    """現在モードの会話（LLM 文脈）を丸ごと捨てる（`/clear`）。
+
+    Note の保存履歴（.pixie_chat.json）はここでは消さない — 消すかどうかは
+    DELETE /api/chat/history という別の意思表示に紐づいており、フロントが両方呼ぶ。
+    """
+    current = mode.current_mode()
+    if current == "note":
+        engine_adapter.reset_note_session()
+    elif current == "plan":
+        engine_adapter.reset_plan_session()
+    else:
+        _require_manager().drop(_valid_sid(req.session_id))
+    return {"ok": True, "mode": current}
 
 
 # --- Note 系 API・モード切替（Stage C） -----------------------------------------

@@ -131,12 +131,13 @@ def test_plan_session_engine_profile(tmp_path):
 
 # --- チャット経路（_turn_stream の契約）------------------------------------------
 
-class _FakePlanSession:
+class _FakePlanSession(engine_adapter.HistoryOps):
     """run_turn だけを持つダミー。エンジンは起動しない。"""
 
     def __init__(self):
         self.busy = threading.Lock()
         self.messages = []
+        self._init_turns()  # _turn_stream が往復を記録する（Engine 無しなので実質 no-op）
 
     def set_copilot(self, enabled):
         pass

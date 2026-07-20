@@ -13,15 +13,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import main  # noqa: E402
+from app import engine_adapter, main  # noqa: E402
 
 client = TestClient(main.app, base_url="http://127.0.0.1")
 
 
-class _FakeSession:
+class _FakeSession(engine_adapter.HistoryOps):
     def __init__(self):
         self.busy = threading.Lock()
         self.messages = []
+        self._init_turns()  # _turn_stream が往復を記録する（Engine 無しなので実質 no-op）
 
     def set_copilot(self, enabled):
         pass

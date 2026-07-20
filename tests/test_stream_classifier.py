@@ -102,6 +102,24 @@ def test_indicator_with_cr_is_status():
     assert status == ["🧠 Thinking..."]
 
 
+def test_leading_prefill_indicator_without_cr_is_status():
+    """engine の**最初の** "  ⏳ Prefill..." は `\\r` を伴わずに来る（実際の出力）。
+
+    ここを本文に流すと "⏳ Prefill...AI: <think>…" となり、行頭でなくなった "AI: " も
+    剥がれず、splitThink の visible が "⏳ Prefill..." だけになって差分プレビューが空になる。
+    """
+    body, status = _run(["  ⏳ Prefill...", "AI: ", "本文です", "\n"])
+    assert body == "本文です\n"
+    assert status == ["⏳ Prefill..."]
+
+
+def test_indicator_prefix_midline_stays_body():
+    """行の途中の ⏳/🧠 は本文（インジケータ判定は行頭のみ）。"""
+    body, status = _run(["締切は ", "⏳ 明日です", "\n"])
+    assert body == "締切は ⏳ 明日です\n"
+    assert status == []
+
+
 def test_thinking_word_in_body_is_not_status():
     """\\r を伴わない "Thinking..." は本文（語がインジケータと同じでも消さない）。"""
     body, status = _run(["Thinking... という語について", "\n"])
