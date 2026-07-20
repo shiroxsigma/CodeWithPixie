@@ -5,6 +5,7 @@
 // その場合は静かに機能を落とす（Monaco と違い、無くても編集はできる）。
 
 import * as mdflow from "./mdflow.js";
+import { copyPngToClipboard, diagramId, svgToPngBlob } from "./mermaid-export.js";
 
 const md = window.markdownit
   ? window.markdownit({
@@ -120,7 +121,81 @@ function putSvg(src, svg) {
   svgCache.set(src, svg);
 }
 
-function toBox(svg) {
+// 図をワークスペースへ保存する処理。API とトーストはアプリ側の都合なので、
+// レンダラは受け取った関数を呼ぶだけにする（assetBase と同じ「app.js が注入する」形）。
+// 未登録なら保存ボタンを出さない（押せてもエラーになるボタンは出さない）。
+let saveDiagram = null;
+
+/**
+ * 「図をワークスペースへ保存」の実装を登録する。
+ * fn(blob, id) -> Promise<string>：保存した相対パスを返すこと（バーに出す）。
+ */
+export function setDiagramSaver(fn) {
+  saveDiagram = fn;
+}
+
+/** 図の右上に出す書き出しバー（hover で見える）。 */
+function buildExportBar(box, id) {
+  const bar = document.createElement("div");
+  bar.className = "mermaid-tools";
+  const status = document.createElement("span");
+  status.className = "mermaid-tools-status";
+
+  const run = async (btn, label, job) => {
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "⏳";
+    status.className = "mermaid-tools-status";
+    status.textContent = "";
+    try {
+      status.textContent = (await job()) || label;
+    } catch (e) {
+      status.className = "mermaid-tools-status error";
+      status.textContent = e?.message || String(e);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+      // 結果表示は数秒で消す（図の上に貼り付いたままにしない）。
+      const shown = status.textContent;
+      setTimeout(() => { if (status.textContent === shown) status.textContent = ""; }, 6000);
+    }
+  };
+
+  // PNG 化は「表示されている SVG」から行う。mdflow のプリセット切替でハイライトが
+  // 変わった状態も、見えているとおりに書き出される。
+  const png = () => svgToPngBlob(box.querySelector("svg"), { background: pngBackground() });
+
+  bar.appendChild(status);  // 結果は左、ボタンは右
+  if (saveDiagram) {
+    const save = document.createElement("button");
+    save.type = "button";
+    save.title = "PNG にしてワークスペースへ保存する（同じ図は同じ名前へ書き直す）";
+    save.textContent = "🖼 保存";
+    save.addEventListener("click", () =>
+      run(save, "保存しました", async () => `✓ ${await saveDiagram(await png(), id)}`));
+    bar.appendChild(save);
+  }
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.title = "PNG をクリップボードへコピーする";
+  copy.textContent = "📋 コピー";
+  copy.addEventListener("click", () =>
+    run(copy, "コピーしました", async () => {
+      await copyPngToClipboard(await png());
+      return "✓ コピーしました";
+    }));
+  bar.appendChild(copy);
+  return bar;
+}
+
+/** PNG の下地色。図はダークテーマで描かれているので、透明のままだと白地で読めない。 */
+function pngBackground() {
+  const v = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  return v || "#1e1e2a";
+}
+
+function toBox(svg, meta = {}) {
   const box = document.createElement("div");
   box.className = "mermaid-box";
   box.innerHTML = svg;  // mermaid が securityLevel:'strict' で生成した SVG
@@ -136,6 +211,9 @@ function toBox(svg) {
     el.style.width = `${parseFloat(vb[2])}px`;
     el.style.maxWidth = "none";
   }
+  // バーは図の「上」に通常フローで置く。.mermaid-box は overflow-x:auto なので、
+  // 絶対配置にすると横スクロールに連れて流れていく。
+  if (el) box.prepend(buildExportBar(box, diagramId(meta.src, meta.index || 0)));
   return box;
 }
 
@@ -147,7 +225,9 @@ function toBox(svg) {
  */
 async function renderMermaid(el, gen, ctx) {
   if (!mermaid) return;
+  let index = -1;  // 文書内の通し番号。`%% id:` の無い図のファイル名に使う
   for (const block of el.querySelectorAll("pre.mermaid-src")) {
+    index += 1;
     const src = block.textContent;
     const flow = ctx ? prepareFlow(src, ctx) : null;
     // svgCache のキーは注入済みソース。プリセットを切り替えるとキーが変わるので、
@@ -159,8 +239,9 @@ async function renderMermaid(el, gen, ctx) {
       if (flow) box.after(buildPresetList(flow, ctx));
     };
 
+    const meta = { src, index };
     const cached = svgCache.get(renderSrc);
-    if (cached) { finish(toBox(cached)); continue; }
+    if (cached) { finish(toBox(cached, meta)); continue; }
 
     let svg;
     try {
@@ -190,7 +271,7 @@ async function renderMermaid(el, gen, ctx) {
     putSvg(renderSrc, svg);
     // await の間に描き直されていたら、この block は既に捨てられた DOM
     if (generation.get(el) !== gen) return;
-    finish(toBox(svg));
+    finish(toBox(svg, meta));
   }
 }
 

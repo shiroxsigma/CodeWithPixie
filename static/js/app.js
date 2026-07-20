@@ -8,7 +8,8 @@
 // モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code /
 //   mode-plan で出し分け。
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
-import { available as mdAvailable, renderInto, renderPlain, setAssetBase } from "./markdown.js";
+import { available as mdAvailable, renderInto, renderPlain, setAssetBase, setDiagramSaver } from "./markdown.js";
+import { blobToBase64, sanitizeName } from "./mermaid-export.js";
 import * as mdflow from "./mdflow.js";
 import { $ } from "./dom.js";
 import { addDeleteButton, addMessage, addToolStatus, scrollMessages } from "./chat-log.js";
@@ -154,6 +155,11 @@ window.__monacoReady.then((monaco) => {
 });
 
 async function init() {
+  // 図の書き出しはレンダラ（markdown.js）から呼ばれるが、保存先とファイル一覧の更新は
+  // アプリ側の都合なので実装をここで注入する。**最初の描画より前**に登録すること —
+  // loadHistory() が復元するチャットにも図は含まれ、toBox はバーを組むときに
+  // 登録済みかどうかを見る（未登録なら保存ボタンを出さない）。
+  setDiagramSaver(saveDiagramPng);
   await loadMode();
   applyModeUI();
   await loadStatus();
@@ -933,6 +939,29 @@ function setPreviewVisible(on) {
 
 function closePreview() {
   setPreviewVisible(false);
+}
+
+/**
+ * mermaid 図の PNG をワークスペースへ保存する（markdown.js の 🖼 保存が呼ぶ）。
+ *
+ * 保存先は貼り付け画像と同じ `<ノートのディレクトリ>/images/`（POST /api/image）。
+ * ファイル名は「ノート名-図ID」で決まるので、図を直して保存し直すと**同じファイルへ
+ * 上書き**される（overwrite: true）。図1枚につきファイル1個に保つため — 日時で
+ * 名付けたり -2 -3 と増やしたりすると、ノートに貼ったリンクが古い図を指し続ける。
+ * 戻り値の相対パスは図のバーに出す。
+ */
+async function saveDiagramPng(blob, id) {
+  const note = state.currentFile || "";
+  const stem = sanitizeName(baseName(note).replace(/\.[^.]+$/, "")) || "diagram";
+  const r = await postJSON("/api/image", {
+    note,
+    name: `${stem}-${id}`,
+    ext: "png",
+    data_b64: await blobToBase64(blob),
+    overwrite: true,
+  });
+  await loadFileList();  // 保存した画像をファイルツリーに出す
+  return r.path;
 }
 
 function togglePreview() {

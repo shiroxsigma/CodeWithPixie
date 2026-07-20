@@ -125,6 +125,10 @@ class ImageSaveReq(BaseModel):
     data_b64: str      # 画像バイナリの base64。multipart にしないのは依存（python-multipart）を増やさないため
     ext: str = "png"
     name: str = ""     # 元ファイル名（D&D のとき）。空なら日時から自動命名
+    # 同名があるとき上書きしてよいか。既定は False（貼った画像が別の画像を消さない）。
+    # True にするのは mermaid 図の書き出しだけ — 名前が「ノート名＋図ID」で決まる
+    # 生成物なので、描き直すたびに -2 -3 と増えるほうが困る。
+    overwrite: bool = False
 
 
 # --- 付箋（インラインコメント）の永続化 ---------------------------------------
@@ -267,17 +271,25 @@ def api_image_save(req: ImageSaveReq):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
+    # note が空だと safe_path("") がワークスペース直下（= root 自身）へ解決され、
+    # その .parent はワークスペースの外を指す。ファイルを開いていない状態からの
+    # 保存（mermaid 図の書き出し）もあるので、その場合は root 直下の images/ にする。
+    base_dir = note_p.parent if note_p != config.WORKSPACE else config.WORKSPACE
+
     stem = _safe_image_stem(Path(req.name).stem) if req.name else ""
     if not stem:
         stem = f"{_safe_image_stem(note_p.stem) or 'image'}-{datetime.now():%Y%m%d-%H%M%S}"
-    # 既存とぶつかったら -2, -3 と付けて絶対に上書きしない（貼った画像が別ノートの画像を消さない）
+    # 既存とぶつかったら -2, -3 と付けて絶対に上書きしない（貼った画像が別ノートの画像を消さない）。
+    # overwrite=True（mermaid 図の書き出し）だけは同じ名前へ書き直す。
     n = 1
     while True:
         fname = f"{stem}{ext}" if n == 1 else f"{stem}-{n}{ext}"
-        target = note_p.parent / "images" / fname
-        if not target.exists():
+        target = base_dir / "images" / fname
+        if req.overwrite or not target.exists():
             break
         n += 1
+    if target.is_dir():
+        raise HTTPException(400, f"同名のフォルダがあります: images/{fname}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     return {

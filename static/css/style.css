@@ -403,6 +403,29 @@ button:active { transform: translateY(1px); }
 /* 構文エラーの図は消さずソースを残す。書きかけの段階では普通に起きる。 */
 .mermaid-src.mermaid-error { border-color: var(--danger); cursor: help; }
 
+/* 図の書き出しバー（🖼 保存 / 📋 コピー）。図ごとに常時見えていると読むのを邪魔するので
+   hover で出す。visibility ではなく opacity なのは、場所を先に確保して図が動かないため。 */
+.mermaid-tools {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  margin-bottom: 4px; opacity: 0; transition: opacity .12s;
+}
+.mermaid-box:hover .mermaid-tools,
+.mermaid-tools:focus-within { opacity: 1; }
+.mermaid-tools button {
+  padding: 1px 8px; font-size: 11px; line-height: 1.6;
+  background: var(--bg2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+}
+.mermaid-tools button:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
+.mermaid-tools button:disabled { cursor: default; opacity: .6; }
+.mermaid-tools-status {
+  flex: 1; min-width: 0; font-size: 11px; color: var(--muted); text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mermaid-tools-status.error { color: var(--danger); }
+/* 結果が出ている間はバーを出したままにする（hover を外した瞬間に消えると読めない）。 */
+.mermaid-tools:has(.mermaid-tools-status:not(:empty)) { opacity: 1; }
+
 /* --- mdflow: 条件別フロー可視化 ---------------------------------------------
    図の直下に出る条件プリセットのリスト。DOM は markdown.js の buildPresetList、
    クリック等は app.js の委譲リスナー（bindMdflowUI）。 */
