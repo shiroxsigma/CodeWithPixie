@@ -439,8 +439,17 @@ def api_settings(req: SettingsReq):
             raise HTTPException(400, str(e))
     if req.model is not None and req.model.strip():
         config.set_active_server_model(req.model.strip())
-    # Note セッションは LLM バックエンド束縛ごと作り直す（Code は新規セッションから反映）
+    # モデル/サーバを変えたら両エンジンのセッションを破棄する。古い model で束縛された
+    # セッションが残っていると、config を更新してもそちらが使われ続け（LM Studio が
+    # 解決できない旧 model 名で 400 になる）、反映されたように見えない。
+    # Note は get 時に再生成、Code は次のチャットで新規セッションになる。
+    changed = (req.active_server is not None) or bool(req.model and req.model.strip())
     engine_adapter.reset_note_session()
+    if changed:
+        try:
+            _require_manager().clear()
+        except Exception:
+            pass  # engine 未初期化時などは無害（次回起動で新 model が使われる）
     return {"ok": True, "active": config.get_active_server_index(),
             "model": config.active_server().get("model")}
 
