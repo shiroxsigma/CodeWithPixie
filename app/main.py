@@ -391,12 +391,28 @@ def api_servers():
     return {"servers": servers, "active": config.get_active_server_index()}
 
 
+def _is_chat_capable(model_id: str) -> bool:
+    """LM Studio の /v1/models はチャット対象外のファイル（ビジョンプロジェクタ・
+    embedding・rerank 等）も混ぜて返す。これらを選ぶとロード失敗（HTTP 400）するので除外。
+
+    LM Studio の標準 OpenAI 互換応答には「チャット可否」フィールドが無いため、
+    ファイル名のヒューリスティックで判定する（過不足はあるが主要なロートルを潰す）。"""
+    lower = model_id.lower()
+    return not any(b in lower for b in (
+        "mmproj",          # ビジョンプロジェクタ（本体と対で配布されるがチャット不可）
+        "embedding", "-embed",  # text-embedding-*
+        "rerank",          # reranker
+        "bge-m3",          # BGE-M3 は embed/rerank 兼用でチャット不可のこと多い
+    ))
+
+
 @app.get("/api/models")
 async def api_models():
     """アクティブサーバからロード済みモデル一覧を取得（LM Studio の /v1/models）。
 
     ⚙️設定のモデル選択ドロップダウン用。LM Studio 未起動・モデル未ロード時は空配列を返す
-    （フロントは「取得できません」表示にフォールバックする）。"""
+    （フロントは「取得できません」表示にフォールバックする）。
+    チャット対象外（mmproj / embedding 等）は _is_chat_capable で除外する。"""
     import httpx
     srv = config.active_server()
     base = (srv.get("base_url") or "").rstrip("/")
@@ -406,7 +422,8 @@ async def api_models():
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.get(f"{base}/models", headers=headers)
             r.raise_for_status()
-            models = [m["id"] for m in r.json().get("data", []) if m.get("id")]
+            models = [m["id"] for m in r.json().get("data", [])
+                      if m.get("id") and _is_chat_capable(m["id"])]
     except Exception:
         pass  # LM Studio 停止中・タイムアウト等。空配列で返す（フロントが案内する）
     return {"models": models, "current": srv.get("model")}
