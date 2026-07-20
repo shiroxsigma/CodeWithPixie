@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -583,9 +583,23 @@ mode.register_reset_hook(lambda: _manager.clear() if _manager is not None else N
 
 
 # --- 静的フロント -------------------------------------------------------------
+# app.js / style.css の mtime をクエリに埋め込んで返す（ブラウザの古い JS キャッシュで
+# 機能追加が反映されない事故を防ぐ）。ファイルを更新すると mtime が変わり URL が変わるので、
+# ブラウザは必ず新しい版を再取得するようになる。
+_BUILT_ASSETS = ("js/app.js", "css/style.css")
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for rel in _BUILT_ASSETS:
+        try:
+            mtime = int((STATIC / rel).stat().st_mtime)
+        except OSError:
+            continue
+        target = f"/static/{rel}"
+        html = html.replace(f'"{target}"', f'"{target}?v={mtime}"')
+    return HTMLResponse(html)
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
