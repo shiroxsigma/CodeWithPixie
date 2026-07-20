@@ -1,0 +1,123 @@
+"""engine_adapter の Note モードプロファイルのテスト（NWP tests/test_engine_adapter.py の移植）。
+
+AWP（AnythingWithPixie）が隣に無い環境では bootstrap 依存のテストを skip する。
+LLM 接続は不要（create_engine はバックエンドへ接続しない）。
+"""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app import config, engine_adapter, note_prompts  # noqa: E402
+
+_AWP_SRC = config.AWP_SRC
+needs_awp = pytest.mark.skipif(
+    not (_AWP_SRC / "pixie_core" / "_api.py").exists(),
+    reason=f"AnythingWithPixie が見つからない: {_AWP_SRC}",
+)
+
+
+# --- 静的 suffix（エンジン不要） ---
+
+def test_note_system_suffix_contains_edit_protocol():
+    """編集プロトコルの最重要文言が suffix に含まれること。
+
+    これが崩れるとフロントの extractEdits → /api/patch → 差分反映が全滅する。"""
+    sfx = engine_adapter.NOTE_SYSTEM_SUFFIX
+    assert "```search" in sfx
+    assert "```replace" in sfx
+    assert "```apply" in sfx
+    assert "unified diff" in sfx        # diff 禁止の指示
+    assert "mdflow-mapping" in sfx      # mdflow 文法ガイド（常時静的注入）
+    assert note_prompts.EDIT_PROTOCOL in sfx
+
+
+def test_note_tools_are_read_only_names():
+    assert engine_adapter.NOTE_TOOLS == frozenset(
+        {"list_workspace", "read_note", "grep_workspace", "describe_flows"})
+
+
+# --- _guard（エンジン不要のユニットテスト） ---
+
+class _GuardHarness:
+    """NoteSession.__init__ を通さず _guard だけを検証するための骨組み。"""
+
+    def __init__(self, allowed):
+        self._allowed = frozenset(allowed)
+        self._cancel = False
+        self.events = []
+        self._emit_event = self.events.append
+
+    _guard = engine_adapter.NoteSession._guard
+
+
+def _tc(name):
+    return {"function": {"name": name, "arguments": "{}"}}
+
+
+def test_guard_passes_allowed_and_rejects_others():
+    h = _GuardHarness({"read_note", "list_workspace"})
+    calls = [_tc("read_note"), _tc("write_file"), _tc("run_command")]
+    approved, override = h._guard(calls, "")
+    assert [c["function"]["name"] for c in approved] == ["read_note"]
+    assert override is None
+    assert len(h.events) == 2  # 却下2件がステータス通知される（CWP イベント形式）
+    assert all(e["type"] == "status" and e["text"].startswith("⚠️") for e in h.events)
+
+
+def test_guard_all_rejected_returns_empty():
+    h = _GuardHarness({"read_note"})
+    approved, _ = h._guard([_tc("write_file")], "")
+    assert approved == []
+
+
+def test_guard_cancel_short_circuits():
+    h = _GuardHarness({"read_note"})
+    h._cancel = True
+    approved, _ = h._guard([_tc("read_note")], "")
+    assert approved == [] and h.events == []
+
+
+# --- bootstrap 依存（AWP が隣にある場合のみ） ---
+
+@needs_awp
+def test_bootstrap_and_note_tools_registered():
+    core = engine_adapter.bootstrap(_AWP_SRC)
+    ver = tuple(int(x) for x in core.API_VERSION.split(".")[:2])
+    assert ver >= (1, 4)
+
+    # note の read 系4ツールが pack="note" で登録され、OpenAI tools 形式に引けること。
+    # ask_copilot は CWP 既存の pack="copilot" 登録を再利用する（note パックでは登録しない）。
+    from pixie_core import registry
+    for name in engine_adapter.NOTE_TOOLS:
+        entry = registry.TOOL_REGISTRY.get(name)
+        assert entry is not None, f"{name} が未登録"
+        assert entry.get("pack") == "note", f"{name} の pack が note でない（コア集合へ混入の恐れ）"
+    copilot_entry = registry.TOOL_REGISTRY.get("ask_copilot")
+    assert copilot_entry is not None
+    assert copilot_entry.get("pack") == "copilot"
+
+    from pixie_core.tools import registry_to_openai_tools
+    names = sorted(engine_adapter.NOTE_TOOLS | {"ask_copilot"})
+    got = {t["function"]["name"] for t in registry_to_openai_tools(names)}
+    assert got == set(names)
+
+
+@needs_awp
+def test_note_session_engine_profile(tmp_path):
+    engine_adapter.bootstrap(_AWP_SRC)
+    session = engine_adapter.NoteSession(
+        engine_adapter._core,
+        {"base_url": "http://localhost:1/v1", "model": "test"},
+        str(tmp_path), copilot_enabled=True,
+    )
+    ctx = session._engine.context
+    assert ctx.fixed_tool_set == engine_adapter.NOTE_TOOLS | {"ask_copilot"}
+    # suffix がエンジンの system ビルダーに載っていること
+    assert session._engine._system_builder is not None
+
+    # copilot off → 次ターンの提示集合から外れる
+    session.set_copilot(False)
+    assert ctx.fixed_tool_set == engine_adapter.NOTE_TOOLS

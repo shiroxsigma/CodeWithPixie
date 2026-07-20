@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, copilot, engine_adapter, files, patch, search
+from . import config, copilot, engine_adapter, extract, files, mdflow, mode, note_api, note_prompts, patch, search
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -65,6 +65,13 @@ class SessionManager:
     def drop(self, sid: str) -> None:
         with self._lock:
             self._sessions.pop(sid, None)
+
+    def clear(self) -> None:
+        """全セッションを協調キャンセルして破棄する（モード切替時のリセット用）。"""
+        with self._lock:
+            for s in self._sessions.values():
+                s.cancel()
+            self._sessions.clear()
 
     def count(self) -> int:
         return len(self._sessions)
@@ -139,10 +146,26 @@ class FsDeleteReq(BaseModel):
     path: str
 
 
+class FsOpenReq(BaseModel):
+    path: str
+
+
+class ContextFile(BaseModel):
+    path: str
+    content: str
+
+
 class ChatReq(BaseModel):
     message: str
     session_id: str
     current_file: str | None = None  # エディタで開いているファイル（エージェントへのコンテキスト）
+    # --- Note モード用（C-3 フロントが送る。Code モードでは未使用・省略可）---
+    selection: str = ""                # エディタで選択中のテキスト
+    context_files: list[ContextFile] = []  # チェック済みの参考ファイル
+    ref_texts: list[ContextFile] = []      # 関連ファイル（テキスト）: context_files と同じ扱い
+    history: list[dict] = []               # フロント保持の履歴（セッション新規作成時のシード用）
+    current_content: str = ""              # current_file の内容（未保存の編集を含むエディタバッファ）
+    attach_files: list[str] = []           # 関連ファイル（バイナリ/外部）の絶対パス: Copilot 添付用
 
 
 class ApproveReq(BaseModel):
@@ -174,8 +197,19 @@ def api_files():
 
 @app.get("/api/file")
 def api_read(path: str):
+    """ファイル内容を返す。Office 系（pptx/docx/xlsx/pdf）は Markdown へ抽出して返す
+    （NWP と同じ read 専用変換。Note モードのコンテキストチェックボックスが使う）。
+    保存（POST /api/file）側は抽出に対応しない — 抽出結果は元ファイルへ書き戻せない。"""
     try:
-        return {"path": path, "content": files.read_file(path)}
+        p = files.safe_path(path)
+        if p.suffix.lower() in extract.SUPPORTED_EXTS:
+            if not p.is_file():
+                raise HTTPException(404, "not found")
+            # refs/read と同じ上限（画像入り Office ファイルは数十MBが普通）
+            if p.stat().st_size > extract.MAX_OFFICE_BYTES:
+                raise HTTPException(400, "file too large")
+            return {"path": path, "content": extract.extract_text(p), "extracted": True}
+        return {"path": path, "content": files.read_file(path), "extracted": False}
     except FileNotFoundError:
         raise HTTPException(404, "not found")
     except ValueError as e:
@@ -204,11 +238,13 @@ def api_fs_create(req: FsCreateReq):
 def api_fs_rename(req: FsRenameReq):
     try:
         files.rename(req.src, req.dst)
-        return {"ok": True}
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
+    # Note モードのサイドカー（付箋・関連ファイル参照）のキーを改名に追従させる（NWP から統合）
+    note_api.rewrite_sidecar_keys(req.src, req.dst)
+    return {"ok": True}
 
 
 @app.post("/api/fs/delete")
@@ -222,6 +258,27 @@ def api_fs_delete(req: FsDeleteReq):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/fs/open")
+def api_fs_open(req: FsOpenReq):
+    """ワークスペース内のファイルを OS の既定アプリで開く（.png や .pdf を実物で見る用）。
+
+    ワークスペースは信頼境界の内側なので、safe_path のサンドボックス（ルート外拒否）で足りる。
+    """
+    try:
+        p = files.safe_path(req.path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not p.exists():
+        raise HTTPException(404, f"ファイルが見つかりません: {req.path}")
+    if os.name == "nt":
+        os.startfile(str(p))  # noqa: S606 — ローカル専用アプリ、ユーザー起点、ワークスペース内限定
+    else:
+        import subprocess
+
+        subprocess.Popen(["xdg-open", str(p)])
+    return {"ok": True}
+
+
 @app.get("/api/search")
 def api_search(q: str):
     return {"results": search.search(q)}
@@ -229,9 +286,18 @@ def api_search(q: str):
 
 @app.post("/api/patch")
 def api_patch(req: PatchReq):
-    """search/replace 提案を base へ適用計算する（ファイルには書かない）。手動レビュー用。"""
+    """search/replace 提案を base へ適用計算する（ファイルには書かない）。手動レビュー用。
+
+    mdflow の整合性検査付き（NWP から統合）: 編集で「新たに増えた」警告だけを返す
+    （元から壊れているノートへの無関係な編集で毎回警告が出るのを防ぐ）。警告のみで
+    ブロックはしない — 採否は差分プレビューでユーザーが決める。mermaid/mdflow を
+    含まないテキストでは warnings は常に空なので Code モードにも無害。"""
     edits = [{"search": e.search, "replace": e.replace} for e in req.edits]
-    return patch.apply_edits(req.base, edits)
+    r = patch.apply_edits(req.base, edits)
+    base_warns = set(mdflow.validate_document(req.base))
+    r["mdflow_warnings"] = [w for w in mdflow.validate_document(r["content"])
+                            if w not in base_warns]
+    return r
 
 
 # --- エージェント制御 ----------------------------------------------------------
@@ -261,15 +327,21 @@ def api_set_workspace(req: WorkspaceReq):
     """作業フォルダを切り替える（フォルダ移動）。以降の新規セッションと file API に反映。"""
     try:
         p = config.set_workspace(req.path)
-        return {"ok": True, "workspace": str(p)}
     except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
+    # Note セッションは旧ワークスペースの内容を文脈に含むため作り直す（次ターンで再生成）
+    engine_adapter.reset_note_session()
+    return {"ok": True, "workspace": str(p)}
 
 
 @app.get("/api/workspace/dirs")
-def api_workspace_dirs(path: str = ""):
-    """フォルダ選択ダイアログ用: 指定ディレクトリの子フォルダ一覧（ドライブ含む）を返す。"""
+def api_workspace_dirs(path: str = "", files: bool = False):
+    """フォルダ選択ダイアログ用: 指定ディレクトリの子フォルダ一覧（ドライブ含む）を返す。
+
+    files=true でファイル一覧も返す（Note モードの「＋参照を追加」ダイアログ用。
+    省略時は従来どおりフォルダのみ — 既存フロント互換）。"""
     entries: list[dict] = []
+    file_entries: list[dict] = []
     drives: list[str] = []
     if os.name == "nt":
         for letter in string.ascii_uppercase:
@@ -284,16 +356,24 @@ def api_workspace_dirs(path: str = ""):
             with os.scandir(cur) as it:
                 for e in it:
                     try:
-                        if e.is_dir() and not e.name.startswith("."):
+                        if e.name.startswith("."):
+                            continue
+                        if e.is_dir():
                             entries.append({"name": e.name, "path": str(Path(cur) / e.name)})
+                        elif files and e.is_file():
+                            file_entries.append({"name": e.name, "path": str(Path(cur) / e.name)})
                     except OSError:
                         continue
         except (OSError, ValueError):
             cur = ""
     entries.sort(key=lambda d: d["name"].lower())
     parent = str(Path(cur).parent) if cur else ""
-    return {"cwd": cur, "parent": parent, "dirs": entries, "drives": drives,
+    resp = {"cwd": cur, "parent": parent, "dirs": entries, "drives": drives,
             "current_workspace": str(config.WORKSPACE)}
+    if files:
+        file_entries.sort(key=lambda d: d["name"].lower())
+        resp["files"] = file_entries
+    return resp
 
 
 # --- モデル/サーバ設定 ---------------------------------------------------------
@@ -315,9 +395,11 @@ def api_settings(req: SettingsReq):
     """アクティブなサーバ（モデル）を切り替える。以降の新規セッションに反映。"""
     try:
         config.set_active_server_index(req.active_server)
-        return {"ok": True, "active": config.get_active_server_index()}
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # Note セッションは LLM バックエンド束縛ごと作り直す（Code は新規セッションから反映）
+    engine_adapter.reset_note_session()
+    return {"ok": True, "active": config.get_active_server_index()}
 
 
 # --- Copilot 連携（PrayLight 経由）--------------------------------------------
@@ -351,17 +433,12 @@ def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
 
-@app.post("/api/chat")
-async def api_chat(req: ChatReq):
-    manager = _require_manager()
-    if not req.message.strip():
-        raise HTTPException(400, "空のメッセージです。")
-    sess = manager.get_or_create(_valid_sid(req.session_id))
-    sess.set_copilot(config.settings.copilot_enabled)  # トグルを次ターンに反映（ask_copilot の提示可否）
-    # 同一セッションは直列（別セッションは並行可）。実行中なら 409。
-    if not sess.busy.acquire(blocking=False):
-        raise HTTPException(409, "このセッションは別のターンを実行中です。")
+def _turn_stream(sess, start_turn) -> StreamingResponse:
+    """1ターンを worker スレッドで実行し SSE へ変換する共通部（Code/Note 両モード）。
 
+    前提: sess.busy は取得済み（ここで必ず解放する）。start_turn(emit) がターン本体。
+    クライアント切断時は協調キャンセルで worker を解放する（Lock 専有を防ぐ）。
+    """
     q: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -369,19 +446,9 @@ async def api_chat(req: ChatReq):
         # worker スレッド → イベントループへ安全に受け渡し。
         loop.call_soon_threadsafe(q.put_nowait, ev)
 
-    # 開いているファイルをコンテキストとして前置する。小型モデルは「このファイル」「今開いて
-    # いるファイル」という指示語からパスを推測できず、ハルシネートしたパスを探し回る実測がある。
-    message = req.message
-    if req.current_file:
-        message = (
-            f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
-            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。）\n\n"
-            f"{req.message}"
-        )
-
     def worker() -> None:
         try:
-            sess.run_turn(message, emit, settings.approval_timeout)
+            start_turn(emit)
         finally:
             emit({"type": "__end__"})
             sess.busy.release()
@@ -400,10 +467,66 @@ async def api_chat(req: ChatReq):
                 yield _sse(ev)
         finally:
             if not done:
-                # クライアント切断 → 協調キャンセルで worker を解放（Lock 専有を防ぐ）。
                 sess.cancel()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+def _note_chat(req: ChatReq) -> StreamingResponse:
+    """Note モードのチャット経路（NWP engine_adapter.stream_turn の CWP 版）。
+
+    read 専用プロファイルの NoteSession（単一セッション）でターンを回す。動的コンテキスト
+    （現在ファイル・参考ファイル・選択・添付案内）は note_prompts.build_user_text で
+    ユーザーメッセージに載せる（pixie_core の「静的 system + 動的 user」設計と整合）。
+    """
+    _require_manager()  # bootstrap 済み（= pixie_core 初期化済み）の確認
+    try:
+        sess = engine_adapter.get_note_session()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    sess.set_copilot(settings.copilot_enabled)  # トグルを次ターンに反映（ask_copilot の提示可否）
+    # Note は単一セッション直列。実行中なら 409（Code モードと同じフロント契約）。
+    if not sess.busy.acquire(blocking=False):
+        raise HTTPException(409, "Note セッションは別のターンを実行中です。")
+
+    # サーバ再起動後の初回ターン: サイドカー履歴（無ければフロント送付の履歴）で LLM 文脈を復元。
+    if not sess.seeded:
+        sess.seed_history(req.history or note_api.load_chat_messages())
+
+    context = [{"path": c.path, "content": c.content}
+               for c in req.context_files + req.ref_texts]
+    user_text = note_prompts.build_user_text(
+        req.message, req.selection, context,
+        req.current_file or "", req.current_content, req.attach_files)
+
+    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit))
+
+
+@app.post("/api/chat")
+async def api_chat(req: ChatReq):
+    if not req.message.strip():
+        raise HTTPException(400, "空のメッセージです。")
+    if mode.current_mode() == "note":
+        return _note_chat(req)
+
+    manager = _require_manager()
+    sess = manager.get_or_create(_valid_sid(req.session_id))
+    sess.set_copilot(config.settings.copilot_enabled)  # トグルを次ターンに反映（ask_copilot の提示可否）
+    # 同一セッションは直列（別セッションは並行可）。実行中なら 409。
+    if not sess.busy.acquire(blocking=False):
+        raise HTTPException(409, "このセッションは別のターンを実行中です。")
+
+    # 開いているファイルをコンテキストとして前置する。小型モデルは「このファイル」「今開いて
+    # いるファイル」という指示語からパスを推測できず、ハルシネートしたパスを探し回る実測がある。
+    message = req.message
+    if req.current_file:
+        message = (
+            f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
+            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。）\n\n"
+            f"{req.message}"
+        )
+
+    return _turn_stream(sess, lambda emit: sess.run_turn(message, emit, settings.approval_timeout))
 
 
 @app.post("/api/approve")
@@ -422,6 +545,15 @@ def api_interrupt(req: InterruptReq):
         raise HTTPException(404, "session not found")
     sess.cancel()
     return {"ok": True}
+
+
+# --- Note 系 API・モード切替（Stage C） -----------------------------------------
+app.include_router(note_api.router)
+app.include_router(mode.router)
+
+# モード切替時に旧モードの LLM 文脈を持ち越さない（mode.py の POST /api/mode が呼ぶ）。
+mode.register_reset_hook(engine_adapter.reset_note_session)
+mode.register_reset_hook(lambda: _manager.clear() if _manager is not None else None)
 
 
 # --- 静的フロント -------------------------------------------------------------

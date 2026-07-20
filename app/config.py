@@ -63,7 +63,7 @@ class Settings(BaseSettings):
 
     # --- サーバ（ローカル専用にバインド） ---
     host: str = "127.0.0.1"
-    port: int = 8770
+    port: int = 8771
 
     # ripgrep のパス（PATH にあれば "rg" のまま）。ファイル検索 API 用。
     rg_path: str = "rg"
@@ -77,6 +77,19 @@ class Settings(BaseSettings):
     praylight_dir: str = "../PrayLight"   # PrayLight プロジェクトのルート
     praylight_python: str = ""            # 空なら {praylight_dir}/.venv/Scripts/python.exe
     copilot_timeout: float = 120.0        # Copilot 応答待ちの上限秒
+
+    # --- モード（Stage C: 共通シェル + Note/Code モード切替）---
+    # ワークスペースに last_mode の記録が無いときに使う既定モード（"code" | "note"）。
+    # 実際の現在モードはワークスペースのサイドカー .pixie_workspace.json が正（app/mode.py）。
+    default_mode: str = "code"
+
+    # --- Note モード（NWP から移植した read 専用プロファイル用）---
+    # ツール結果の切り詰め上限（コンテキスト保護。NWP tool_result_max_chars と同値）。
+    tool_result_max_chars: int = 8000
+    # プロンプト素材（現在ファイル＋参考ファイル）の総文字数バジェット（NWP と同値）。
+    context_char_budget: int = 60000
+    # Note モードの思考ストリーム表示（<think> はフロントの splitThink が分離する）。
+    show_thinking: bool = True
 
 
 settings = Settings()
