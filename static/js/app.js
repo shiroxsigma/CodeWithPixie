@@ -37,6 +37,7 @@ const state = {
   // --- モード（統合シェル）---
   mode: "code",             // "code" | "note"。GET /api/mode で起動時に取得
   features: {},             // /api/mode の features フラグ（UI 出し分けの判定に使う）
+  copilotEnabled: false,    // Copilot 連携（features.copilot / /api/copilot で同期）
 
   // --- Note モード専用（NWP 移植）---
   history: [],              // chat history [{role, content}]（Note のみ。サーバ側サイドカーと同期）
@@ -163,6 +164,7 @@ function setModeState(m) {
   if (Array.isArray(state.features.extract_exts)) {
     extractExts = new Set(state.features.extract_exts);
   }
+  state.copilotEnabled = !!state.features.copilot;  // Copilot UI の出し分けに使う
 }
 
 /** モードに応じた見た目の唯一の反映点。body クラス・バッジ・エディタオプションを揃える。 */
@@ -182,7 +184,18 @@ function applyModeUI() {
   $("chat-input").placeholder = note
     ? "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。"
     : "例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。";
+  applyCopilotVisibility();  // Copilot バーは「Note かつ Copilot 連携オン」のときだけ
   renderFileTree();  // コンテキストのチェックボックス有無が変わる
+}
+
+// Copilot 関連 UI の出し分け（NWP と同じ規則）。バーは .note-only だけでは足りない:
+// Copilot 連携がオフなら Note モードでも出さない（押しても必ずエラーになるボタンを出さない）。
+function applyCopilotVisibility() {
+  const on = !!state.copilotEnabled;
+  const bar = $("copilot-bar");
+  if (bar) bar.classList.toggle("hidden", !on);
+  const ctl = $("settings-copilot-controls");
+  if (ctl) ctl.classList.toggle("hidden", !on);
 }
 
 /** Note モード固有の一時状態を捨てる（モード切替・ワークスペース切替時）。 */
@@ -1963,17 +1976,21 @@ function closeSettings() { $("settings-modal").classList.add("hidden"); }
 async function refreshCopilot() {
   const c = await getJSON("/api/copilot").catch(() => ({}));
   $("settings-copilot").checked = !!c.enabled;
+  state.copilotEnabled = !!c.enabled;
+  applyCopilotVisibility();
   const parts = [];
   if (c.enabled) parts.push("オン");
   if (!c.script_ok) parts.push("⚠ PrayLight 未検出: " + (c.praylight_dir || "?"));
   else if (!c.python_ok) parts.push("⚠ PrayLight の .venv Python 未検出");
   else if (c.enabled) parts.push("PrayLight OK — 未ログインなら下のボタンでブラウザを開いてログイン");
-  $("copilot-status").textContent = parts.join(" / ");
+  $("settings-copilot-status").textContent = parts.join(" / ");
 }
 
 async function toggleCopilot(e) {
   try {
-    await postJSON("/api/copilot/enable", { enabled: $("settings-copilot").checked });
+    const r = await postJSON("/api/copilot/enable", { enabled: $("settings-copilot").checked });
+    state.copilotEnabled = !!r.enabled;
+    applyCopilotVisibility();
   } catch (err) {
     alert("⚠️ 設定を保存できません: " + err.message);
     e.target.checked = !e.target.checked;  // 設定できたように見せない
@@ -1982,9 +1999,9 @@ async function toggleCopilot(e) {
 }
 
 async function openCopilotBrowser() {
-  $("copilot-status").textContent = "起動中…";
+  $("settings-copilot-status").textContent = "起動中…";
   const r = await postJSON("/api/copilot/open").catch(() => ({ ok: false, error: "通信エラー" }));
-  $("copilot-status").textContent = r.ok
+  $("settings-copilot-status").textContent = r.ok
     ? "ブラウザを開きました。Copilot にログインしてください。"
     : (r.error || "起動失敗");
 }
@@ -2047,7 +2064,7 @@ function bindUI() {
     if (e.key === "Enter") { e.preventDefault(); saveThinkBudget(); }
   });
   $("settings-copilot").addEventListener("change", toggleCopilot);
-  $("copilot-open-btn").addEventListener("click", openCopilotBrowser);
+  $("settings-copilot-open").addEventListener("click", openCopilotBrowser);
   $("settings-modal").addEventListener("click", (e) => {
     if (e.target === $("settings-modal")) closeSettings();
   });
