@@ -528,6 +528,73 @@ def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
 
+# --- /copilot 直行経路（NWP 移植）---------------------------------------------
+COPILOT_QUESTION_MAX_CHARS = 15_000  # NWP と同値。Copilot 側の入力欄が長文を弾くため
+
+
+def _build_copilot_question(user_msg: str, selection: str, context_files: list[dict]) -> str:
+    """/copilot 用に自己完結した質問文を組み立てる。
+
+    Copilot はこの会話もワークスペースも見えないので、選択テキストとチェック済みの
+    参考ファイルは本文に埋め込む（「開いているだけ」のファイルは入れない: 送るつもりの
+    ないものが外部サービスへ出ていくのを避ける）。
+    """
+    parts = [user_msg]
+    if selection.strip():
+        parts.append(f"--- 選択テキスト ---\n{selection}")
+    for c in context_files:
+        parts.append(f"--- 添付ファイル: {c['path']} ---\n{c['content']}")
+    q = "\n\n".join(parts)
+    if len(q) > COPILOT_QUESTION_MAX_CHARS:
+        q = q[:COPILOT_QUESTION_MAX_CHARS] + "\n…（長いため以降は省略）"
+    return q
+
+
+def _copilot_direct(question_text: str, req: ChatReq) -> StreamingResponse:
+    """「/copilot 質問…」: エージェント（LLM）を介さず Copilot に1回だけ聞いて返す。
+
+    エージェントもセッションも使わない直行経路なので、Code/Note どちらのモードでも通す
+    （モードで変わるのはエージェントの振る舞いであって、この経路には関係がない）。
+    セッションを取らないぶん sess.busy も踏まないので _turn_stream は使わず、ここで
+    SSE を組む。イベントは通常ターンと同じ契約（status/token/error → 最後に done）。
+    """
+    context = [{"path": c.path, "content": c.content}
+               for c in req.context_files + req.ref_texts]
+
+    async def gen():
+        if not settings.copilot_enabled:
+            yield _sse({"type": "error",
+                        "text": "Copilot 連携が無効です。⚙️ 設定でオンにしてください。"})
+            yield _sse({"type": "done"})
+            return
+        if not question_text and not req.selection.strip():
+            yield _sse({"type": "error",
+                        "text": "`/copilot` の後に質問を書いてください"
+                                "（例: `/copilot RAG の最新動向は？`）。テキスト選択だけでも送れます。"})
+            yield _sse({"type": "done"})
+            return
+
+        question = _build_copilot_question(
+            question_text or "以下のテキストについて意見をください。", req.selection, context)
+        files_note = f"・添付 {len(req.attach_files)} 件" if req.attach_files else ""
+        yield _sse({"type": "status",
+                    "text": f"🕊️ /copilot: Copilot に直接質問します"
+                            f"（{len(question)} 文字{files_note}・数十秒かかります）"})
+        # copilot.ask は同期の subprocess（uvicorn reload 下の Windows では asyncio の
+        # subprocess API が動かないため、このプロジェクトは同期実装を thread へ逃がす）。
+        answer = await asyncio.to_thread(copilot.ask, question, list(req.attach_files))
+        if answer.startswith("エラー"):
+            # 1行目だけをステータス行に出し、全文は error として渡す（原因が長いことがある）
+            yield _sse({"type": "status", "text": f"⚠️ {answer.splitlines()[0][:160]}"})
+            yield _sse({"type": "error", "text": answer})
+        else:
+            yield _sse({"type": "status", "text": "✅ Copilot の回答を受信しました"})
+            yield _sse({"type": "token", "text": answer})
+        yield _sse({"type": "done"})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 def _turn_stream(sess, start_turn) -> StreamingResponse:
     """1ターンを worker スレッドで実行し SSE へ変換する共通部（Code/Note 両モード）。
 
@@ -601,6 +668,10 @@ def _note_chat(req: ChatReq) -> StreamingResponse:
 async def api_chat(req: ChatReq):
     if not req.message.strip():
         raise HTTPException(400, "空のメッセージです。")
+    # 先頭が "/copilot" なら、モードにもエージェントにも関係なく Copilot へ直接聞きに行く
+    msg = req.message.strip()
+    if msg.lower().startswith("/copilot"):
+        return _copilot_direct(msg[len("/copilot"):].strip(), req)
     if mode.current_mode() == "note":
         return _note_chat(req)
 

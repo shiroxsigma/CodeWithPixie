@@ -95,7 +95,7 @@ window.__monacoReady.then((monaco) => {
   state.noteDecorations = state.editor.createDecorationsCollection();
   markClean();
 
-  state.editor.onDidChangeModelContent(() => { refreshDirty(); schedulePreview(); });
+  state.editor.onDidChangeModelContent(() => { refreshDirty(); scheduleAutosave(); schedulePreview(); });
   state.editor.onDidScrollChange(() => syncPreviewScroll());
   state.editor.onDidChangeCursorSelection(updateSelectionChip);
   // エディタ内は Monaco がキーを握るので addCommand が要る（エディタ外は window 側で拾う）。
@@ -181,10 +181,7 @@ function applyModeUI() {
   $("sel-info").textContent = note
     ? "テキストを選択してAIに送れます"
     : "エージェントがファイルを直接編集します（破壊操作は承認制）。";
-  $("chat-input").placeholder = note
-    ? "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。"
-    : "例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。";
-  applyCopilotVisibility();  // Copilot バーは「Note かつ Copilot 連携オン」のときだけ
+  applyCopilotVisibility();  // Copilot バー・placeholder の /copilot 案内はトグル次第
   renderFileTree();  // コンテキストのチェックボックス有無が変わる
 }
 
@@ -196,6 +193,13 @@ function applyCopilotVisibility() {
   if (bar) bar.classList.toggle("hidden", !on);
   const ctl = $("settings-copilot-controls");
   if (ctl) ctl.classList.toggle("hidden", !on);
+  // placeholder もここで決める。/copilot は Copilot 連携がオンのときだけ通る経路なので、
+  // オフのまま案内すると「書いてもエラーになる使い方」を教えることになる。
+  // モードとトグルの両方で文言が変わるため、applyModeUI からもここを通す。
+  const hint = on ? "\n（先頭に /copilot と書くと、エージェントを介さず Copilot に直接質問できます）" : "";
+  $("chat-input").placeholder = (isNote()
+    ? "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。"
+    : "例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。") + hint;
 }
 
 /** Note モード固有の一時状態を捨てる（モード切替・ワークスペース切替時）。 */
@@ -220,6 +224,9 @@ async function toggleMode() {
   const next = isNote() ? "code" : "note";
   const label = next === "note" ? "📝 Note" : "🛠 Code";
   if (!confirm(`${label} モードに切り替えますか？\n（会話セッションはリセットされます）`)) return;
+  // 自動保存は Note でしか動かない。Note → Code へ抜けると予約が宙に浮くので、
+  // まだ Note のうちに確定させる（タイマーもここで落ちる）。
+  await flushAutosave();
   let m;
   try {
     m = await postJSON("/api/mode", { mode: next });
@@ -591,6 +598,9 @@ async function openWithOS(path) {
 }
 
 async function openFile(path, force) {
+  // force はエージェント変更の再読込など「捨てると決めた」経路なので flush しない。
+  if (!force) await flushAutosave();
+  // Note モードで flush してもまだ dirty なら、それは保存に失敗している。
   if (state.dirty && !force && path !== state.currentFile) {
     if (!confirm("未保存の変更があります。破棄して開きますか？")) return;
   }
@@ -614,8 +624,7 @@ async function openFile(path, force) {
 // ダーティ判定は Monaco の alternativeVersionId を基準にする。単なる「編集された」
 // フラグだと Undo で内容を戻しても未保存のままになるが、この ID は Undo/Redo で
 // 元の値に戻るので「保存時と同じ内容か」を正しく表せる。
-// NWP と違い自動保存は入れない: エージェントが同じファイルを直接書き換えるため、
-// 打鍵2秒後の自動保存はエージェントの編集を黙って踏み潰しうる。
+// 自動保存は Note モードのみ（理由は scheduleAutosave のコメント）。
 let saveStateTimer = null;
 
 function markClean() {
@@ -679,6 +688,7 @@ async function doSave() {
     notesAtSave = state.notes.map((n) => ({ ...n }));
   }
 
+  clearTimeout(autosaveTimer);  // 今保存するので、予約済みの自動保存は用済み
   state.saving = true;
   renderSaveState("saving");
   try {
@@ -713,6 +723,38 @@ async function doSave() {
   state.saveError = null;
   renderSaveState("saved");
   return true;
+}
+
+// ---- 自動保存（NWP 移植・Note モード限定） -----------------------------------
+// 打鍵が落ち着いてから保存する。CWP の saveFile はファイル未選択なら黙って false を
+// 返す（NWP と違い名前を尋ねない）ので、「書き始めて2秒後に prompt が飛び出す」ことはない。
+//
+// Code モードでは自動保存しない。Code のエージェントはワークスペースのファイルを直接
+// 書き換え、完了時に files_changed で知らせてくる。デバウンス中の2秒やターン実行中に
+// 自動保存が走ると、エージェントが書いた新しい内容を、エディタに載ったままの古い
+// バッファで黙って踏み潰す。踏み潰しは Undo でも戻せない（ディスク側が壊れる）ので、
+// 「エージェントが書き手にならない Note モードだけ」という安全側に倒している。
+// Code モードの未保存は従来どおり ● 未保存表示・破棄確認・beforeunload で守る。
+const AUTOSAVE_DELAY_MS = 2000;
+let autosaveTimer = null;
+
+function scheduleAutosave() {
+  clearTimeout(autosaveTimer);
+  if (!isNote()) return;
+  if (!state.currentFile || !state.dirty) return;
+  autosaveTimer = setTimeout(() => {
+    if (!state.dirty) return;                          // 2秒の間に Ctrl+S で保存済みかもしれない
+    if (state.saving) { scheduleAutosave(); return; }  // 保存中なら捨てずに予約し直す
+    saveFile();
+  }, AUTOSAVE_DELAY_MS);
+}
+
+/** 保留中の自動保存を今すぐ確定する。ファイル切替・作業フォルダ変更・モード切替・
+    タブ離脱の直前に呼ぶ。Code モードでは自動保存自体が無いので何もしない。 */
+async function flushAutosave() {
+  clearTimeout(autosaveTimer);
+  if (!isNote()) return;
+  if (state.currentFile && state.dirty) await saveFile();
 }
 
 // ---- Markdown プレビュー ----
@@ -1779,6 +1821,7 @@ async function chooseWorkspace() {
   const path = $("root-input").value.trim();
   if (!path) return;
   if (state.streaming) { alert("⚠️ 実行中は作業フォルダを切り替えられません。"); return; }
+  await flushAutosave();  // 切替後は別ワークスペース。保留中の保存はここで確定させる
   if (state.dirty && !confirm("未保存の変更があります。破棄して作業フォルダを切り替えますか？")) return;
   let r;
   try {
@@ -2088,7 +2131,11 @@ function bindUI() {
     else if (e.key === "Escape" && !$("diff-overlay").classList.contains("hidden")) closeDiffPreview();
   });
 
-  // 未保存のままタブを閉じる経路を塞ぐ（自動保存が無いぶん、ここが最後の砦になる）。
+  // 別ウィンドウへ移るときに保留中の自動保存を確定させる（Note モードのみ動く）。
+  window.addEventListener("blur", () => { flushAutosave(); });
+
+  // 未保存のままタブを閉じる経路を塞ぐ。Note は自動保存が効くので通常ここまで来ないが、
+  // 保存に失敗したときと、自動保存の無い Code モードでは、ここが最後の砦になる。
   window.addEventListener("beforeunload", (e) => {
     if (!state.dirty) return;
     e.preventDefault();
