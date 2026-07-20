@@ -470,7 +470,7 @@ details.mdflow-mapping pre {
 /* Copilot 連携バー（コンポーザ下部） */
 #copilot-bar { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 #copilot-bar button { font-size: 12px; padding: 4px 10px; }
-#copilot-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+#copilot-status, #cp-bar-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* 反映先として追跡中の範囲 */
 .pixie-pending-target { background: rgba(90, 209, 201, 0.14); }

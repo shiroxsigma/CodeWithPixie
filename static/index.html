@@ -106,6 +106,12 @@
             <span class="hint">Ctrl+Enter で送信</span>
             <button id="send-btn">送信</button>
           </div>
+          <!-- Copilot 取り込みバー（Note モード専用。設定モーダル側の #copilot-* とは別 id） -->
+          <div id="copilot-bar" class="note-only">
+            <button id="cp-bar-open-btn" title="デバッグ用ブラウザで Copilot を開く（そこで人が対話する）">🕊️ Copilot を開く</button>
+            <button id="cp-bar-import-btn" title="開いている Copilot の会話を取得してAIにまとめさせる（普段のブラウザでOK・Copilotタブを前面にしておく）">⬇ 会話を取り込んでまとめる</button>
+            <span id="cp-bar-status" class="hint"></span>
+          </div>
         </div>
       </div>
     </section>

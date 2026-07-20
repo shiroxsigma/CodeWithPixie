@@ -130,6 +130,50 @@ def open_browser() -> str:
     return ""
 
 
+def _run_reader(script_name: str) -> str:
+    """PrayLight の読み取り系スクリプトを実行して stdout を返す。失敗は「エラー: …」。"""
+    script, py = _praylight_paths(script_name)
+    if not script.exists():
+        return f"エラー: スクリプトが見つかりません（{script}）。"
+    if not py.exists():
+        return f"エラー: PrayLight の Python が見つかりません（{py}）。"
+    try:
+        proc = subprocess.run([str(py), str(script)], capture_output=True,
+                              cwd=str(script.parent), timeout=60)
+    except subprocess.TimeoutExpired:
+        return "エラー: 読み取りがタイムアウトしました。"
+    except OSError as e:
+        return f"エラー: PrayLight を起動できません: {e}"
+    transcript = proc.stdout.decode("utf-8", "replace").strip()
+    if proc.returncode != 0 or not transcript:
+        return _last_error_line(proc.stderr, "エラー: 会話を取得できませんでした。")
+    limit = config.settings.tool_result_max_chars
+    if len(transcript) > limit:
+        transcript = transcript[:limit] + f"\n…（長いため以降 {len(transcript) - limit} 文字を省略）"
+    return transcript
+
+
+def read_conversation() -> str:
+    """開いている Copilot の会話ログ（Markdown）を取得する（⬇ 会話を取り込む）。
+
+    1) UIA: 普段のブラウザの Copilot タブをアクセシビリティ API で読む（前面タブ必須）
+    2) CDP: PrayLight の専用ブラウザから読む（フォールバック）
+    成功なら本文、両方失敗なら「エラー: …」。NWP の read_copilot_conversation と同一仕様
+    （同期関数: /api/copilot/read から asyncio.to_thread 経由で呼ぶ）。"""
+    uia = _run_reader("copilot_read_uia.py")
+    if not uia.startswith("エラー"):
+        return uia
+    cdp = _run_reader("copilot_read.py")
+    if not cdp.startswith("エラー"):
+        return cdp
+    return (
+        "エラー: 会話を取得できませんでした。\n"
+        f"・通常ブラウザ(UIA): {uia.splitlines()[0]}\n"
+        f"・専用ブラウザ(CDP): {cdp.splitlines()[0]}\n"
+        "Copilot のタブをウィンドウの前面タブにしてから再試行してください。"
+    )
+
+
 def url_to_markdown(url: str) -> str:
     """PrayLight の url2md.py で URL のページを Markdown 化する（🌐+ web2md）。
 

@@ -481,6 +481,19 @@ def api_copilot_open():
     return {"ok": not err, "error": err}
 
 
+@app.post("/api/copilot/read")
+async def api_copilot_read():
+    """開いている Copilot タブの会話ログを Markdown で取得する（Note モードの取り込みバー）。
+
+    PrayLight の subprocess が数十秒かかるので to_thread に逃がす（イベントループを塞がない）。"""
+    if not config.settings.copilot_enabled:
+        return {"ok": False, "error": "Copilot 連携が無効です。⚙️ 設定でオンにしてください。", "transcript": ""}
+    text = await asyncio.to_thread(copilot.read_conversation)
+    if text.startswith("エラー"):
+        return {"ok": False, "error": text, "transcript": ""}
+    return {"ok": True, "error": "", "transcript": text}
+
+
 def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 

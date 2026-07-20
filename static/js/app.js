@@ -1827,6 +1827,49 @@ async function importUrlAsMarkdown() {
   }
 }
 
+// ---- Copilot 取り込みバー（Note モード。人がブラウザで対話 → 会話を取り込んでまとめる）----
+// 設定モーダルの Copilot 操作（#copilot-open-btn / #copilot-status）とは別系統。id 衝突を避けて
+// バー側は #cp-bar-* を使う。NWP の openCopilot / importCopilotChat の移植。
+function setCopilotBarStatus(text) {
+  const el = $("cp-bar-status");
+  if (el) el.textContent = text;
+}
+
+async function openCopilotFromBar() {
+  setCopilotBarStatus("ブラウザを起動中…");
+  try {
+    const r = await (await fetch("/api/copilot/open", { method: "POST" })).json();
+    setCopilotBarStatus(r.ok ? "Copilot を開きました。ブラウザで対話してください。" : r.error);
+  } catch (e) {
+    setCopilotBarStatus("エラー: " + e.message);
+  }
+}
+
+async function importCopilotChat() {
+  if (state.streaming) return;
+  const btn = $("cp-bar-import-btn");
+  btn.disabled = true;
+  setCopilotBarStatus("会話を取得中…");
+  let r;
+  try {
+    r = await (await fetch("/api/copilot/read", { method: "POST" })).json();
+  } catch (e) {
+    setCopilotBarStatus("エラー: " + e.message);
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+  if (!r.ok) { setCopilotBarStatus(r.error); return; }
+  setCopilotBarStatus("");
+
+  // 入力欄に指示があればそれを優先。無ければ既定の「まとめて」指示。
+  const input = $("chat-input");
+  const instruction = input.value.trim()
+    || "以下は私が Microsoft Copilot と交わした会話ログです。内容を整理して、ノートとして残せる Markdown のまとめを作ってください。";
+  input.value = instruction + "\n\n---\n\n# Copilot 会話ログ\n\n" + r.transcript;
+  await sendChat();  // CWP の sendChat は入力欄から読む（NWP は引数渡し）
+}
+
 // ---- 設定（モデル/サーバ） ----
 async function openSettings() {
   const data = await getJSON("/api/servers").catch(() => ({ servers: [], active: 0 }));
@@ -1955,6 +1998,8 @@ function bindUI() {
   $("new-file-btn").addEventListener("click", () => createEntry("file"));
   $("new-folder-btn").addEventListener("click", () => createEntry("dir"));
   $("web2md-btn").addEventListener("click", importUrlAsMarkdown);
+  $("cp-bar-open-btn").addEventListener("click", openCopilotFromBar);
+  $("cp-bar-import-btn").addEventListener("click", importCopilotChat);
   document.addEventListener("click", closeFsMenu);
   setupRootDrop();
   // ルートプロジェクト（作業フォルダ）変更
