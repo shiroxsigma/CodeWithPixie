@@ -9,11 +9,24 @@
 // ```apply ブロックの抽出と、<think> 分離。現在は Note モードのみが使うが、
 // 統合シェル（Stage C）で Code モードにも差分反映 UI を載せるときの共通土台。
 
-/** 応答先頭の <think>...</think> を分離する（qwen 系のインライン思考）。 */
+/**
+ * <think>...</think>（qwen 系のインライン思考）を本文から分離する。
+ *
+ * 思考が本文に混ざったまま反映処理へ流れると、AI の独り言や engine の内部指示の
+ * 引用がそのまま文書へ書き込まれる。実際にそれが起きたので、次の2つを許容する:
+ *   - <think> が応答の先頭でない（前に飾り文字などが付いた）場合
+ *   - </think> が無いまま応答が終わった場合（思考時間の上限などで打ち切られたとき）
+ * 閉じが無ければ <think> 以降は**すべて思考**とみなす（本文として採用しない）。
+ */
 export function splitThink(s) {
-  const m = s.match(/^\s*<think>([\s\S]*?)(?:<\/think>\s*([\s\S]*))?$/);
-  if (m) return { think: m[1], visible: m[2] ?? "" };
-  return { think: "", visible: s };
+  const open = s.indexOf("<think>");
+  if (open < 0) return { think: "", visible: s };
+  const close = s.lastIndexOf("</think>");
+  if (close < open) return { think: s.slice(open + 7), visible: s.slice(0, open) };
+  return {
+    think: s.slice(open + 7, close),
+    visible: (s.slice(0, open) + s.slice(close + 8)).replace(/^\s+/, ""),
+  };
 }
 
 /**
@@ -86,6 +99,9 @@ export function extractEdits(text) {
  * 優先: ```apply → 本文の大半を占める一般フェンス → ```diff を復元 → 本文そのまま。
  */
 export function extractProposed(text) {
+  // 思考は絶対に文書へ入れない。呼び出し側が分離済みでも二重に守る（安いので）。
+  text = splitThink(text).visible;
+  if (!text.trim()) return "";
   const apply = [...text.matchAll(/```apply\s*\n([\s\S]*?)```/g)];
   if (apply.length) return apply[apply.length - 1][1].replace(/\n$/, "");
   // 「修正版はこちら: ```...```」のように、フェンスが実質メッセージ全体である場合のみ
