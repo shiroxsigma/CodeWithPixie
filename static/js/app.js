@@ -178,9 +178,7 @@ function applyModeUI() {
   btn.classList.toggle("mode-code", !note);
   btn.title = `現在: ${note ? "Note" : "Code"} モード（クリックで切替）`;
   state.editor?.updateOptions({ glyphMargin: note });  // 付箋グリフの余白
-  $("sel-info").textContent = note
-    ? "テキストを選択してAIに送れます"
-    : "エージェントがファイルを直接編集します（破壊操作は承認制）。";
+  updateSelectionChip();  // #sel-info の文言と選択チップ（両モード共通）
   applyCopilotVisibility();  // Copilot バー・placeholder の /copilot 案内はトグル次第
   renderFileTree();  // コンテキストのチェックボックス有無が変わる
 }
@@ -910,15 +908,26 @@ async function runSearch(q) {
 
 // ---- 選択テキスト（Note モード: チップ表示 + 送信ペイロード） -----------------
 function getSelection() {
+  // エディタ未ロードでも呼ばれる（applyModeUI → updateSelectionChip は Monaco の
+  // 読み込み完了前に走りうる）。落とさず「選択なし」を返す。
+  if (!state.editor) return "";
   const sel = state.editor.getSelection();
   return state.editor.getModel().getValueInRange(sel);
 }
 
+/** 選択が無いときの #sel-info の文言（モードで違う）。applyModeUI と共用。 */
+function selInfoIdleText() {
+  return isNote()
+    ? "テキストを選択してAIに送れます"
+    : "エージェントがファイルを直接編集します（破壊操作は承認制）。";
+}
+
+// 選択テキストの添付は両モード共通。Code モードでも「この関数を直して」の「この」を
+// 選択範囲で示せる（送信時に /api/chat の selection として渡る）。
 function updateSelectionChip() {
-  if (!isNote()) return;  // Code モードの #sel-info は固定文言（applyModeUI が管理）
   const has = getSelection().trim().length > 0;
   $("sel-chip").classList.toggle("hidden", !has);
-  $("sel-info").textContent = has ? "選択中：AIに送れます" : "テキストを選択してAIに送れます";
+  $("sel-info").textContent = has ? "選択中：AIに送れます" : selInfoIdleText();
 }
 
 // ---- 付箋（インラインコメント。Note モード） ----------------------------------
@@ -1383,7 +1392,8 @@ async function sendChat() {
   const applyTarget = note ? trackApplyTarget() : null;
   const body = note
     ? await buildNotePayload(msg)
-    : { message: msg, session_id: state.sessionId, current_file: state.currentFile };
+    : { message: msg, session_id: state.sessionId, current_file: state.currentFile,
+        selection: getSelection() };
 
   input.value = "";
   addMessage("user", msg);

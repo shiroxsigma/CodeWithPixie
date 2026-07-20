@@ -528,6 +528,10 @@ def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
 
 
+#: Code モードで前置きする選択範囲の上限文字数（これを超えると本題が押し流される）。
+SELECTION_MAX_CHARS = 8000
+
+
 # --- /copilot 直行経路（NWP 移植）---------------------------------------------
 COPILOT_QUESTION_MAX_CHARS = 15_000  # NWP と同値。Copilot 側の入力欄が長文を弾くため
 
@@ -690,6 +694,20 @@ async def api_chat(req: ChatReq):
             f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
             f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。）\n\n"
             f"{req.message}"
+        )
+    # 選択範囲も渡す（Note モードと同じ機能を Code モードでも: 「この関数を直して」の「この」）。
+    # 本文（未保存の編集を含むエディタ上の実体）を埋め込むのは、エージェントが read_file で
+    # 読むとディスク上の古い内容になるため。長い選択は前置きが本題を押し流すので切り詰める。
+    sel = (req.selection or "").strip()
+    if sel:
+        if len(sel) > SELECTION_MAX_CHARS:
+            sel = sel[:SELECTION_MAX_CHARS] + "\n…（長いため以降を省略）"
+        where = f"（{req.current_file}）" if req.current_file else ""
+        message = (
+            f"（コンテキスト: ユーザーがエディタで選択中のテキスト{where}。"
+            f"「この関数」「選択部分」等はここを指します。エディタ上の実体なので、"
+            f"ディスク上の内容と異なる場合はこちらが新しいです。）\n"
+            f"```\n{sel}\n```\n\n{message}"
         )
 
     return _turn_stream(sess, lambda emit: sess.run_turn(message, emit, settings.approval_timeout))
