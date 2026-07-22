@@ -12,5 +12,10 @@
   "active_server": 0,
   "approval_timeout": 0,
   "copilot_enabled": false,
-  "praylight_dir": "../PrayLight"
+  "praylight_dir": "../PrayLight",
+
+  "host": "127.0.0.1",
+  "auth_password": "",
+  "auth_token": "",
+  "allowed_hosts": []
 }

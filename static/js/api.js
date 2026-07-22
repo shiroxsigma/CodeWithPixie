@@ -22,6 +22,13 @@ export async function jsonFetch(url, opts) {
     throw new ApiError(`サーバに接続できません（${url}）`, 0);
   }
   if (!resp.ok) {
+    // 認証切れ（LAN 公開時）。どの API 呼び出しでも /login へ戻す — 初期化中でも
+    // 送信中でも、ここで飛ばせば以降の await は ApiError で止まるので安全。
+    // ログイン API 自体の 401（秘密違い）は呼び出し側が見たいので除外。
+    if (resp.status === 401 && url !== "/api/login") {
+      window.location.href = "/login";
+      throw new ApiError("認証が必要です。ログイン画面へ移動します。", 401);
+    }
     const err = await resp.json().catch(() => ({}));
     throw new ApiError(err.detail || resp.statusText || `HTTP ${resp.status}`, resp.status);
   }

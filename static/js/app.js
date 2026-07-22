@@ -1914,6 +1914,8 @@ async function sendChat() {
     return;
   }
   if (!resp.ok) {
+    // 認証切れ（LAN 公開時・セッション期限切れ）は jsonFetch を通らないのでここで判定
+    if (resp.status === 401) { window.location.href = "/login"; return; }
     const err = await resp.json().catch(() => ({}));
     finishStream();
     addMessage("error", resp.status === 409

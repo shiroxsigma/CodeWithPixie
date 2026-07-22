@@ -55,8 +55,41 @@ run.bat
 | `awp_src` | `../AnythingWithPixie/src` | AWP エンジンの場所（sys.path に前置） |
 | `workspace_root` | `./workspace` | エージェントの作業対象＝cwd＝サンドボックス |
 | `servers[]` | LM Studio 単一 | AWP と同形式の接続先リスト（先頭を使用） |
-| `host` / `port` | `127.0.0.1` / `8770` | ローカルバインド |
+| `host` / `port` | `127.0.0.1` / `8770` | バインド先。LAN 公開は「LAN 公開と認証」参照 |
 | `approval_timeout` | `0`（無期限） | 承認待ちのタイムアウト秒 |
+| `auth_password` | `""`（認証なし） | ブラウザのログイン画面で入れる秘密。非空で認証が有効になる |
+| `auth_token` | `""` | スクリプト用の秘密（`Authorization: Bearer` で使用。ログイン画面でも使える） |
+| `allowed_hosts` | `[]` | 追加で許可する Host 名/IP。VPN・複数NICで 403 になるときに足す |
+| `skip_auth_guard` | `false` | **危険**: 認証未設定のまま外部バインドでの起動を許す |
+
+## LAN 公開と認証（他PCからアクセス）
+
+既定は `127.0.0.1` バインドのローカル専用。他PCから使いたいときは `config.json` で:
+
+```json
+{
+  "host": "0.0.0.0",
+  "auth_password": "何か長い秘密"
+}
+```
+
+- 起動すると `LAN から: http://<マシンのIP>:<port>/` の候補が表示されるので、
+  他PCのブラウザで開き **/login でパスワード**を入れる（30日クッキー・再起動で再ログイン）。
+- **パスワードは `config.json` の代わりに `run.bat` に書いてもよい** — 先頭の
+  `set "CWP_AUTH_PASSWORD=ここに秘密"` を埋めるだけ（LAN公開なら `:: set "CWP_HOST=0.0.0.0"`
+  のコメントアウトも外す）。環境変数（`CWP_*`）は config.json より優先される。
+  空欄なら認証なし（ローカル専用の従来動作）。bat に平文で残る点は承知のこと。
+- **認証なしのまま `0.0.0.0` 等で起動しようとすると起動を拒否する**（エージェントは
+  承認制とはいえ任意コマンドを実行し得るため。どうしても、という場合のみ
+  `"skip_auth_guard": true`）。
+- スクリプトからは `Authorization: Bearer <auth_token>` ヘッダで認証できる
+  （`auth_token` を別途設定。`curl -H "Authorization: Bearer ..." http://<IP>:8770/api/status`）。
+- 他PCから 403 `forbidden host` になる場合（VPN・複数NIC等でマシンのIPが自動検出
+  できていない）は、アクセスに使っているホスト名/IPを `allowed_hosts` に足す。
+- ⚠ **HTTP（平文）です** — 秘密はLAN上を暗号化されずに流れます。信頼できる
+  ネットワークでのみ公開してください（TLS は未対応）。
+- ⚠ 破壊操作の承認ゲートは従来どおり動きますが、承認バーの操作自体が他PCから
+  できるようになる点に注意（＝パスワードを知る人が操作できる、ということです）。
 
 ## 使い方 / UI
 
@@ -187,7 +220,8 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 - エージェントの書き込みは AWP のツールが行い、パスはセッションのルートプロジェクト基準に
   絶対化して作業対象を限定（`os.chdir` は使わない＝セッション別フォルダ・cwd 非依存）。
 - 破壊操作は承認ゲート＋引数全文表示。AWP の編集前バックアップ（`.pixie_notes/backups/`）も併用。
-- サーバは `127.0.0.1` バインド、Host/Origin 検証で外部ページからの API 叩きを拒否。
+- サーバは既定 `127.0.0.1` バインド（LAN 公開時は認証必須・起動ガードあり。上記参照）、
+  Host/Origin 検証で外部ページからの API 叩きを拒否。
 - ⚠ 現状 `run_command` は任意シェルを実行し得る（パス検査では守れない）。**承認時に必ずコマンド全文を確認**すること。
 
 ## アーキテクチャ
@@ -196,7 +230,8 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 |---|---|
 | `app/engine_adapter.py` | **AWP との唯一の接点**。`pixie_core` だけを import し、出力の SSE 分類・承認ブリッジ・協調キャンセル・変更検知という **Web 固有部分**を担う（エンジン構築とターン制御は `pixie_core` に委譲） |
 | `pixie_core`（AWP 側）| AWP が公開する UI 非依存の埋め込み API。`create_engine()` / `Engine.run_turn()` / `CancelTurn` / ツール分類。AWP 内部への依存を1枚に集約した安定境界 |
-| `app/main.py` | FastAPI。静的配信・ファイル API・SSE チャット・`/api/approve`・`/api/interrupt`・文脈操作（`/api/chat/turn/delete`・`/api/context`・`/api/session/clear`） |
+| `app/main.py` | FastAPI。静的配信・ファイル API・SSE チャット・`/api/approve`・`/api/interrupt`・文脈操作（`/api/chat/turn/delete`・`/api/context`・`/api/session/clear`）・認証ゲート（LAN 公開時） |
+| `app/auth.py` | 認証（署名クッキー＋Bearer 検証・`/login` 画面）。秘密未設定なら全透過 |
 | `app/compact.py` | `/compact`（会話の要約 → 履歴の差し替え）|
 | `app/files.py` | ワークスペース安全アクセス（表示・エディタ読み書き用） |
 | `app/search.py` | ripgrep 全文検索 |

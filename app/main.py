@@ -9,18 +9,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import string
 import threading
 
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import (compact, config, copilot, copilot_flow, engine_adapter, extract, files, mdflow,
-               mode, note_api, note_prompts, patch, search)
+from . import (auth, compact, config, copilot, copilot_flow, engine_adapter, extract, files,
+               mdflow, mode, note_api, note_prompts, patch, search)
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -29,7 +31,55 @@ STATIC = BASE / "static"
 
 app = FastAPI(title="CodeWithPixie")
 
-ALLOWED_HOSTS = {"127.0.0.1", "localhost", settings.host}
+# ---- Host 許可リスト（DNS リバインディング対策）--------------------------------
+# loopback ＋ 設定の host ＋ 自マシンのアドレス（自動検出）＋ settings.allowed_hosts。
+# LAN 公開時はクライアントが「マシンのIP名」でアクセスするので、固定の
+# 127.0.0.1 だけでは全部 403 になる。自動検出が外す環境（VPN・複数NIC）では
+# config の allowed_hosts に手動で足す。
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_hosts_cache: set[str] | None = None
+
+
+def _detect_local_addrs() -> set[str]:
+    """自マシンのホスト名とIP（LAN内のクライアントが Host に書いてくる値）。"""
+    addrs: set[str] = set()
+    try:
+        name = socket.gethostname()
+        addrs.add(name.lower())
+        _, aliases, ips = socket.gethostbyname_ex(name)
+        addrs.update(ip.lower() for ip in ips)
+        addrs.update(a.lower() for a in aliases)
+    except OSError:
+        pass
+    # 主要な外向きNICのIP（DNSに出ないマシンでも取れる。実際のパケットは出ない）
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            addrs.add(s.getsockname()[0])
+        finally:
+            s.close()
+    except OSError:
+        pass
+    return addrs
+
+
+def allowed_hosts() -> set[str]:
+    global _hosts_cache
+    if _hosts_cache is None:
+        hosts = set(_LOOPBACK_HOSTS)
+        if settings.host and settings.host not in ("0.0.0.0", "::"):
+            hosts.add(settings.host.lower())
+        hosts |= _detect_local_addrs()
+        hosts |= {h.strip().lower() for h in settings.allowed_hosts if h.strip()}
+        _hosts_cache = hosts
+    return _hosts_cache
+
+
+def reset_hosts_cache() -> None:
+    """テスト用: 設定を差し替えたあとに許可リストを再構築させる。"""
+    global _hosts_cache
+    _hosts_cache = None
 
 MAX_SESSIONS = 8  # 1プロセスで同時に保持する会話（セッション）数の上限
 
@@ -117,17 +167,41 @@ def _valid_sid(sid: str) -> str:
 
 
 @app.middleware("http")
+async def require_auth(request: Request, call_next):
+    """認証ゲート（LAN 公開用）。秘密が未設定なら素通し（従来のローカル専用動作）。
+
+    Starlette は後から登録したミドルウェアが外側（先に実行）になる。verify_origin を
+    この下で登録しているので、Host/Origin の検証が認証より先に走る（DNSリバインディング
+    で外部ホストにさばかせる前に 403 にする）。
+    除外: ログイン画面と API・静的ファイル（ログインページ自体のCSS/JSを含む）。
+    """
+    if not auth.enabled():
+        return await call_next(request)
+    path = request.url.path
+    if path in ("/login", "/api/login", "/favicon.ico") or path.startswith("/static/"):
+        return await call_next(request)
+    if auth.check_request(request):
+        return await call_next(request)
+    # API（SSE の POST /api/chat を含む）は 401 JSON — フロントが /login へ飛ばす。
+    # ブラウザのアドレスバー直叩き（/ 等）はログイン画面へリダイレクト。
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "認証が必要です（/login でログインしてください）"},
+                            status_code=401)
+    return RedirectResponse("/login", status_code=302)
+
+
+@app.middleware("http")
 async def verify_origin(request: Request, call_next):
     """DNS リバインディング & CSRF 対策: ローカル以外の Host / Origin を拒否する。"""
     host = request.headers.get("host", "").split(":")[0].lower()
-    if host not in ALLOWED_HOSTS:
+    if host not in allowed_hosts():
         return JSONResponse({"detail": "forbidden host"}, status_code=403)
     # 破壊操作を解放し得る POST は Origin も検証（承認/中断/書込を外部ページから叩かせない）。
     if request.method == "POST":
         origin = request.headers.get("origin")
         if origin:
             from urllib.parse import urlparse
-            if urlparse(origin).hostname not in ALLOWED_HOSTS:
+            if urlparse(origin).hostname not in allowed_hosts():
                 return JSONResponse({"detail": "forbidden origin"}, status_code=403)
     return await call_next(request)
 
@@ -980,13 +1054,129 @@ def index():
     return HTMLResponse(html)
 
 
+# <link rel="icon"> を見ないクライアント（古いブラウザ・一部ツール）は /favicon.ico を
+# 直に取りに来る。ルートが無いとページを開くたびアクセスログに 404 が並ぶので実体を返す。
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(STATIC / "favicon.svg", media_type="image/svg+xml")
+
+
+# ---- ログイン（LAN 公開時の認証ゲート）------------------------------------------
+# 認証無効（秘密が未設定）なら /login も /api/login も意味のない素通し（従来動作）。
+# 秘密は config.json の auth_password / auth_token（どちらを入れても通る）。
+_LOGIN_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ログイン - CodeWithPixie</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<style>
+  body { background:#1e1e2a; color:#e8e8f0; font-family:system-ui,sans-serif;
+         display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+  .box { background:#262636; border:1px solid #3a3a50; border-radius:12px;
+         padding:28px 32px; width:min(360px,90vw); box-shadow:0 10px 40px rgba(0,0,0,.5); }
+  h1 { font-size:18px; margin:0 0 6px; }
+  p { color:#9a9ab0; font-size:12px; margin:0 0 18px; }
+  input { width:100%; box-sizing:border-box; background:#1e1e2a; color:#e8e8f0;
+          border:1px solid #3a3a50; border-radius:8px; padding:10px; font-size:14px; }
+  button { width:100%; margin-top:12px; background:#6c5ce7; color:#fff; border:0;
+           border-radius:8px; padding:10px; font-size:14px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  .err { color:#ff7b72; font-size:12px; min-height:16px; margin-top:10px; }
+</style></head>
+<body><form class="box" id="f">
+  <h1>🧚 CodeWithPixie</h1>
+  <p>パスワードまたはトークンを入力してください（config.json の auth_password / auth_token）。</p>
+  <input id="s" type="password" placeholder="パスワード / トークン" autofocus autocomplete="current-password">
+  <button type="submit">ログイン</button>
+  <div class="err" id="err"></div>
+</form>
+<script>
+  document.getElementById("f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = document.getElementById("err");
+    err.textContent = "";
+    const secret = document.getElementById("s").value;
+    try {
+      const r = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret }),
+      });
+      if (r.ok) { location.href = "/"; return; }
+      err.textContent = "⚠ 秘密が一致しません。";
+    } catch (ex) {
+      err.textContent = "⚠ サーバに接続できません: " + ex.message;
+    }
+  });
+</script></body></html>
+"""
+
+
+class LoginReq(BaseModel):
+    secret: str
+
+
+@app.get("/login", include_in_schema=False)
+def login_page():
+    return HTMLResponse(_LOGIN_HTML)
+
+
+@app.post("/api/login")
+def api_login(req: LoginReq, request: Request):
+    if not auth.enabled():
+        return {"ok": True}  # 認証無効ならログインは常に成功（従来どおり誰も止めない）
+    if not auth.verify_secret(req.secret):
+        raise HTTPException(401, "パスワード/トークンが一致しません。")
+    value, max_age = auth.make_cookie_value()
+    resp = JSONResponse({"ok": True})
+    # HttpOnly（JS から読めない）+ SameSite=Lax（クロスサイト発の同乗を抑制）。
+    # secure は https 配信のときだけ（http で付けるとブラウザがクッキーを捨てる）。
+    resp.set_cookie(auth.COOKIE_NAME, value, max_age=max_age, httponly=True,
+                    samesite="lax", path="/", secure=request.url.scheme == "https")
+    return resp
+
+
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+def _is_loopback_bind(host: str) -> bool:
+    h = (host or "").strip().lower()
+    return h in ("localhost", "::1") or h.startswith("127.")
+
+
+def startup_guard() -> str | None:
+    """起動前チェック。問題があれば日本語のエラー文、なければ None。
+
+    認証なしで loopback 以外にバインドするのは、LAN 全員に「承認制とはいえ任意コマンド
+    実行のUI」を渡すことになるため、既定で拒否する（skip_auth_guard で強制可）。"""
+    if not _is_loopback_bind(settings.host) and not auth.enabled() \
+            and not settings.skip_auth_guard:
+        return (
+            f"host={settings.host!r}（外部バインド）なのに認証が未設定です。\n"
+            "  config.json に \"auth_password\": \"...\" か \"auth_token\": \"...\" を設定してください。\n"
+            "  どうしても認証なしで公開したい場合のみ \"skip_auth_guard\": true（非推奨・危険）。"
+        )
+    return None
 
 
 def run() -> None:
     import uvicorn
 
+    err = startup_guard()
+    if err:
+        print(f"[CWP][ERROR] 起動を中止しました:\n{err}")
+        raise SystemExit(1)
+
     print(f"CodeWithPixie -> http://{settings.host}:{settings.port}  (workspace: {config.WORKSPACE})")
+    if not _is_loopback_bind(settings.host):
+        # LAN 公開の補助情報: 実際の名前と平文通信の注意
+        names = sorted(h for h in allowed_hosts() if h not in _LOOPBACK_HOSTS)
+        for n in names[:4]:
+            print(f"  LAN から: http://{n}:{settings.port}/  (初回は /login でログイン)")
+        print("  ⚠ 注意: HTTP（平文）です。ログインの秘密はLAN上を暗号化されずに流れます。"
+              " 信頼できるネットワークでのみ公開してください。")
+        if auth.enabled():
+            print("  ⚠ サーバを再起動すると再ログインが必要です（セッション鍵は起動ごとに再生成）。")
     # 注意: reload はワーカースレッド/グローバル状態と相性が悪いので使わない（監査指摘）。
     uvicorn.run(app, host=settings.host, port=settings.port)
 

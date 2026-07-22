@@ -65,6 +65,20 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8771
 
+    # --- LAN 公開と認証（host を 0.0.0.0 等にして他PCからアクセスする場合） ---
+    # どちらかが非空で認証が有効になる。ログインフォームは両方を受け付ける。
+    #   auth_password … ブラウザのログイン画面で入れる秘密
+    #   auth_token    … スクリプト用の Authorization: Bearer にも使える秘密
+    # 未設定のまま loopback 以外にバインドすると起動を拒否する（エージェントが
+    # 任意コマンドを実行し得るため、LAN 丸裸を既定で許さない）。
+    auth_password: str = ""
+    auth_token: str = ""
+    # 追加で許可する Host ヘッダ値（IP/マシン名）。VPN・複数NIC等で起動時の自動検出
+    # （自マシンのIP/ホスト名）が足りない場合に足す（403 "forbidden host" 対策）。
+    allowed_hosts: list[str] = []
+    # 危険: true にすると「認証未設定＋外部バインド」でも起動を許す（非推奨）。
+    skip_auth_guard: bool = False
+
     # ripgrep のパス（PATH にあれば "rg" のまま）。ファイル検索 API 用。
     rg_path: str = "rg"
 
