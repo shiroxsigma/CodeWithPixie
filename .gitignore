@@ -16,8 +16,11 @@ config.json
 
 # ベンダライブラリは scripts/fetch_*.py で取得（README の手順参照）。
 # monaco だけは取得スクリプトが無いため既存トラッキングを維持。
+# turndown は小さい（31KB）ので git 管理 — 別PCで pull しただけで動くようにする
+# （fetch スクリプト未実行だと index.html の <script> が 404 になるため）。
 static/vendor/*
 !static/vendor/monaco/
+!static/vendor/turndown/
 
 # pixie_core が workspace に作るランタイム状態（state_board 等）。
 # Note の付箋 .pixie_notes.json（ファイル）は別物で保存対象なので除外しないこと。
