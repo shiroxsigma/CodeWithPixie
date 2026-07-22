@@ -76,6 +76,20 @@ run.bat
     無ければ文書内の通し番号（`figure-1`）。**同じ図を直して保存し直すと同じファイルへ
     上書き**される — 日時で名付けると、ノートに貼った `![](images/…)` が古い図を指し続けるため。
   - mdflow のプリセットを切り替えた状態は、見えているとおりに書き出される。
+- **画像の貼り付け**（Note モード）: エディタへ画像を **Ctrl+V / ドラッグ&ドロップ** すると
+  `<ノートと同じ階層>/images/` に保存され、カーソル位置に `![](images/xxx.png)` が入る。
+  プレビューとチャット（今のノート基準）にそのまま描画される（配信は `/api/asset`）。
+- **Confluence / Web との往復**（認証不要のクリップボード経由）:
+  - **📋 リッチコピー**（プレビュー表示中のみ）: プレビューの内容を**リッチテキスト（HTML）と
+    Markdown の2形式**でクリップボードへ載せる。Confluence のエディタに貼ると見出し・表・
+    コードブロックが維持される（Confluence はMarkdown直貼りの対応が不完全なのでHTML側が実体）。
+    ワークスペース画像は base64 で埋め込み、**mermaid 図は PNG 化して貼る**
+    （Confluence は mermaid を描画できないため）。
+  - **📥 貼付**（ファイル欄の右上）: Confluence のページをブラウザでコピー（Ctrl+C）してから
+    「クリップボードから読込」（またはダイアログの欄に Ctrl+V）すると、HTML を **Markdown に
+    変換**して開いているファイルのカーソル位置へ挿入する。turndown のベンダリングが要る
+    （下「Markdown 描画のベンダリング」参照。未取得でもテキストはそのまま挿入できる）。
+    画像は Confluence 上のURL参照のまま残る（ログインユーザーには見える）。
 - 右: ファイルツリー＋全文検索、下にエージェントチャット。
   - ツリーは階層表示（📂 クリックで折りたたみ）。**ドラッグ&ドロップで移動**（一覧の余白へ落とすと最上位へ）、
     **右クリックで新規作成・名前変更/移動・削除**。
@@ -95,11 +109,12 @@ run.bat
 
 ### Markdown 描画のベンダリング
 チャットの Markdown 描画とプレビューは `markdown-it` / `mermaid` の UMD ビルドを使う。未取得なら
-その機能だけが無効化される（編集・チャット自体は動く）。取得はどちらも1回きり:
+その機能だけが無効化される（編集・チャット自体は動く）。取得はどれも1回きり:
 
 ```bash
 python -m pipenv run python scripts/fetch_markdown_it.py
 python -m pipenv run python scripts/fetch_mermaid.py
+python -m pipenv run python scripts/fetch_turndown.py   # 「📥 貼付」のHTML→Markdown変換（turndown）用
 ```
 
 ### Copilot 連携（任意）
@@ -191,7 +206,8 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 | `static/js/api.js` | バックエンド呼び出しの共通ラッパ。4xx/5xx を `ApiError` にして握り潰さない（NWP 由来） |
 | `static/js/markdown.js` | markdown-it / mermaid 描画。チャット返信とプレビューで共用（NWP 由来） |
 | `static/js/mermaid-export.js` | 描画済み SVG → PNG 変換とクリップボード。保存先の決定は app.js が `setDiagramSaver` で注入する |
-| `static/vendor/` | Monaco / markdown-it / mermaid（`scripts/fetch_*.py` で取得） |
+| `static/js/confluence.js` | 「📥 貼付」の HTML→Markdown 変換（turndown + GFM プラグインの UMD。未取得なら縮退） |
+| `static/vendor/` | Monaco / markdown-it / mermaid / turndown（`scripts/fetch_*.py` で取得） |
 
 ### ターン1回の流れ
 `POST /api/chat` → worker スレッドで `run_graph`（同期）を実行 → `output_fn` が

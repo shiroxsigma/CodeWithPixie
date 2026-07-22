@@ -28,14 +28,18 @@ function _atBottom(m) {
   return m.scrollHeight - m.scrollTop - m.clientHeight <= NEAR_BOTTOM_PX;
 }
 
-/** 発言を1件追加して要素を返す。AI の返信だけ Markdown 整形する。 */
-export function addMessage(role, text) {
+/**
+ * 発言を1件追加して要素を返す。AI の返信だけ Markdown 整形する。
+ * opts はそのまま renderInto へ渡る（assetBase: 相対画像の解決基準。
+ * チャットの画像は「今のノート目录」基準で呼ぶ側が渡す）。
+ */
+export function addMessage(role, text, opts = {}) {
   const el = document.createElement("div");
   el.className = "msg " + role;
   const body = document.createElement("div");
   body.className = "body";
   // 自分の発言は打った通りに見せる。整形するのは AI の返信だけ。
-  if (role === "assistant") renderInto(body, text);
+  if (role === "assistant") renderInto(body, text, opts);
   else renderPlain(body, text);
   el.appendChild(body);
   _messages().appendChild(el);

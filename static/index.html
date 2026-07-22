@@ -60,6 +60,7 @@
       <div id="left-toolbar">
         <button id="note-btn" class="note-only" title="選択行に付箋を貼る">📌 付箋</button>
         <button id="preview-btn" title="Markdown プレビューを表示 (Ctrl+Shift+P)">👁 プレビュー</button>
+        <button id="richcopy-btn" disabled title="Markdown プレビュー表示中に使えます">📋 リッチコピー</button>
         <span id="sel-info" class="hint">エージェントがファイルを直接編集します（破壊操作は承認制）。</span>
       </div>
     </section>
@@ -77,6 +78,7 @@
             <button id="new-file-btn" title="新規ファイル">📄+</button>
             <button id="new-folder-btn" title="新規フォルダ">📁+</button>
             <button id="web2md-btn" class="note-only" title="URLのページをMarkdown化して web/ に保存する">🌐+</button>
+            <button id="cf-btn" title="Confluence 等のページ（コピーしたHTML）をMarkdownに変換して挿入する">📥 貼付</button>
           </span>
           <input id="file-search" type="search" placeholder="🔍 全文検索…" />
         </div>
@@ -166,6 +168,28 @@
     </div>
   </div>
 
+  <!-- Confluence / Web 貼り付けダイアログ（コピーしたHTML → Markdown 変換） -->
+  <div id="cf-modal" class="hidden">
+    <div id="cf-dialog">
+      <div class="root-head">📥 Confluence / Web から貼り付け</div>
+      <div class="root-hint hint">
+        Confluence のページをブラウザでコピー（Ctrl+C）してから「クリップボードから読込」、
+        または下の欄に Ctrl+V。リッチテキスト（HTML）で取れれば Markdown に変換して、
+        今開いているファイルのカーソル位置へ挿入します（画像は Confluence 上のURL参照のまま残ります）。
+      </div>
+      <div class="cf-actions">
+        <button id="cf-read-btn" title="クリップボードを直接読み取る（ブラウザの許可が必要な場合あり）">📋 クリップボードから読込</button>
+        <span id="cf-status" class="hint"></span>
+      </div>
+      <textarea id="cf-input" rows="10" spellcheck="false"
+        placeholder="ここに貼り付け（Ctrl+V）…"></textarea>
+      <div class="root-actions">
+        <button id="cf-cancel">閉じる</button>
+        <button id="cf-insert" class="apply-btn">✓ 変換して挿入</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 設定ダイアログ（⚙️ モデル/サーバ・Copilot） -->
   <div id="settings-modal" class="hidden">
     <div id="settings-dialog">
@@ -213,6 +237,11 @@
   <script src="/static/vendor/mermaid/mermaid.min.js"></script>
   <!-- js-yaml（UMD）。scripts/fetch_js_yaml.py で取得。mdflow 条件マッピングの解析に使う（Note モード）。 -->
   <script src="/static/vendor/js-yaml/js-yaml.min.js"></script>
+  <!-- turndown + GFM プラグイン（UMD）。scripts/fetch_turndown.py で取得。
+       Confluence 等から貼り付けたHTMLのMarkdown変換に使う。未取得なら 404 になるが、
+       その場合は貼り付けダイアログがプレーンテキスト挿入に縮退するだけで編集は続けられる。 -->
+  <script src="/static/vendor/turndown/turndown.umd.js"></script>
+  <script src="/static/vendor/turndown/turndown-plugin-gfm.js"></script>
   <script src="/static/js/monaco-loader.js"></script>
   <script src="/static/js/app.js" type="module"></script>
 </body>

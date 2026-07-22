@@ -280,6 +280,27 @@ button:active { transform: translateY(1px); }
 #pick-list li:hover { background: var(--bg3); }
 #pick-list li.pick-file { color: var(--accent2); }
 
+/* Confluence / Web 貼り付けダイアログ（関連ファイル選択ダイアログのスタイルを踏襲） */
+#cf-modal {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+#cf-dialog {
+  width: min(720px, 92vw); max-height: 84vh;
+  display: flex; flex-direction: column; gap: 10px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); padding: 16px;
+}
+.cf-actions { display: flex; gap: 10px; align-items: center; }
+#cf-status { flex: 1; min-width: 0; }
+#cf-input {
+  flex: 1; min-height: 180px; resize: vertical;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px; font-size: 13px; font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
 /* ファイル操作の右クリックメニュー */
 #fs-menu {
   position: fixed; z-index: 100; min-width: 180px;

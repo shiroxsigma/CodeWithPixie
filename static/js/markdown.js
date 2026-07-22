@@ -203,7 +203,7 @@ function buildExportBar(box, id) {
 }
 
 /** PNG の下地色。図はダークテーマで描かれているので、透明のままだと白地で読めない。 */
-function pngBackground() {
+export function pngBackground() {
   const v = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
   return v || "#1e1e2a";
 }
@@ -447,7 +447,11 @@ function buildPresetList(flow, ctx) {
  * mermaid 図は描画が非同期なので、少し遅れて図に差し替わる。
  * opts.mdflow（{doc, conditions, focus?}）を渡すと、条件マッピングのある図は
  * 選択プリセットでハイライトされ、直下にプリセットリストが付く（エディタの
- * プレビュー専用。チャットの描画は従来どおり opts なしで呼ぶ）。
+ * プレビュー専用）。
+ * opts.assetBase（文字列、"" はワークスペースのルート）を渡すと、この描画の間だけ
+ * 相対画像の解決基準を上書きする。チャット描画用 — モジュール共通の基準
+ * （setAssetBase）は「最後にプレビューしたディレクトリ」のままで止まるため、
+ * チャットは呼び出し側が「今のノートのディレクトリ」を明示して渡す。
  */
 export function renderInto(el, text, opts = {}) {
   if (!md) {
@@ -456,7 +460,15 @@ export function renderInto(el, text, opts = {}) {
     return;
   }
   el.classList.add("md");  // .md が付いた要素だけ pre-wrap をやめる（style.css 参照）
-  el.innerHTML = md.render(text);
+  // 画像URLの書き換えは md.render（同期）の中で起きる。assetBase の上書きは
+  // この呼び出しの間だけ有効にし、終わったら必ず戻す（他描画に漏らさない）。
+  const prevBase = assetBase;
+  if (opts.assetBase != null) assetBase = opts.assetBase || "";
+  try {
+    el.innerHTML = md.render(text);
+  } finally {
+    if (opts.assetBase != null) assetBase = prevBase;
+  }
   const gen = (generation.get(el) || 0) + 1;
   generation.set(el, gen);
   renderMermaid(el, gen, opts.mdflow || null);

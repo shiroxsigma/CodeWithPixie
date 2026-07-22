@@ -8,8 +8,11 @@
 // モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code /
 //   mode-plan で出し分け。
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
-import { available as mdAvailable, renderInto, renderPlain, setAssetBase, setDiagramSaver } from "./markdown.js";
-import { blobToBase64, sanitizeName } from "./mermaid-export.js";
+import {
+  available as mdAvailable, pngBackground, renderInto, renderPlain, setAssetBase, setDiagramSaver,
+} from "./markdown.js";
+import { blobToBase64, sanitizeName, svgToPngBlob } from "./mermaid-export.js";
+import { available as cfAvailable, htmlToMarkdown } from "./confluence.js";
 import * as mdflow from "./mdflow.js";
 import { $ } from "./dom.js";
 import { addDeleteButton, addMessage, addToolStatus, scrollMessages } from "./chat-log.js";
@@ -324,7 +327,8 @@ async function loadHistory() {
   let lastUserEl = null, lastUserText = "";
   for (const m of r.messages || []) {
     state.history.push({ role: m.role, content: m.content });
-    const el = addMessage(m.role, m.content);
+    // 履歴の中の ![](images/...) は現在のノートディレクトリ基準で解決する
+    const el = addMessage(m.role, m.content, { assetBase: currentDir() });
     if (m.role === "user") { lastUserEl = el; lastUserText = m.content; continue; }
     // 復元した履歴にも 🗑 を付ける。turn ID は無い（この往復を積んだセッションはもう
     // 無い）ので 0 を渡す — deleteExchange が Note 用の経路（履歴から消して再シード）へ落ちる。
@@ -835,22 +839,32 @@ let previewTimer = null;
 
 const isPreviewOpen = () => !$("preview").classList.contains("hidden");
 
+/** 現在ファイルのディレクトリ（ワークスペース相対、ルートなら ""）。
+    画像の相対パス（images/foo.png）の解決基準 — プレビューとチャット描画で共用する。 */
+const currentDir = () => (state.currentFile && state.currentFile.includes("/"))
+  ? state.currentFile.slice(0, state.currentFile.lastIndexOf("/")) : "";
+
 function updatePreviewAvailability() {
   const ok = isMarkdown(state.currentFile);
   $("preview-btn").disabled = !ok;
   $("preview-btn").title = ok
     ? "Markdown プレビューを表示 (Ctrl+Shift+P)"
     : "Markdown ファイル（.md）を開いているときだけ使えます";
+  // リッチコピーは「プレビューが出ている間」だけ意味がある（コピー元がプレビューDOMのため）
+  const rc = $("richcopy-btn");
+  rc.disabled = !(ok && isPreviewOpen());
+  rc.title = (ok && isPreviewOpen())
+    ? "プレビューの内容をリッチテキスト（HTML）とMarkdownでコピー。Confluence 等に貼り付け可"
+    : "Markdown プレビュー表示中に使えます";
   if (!ok && isPreviewOpen()) closePreview();
 }
 
-function renderPreview() {
-  if (!isPreviewOpen()) return;
-  // 画像の相対パス（images/foo.png）は現在ファイルのディレクトリ基準で解決させる
-  const dir = state.currentFile?.includes("/")
-    ? state.currentFile.slice(0, state.currentFile.lastIndexOf("/")) : "";
-  setAssetBase(dir);
-
+/**
+ * プレビューが描画する本文（frontmatter 剥がし＋mdflow のオプション組み立て）。
+ * renderPreview（描画）と copyRichPreview（text/plain 側のコピー内容）で共有する —
+ * 「見えているもの」がコピーされることを保証するため。
+ */
+function previewSource() {
   const value = state.editor.getValue();
   let text = value;
   const opts = {};
@@ -875,6 +889,14 @@ function renderPreview() {
       }
     } catch { /* mdflow のパースに失敗しても従来のプレビューは出す */ }
   }
+  return { text, opts };
+}
+
+function renderPreview() {
+  if (!isPreviewOpen()) return;
+  // 画像の相対パス（images/foo.png）は現在ファイルのディレクトリ基準で解決させる
+  setAssetBase(currentDir());
+  const { text, opts } = previewSource();
   renderInto($("preview"), text, opts);
   syncPreviewScroll();
 }
@@ -935,6 +957,7 @@ function setPreviewVisible(on) {
   // 幅がどこにも配分されず編集エリアの右側が空白のまま残る。
   if (on) restorePreviewSplit(); else $("editor").style.flex = "";
   state.editor?.layout();
+  updatePreviewAvailability();  // リッチコピーボタンの有効状態がプレビュー開閉に連動する
 }
 
 function closePreview() {
@@ -975,6 +998,203 @@ function togglePreview() {
   setPreviewVisible(true);
   renderPreview();
   // automaticLayout: true なので Monaco 側の再計算は自動で追従する
+}
+
+// ---- リッチコピー（プレビュー → Confluence 等への貼り付け用） ----------------
+// プレビューの描画済みDOMを、よそへ貼っても壊れない形（画像はbase64インライン、
+// mermaid は PNG 化、見た目は最小限のインラインスタイル）に整え、text/html と
+// text/plain（Markdown 本文）の2形式でクリップボードへ載せる。Confluence の
+// エディタは Markdown の直貼り対応が不完全なので、HTML 側が実体になる。
+
+/** Blob → data URL（ヘッダ込みの完全な "data:..." 文字列）。 */
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(new Error("画像データを読み込めませんでした"));
+    r.readAsDataURL(blob);
+  });
+}
+
+/** ペースト先（Confluence/Word 等）は白地前提なので、自前のダークテーマCSSに
+    依存しない最小限の見た目をインラインスタイルで付ける。 */
+function styleForPaste(root) {
+  const each = (sel, styles) =>
+    root.querySelectorAll(sel).forEach((el) => Object.assign(el.style, styles));
+  each("table", { borderCollapse: "collapse" });
+  each("th, td", { border: "1px solid #9aa0a6", padding: "4px 8px" });
+  each("th", { background: "#f1f3f4" });
+  each("pre", {
+    background: "#f6f8fa", padding: "8px", borderRadius: "6px",
+    fontFamily: "Consolas, 'Cascadia Code', monospace", fontSize: "12px",
+    whiteSpace: "pre-wrap",
+  });
+  each("code", { fontFamily: "Consolas, 'Cascadia Code', monospace", fontSize: "0.92em" });
+  each("blockquote", {
+    borderLeft: "3px solid #cccccc", margin: "8px 0", padding: "2px 12px", color: "#555555",
+  });
+  each("img", { maxWidth: "100%" });
+  each("h1, h2, h3, h4", { margin: "12px 0 6px" });
+}
+
+/** プレビューDOMのコピーを、貼り付け用に加工したHTML文字列にする（非同期）。 */
+async function buildClipboardHtml(previewEl) {
+  const clone = previewEl.cloneNode(true);
+  // 描画専用UI（書き出しバー・条件プリセット・条件マッピングの折りたたみ）は文書の内容で
+  // ないので外す。描画失敗中の mermaid ソース（.mermaid-error）は本文扱いで残す。
+  clone.querySelectorAll(".mermaid-tools, .mdflow-presets, .mdflow-mapping, .mdflow-note")
+    .forEach((n) => n.remove());
+
+  // mermaid 図 → PNG（data URL）。Confluence はインラインSVGを受け付けないが、
+  // 画像化したものなら添付として入る。失敗した図はSVGのまま残す（最悪消えるだけ）。
+  for (const box of clone.querySelectorAll(".mermaid-box")) {
+    const svg = box.querySelector("svg");
+    if (!svg) continue;
+    try {
+      const blob = await svgToPngBlob(svg, { background: pngBackground() });
+      const img = document.createElement("img");
+      img.src = await blobToDataUrl(blob);
+      img.style.maxWidth = "100%";
+      box.replaceWith(img);
+    } catch { /* PNG 化できなければ SVG のまま（貼付先で消える可能性がある） */ }
+  }
+
+  // ワークスペース画像（/api/asset?...）はローカルサーバでしか解決できない →
+  // base64 を埋め込む。http(s)/data はそのまま貼付先から参照できる。
+  for (const img of clone.querySelectorAll("img")) {
+    const src = img.getAttribute("src") || "";
+    if (!src.startsWith("/api/asset")) continue;
+    try {
+      const resp = await fetch(src);
+      if (!resp.ok) continue;
+      img.src = await blobToDataUrl(await resp.blob());
+    } catch { /* 取得失敗はリンクのまま（貼付先では切れる） */ }
+  }
+
+  styleForPaste(clone);
+  return `<div>${clone.innerHTML}</div>`;
+}
+
+let richCopyBusy = false;
+
+/** プレビューの内容を「リッチテキスト＋Markdown」の2形式でクリップボードへコピーする。 */
+async function copyRichPreview() {
+  if (!isPreviewOpen() || richCopyBusy) return;
+  const btn = $("richcopy-btn");
+  const orig = btn.textContent;
+  richCopyBusy = true;
+  btn.disabled = true;
+  btn.textContent = "⏳";
+  try {
+    const { text } = previewSource();
+    const html = await buildClipboardHtml($("preview"));
+    await navigator.clipboard.write([new ClipboardItem({
+      "text/html": new Blob([html], { type: "text/html" }),
+      "text/plain": new Blob([text], { type: "text/plain" }),
+    })]);
+    btn.textContent = "✓ コピー済";
+  } catch (e) {
+    btn.textContent = orig;
+    alert("⚠️ コピーできませんでした: " + (e?.message || e));
+  } finally {
+    richCopyBusy = false;
+    setTimeout(() => { btn.textContent = orig; updatePreviewAvailability(); }, 1500);
+  }
+}
+
+// ---- Confluence / Web からの貼り付け（HTML → Markdown 変換） ------------------
+// Confluence のページをブラウザでコピー（Ctrl+C）するとクリップボードに
+// text/html が入る。それを Turndown（static/js/confluence.js、要ベンダリング）で
+// Markdown にして、エディタのカーソル位置へ挿入する。認証もAPIも要らない往復の片側。
+
+let cfPendingHtml = null;  // 貼り付け/読込で捕まえたHTML。null = プレーンテキストのみ
+
+/** 挿入位置の直前に必要な改行（空文書なら ""、文中なら "\n\n" 等）。 */
+function pasteSeparator() {
+  const model = state.editor.getModel();
+  const offset = model.getOffsetAt(state.editor.getSelection().getStartPosition());
+  const before = model.getValue().slice(0, offset).replace(/[ \t]+$/, "");
+  if (!before.trim()) return "";              // 文書の先頭
+  if (/\n\s*\n\s*$/.test(before)) return "";  // 既に空行がある
+  if (/\n\s*$/.test(before)) return "\n";     // 改行1つ → もう1つ足して段落を分ける
+  return "\n\n";                              // 行の途中
+}
+
+function bindConfluenceUI() {
+  const modal = $("cf-modal");
+  const input = $("cf-input");
+  const status = $("cf-status");
+  const setStatus = (t) => { status.textContent = t || ""; };
+
+  $("cf-btn").addEventListener("click", () => {
+    cfPendingHtml = null;
+    input.value = "";
+    setStatus(cfAvailable()
+      ? "Confluence（または任意のWebページ）でコピー（Ctrl+C）してから「クリップボードから読込」、または下の欄に Ctrl+V。"
+      : "⚠ Turndown 未取得: python -m pipenv run python scripts/fetch_turndown.py を実行するとHTML→Markdown変換が有効になります（未取得でもテキストはそのまま挿入できます）。");
+    modal.classList.remove("hidden");
+    input.focus();
+  });
+  const close = () => modal.classList.add("hidden");
+  $("cf-cancel").addEventListener("click", close);
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+
+  // 下の欄への Ctrl+V: クリップボードにHTMLがあれば横取りして覚えておく。
+  // textarea の既定の貼り付けはプレーンテキストしか入れず、表などの構造が失われるため。
+  input.addEventListener("paste", (e) => {
+    const html = e.clipboardData?.getData("text/html");
+    if (!html || !cfAvailable()) return;  // テキストのみの貼り付けは既定動作に任せる
+    e.preventDefault();
+    cfPendingHtml = html;
+    input.value = e.clipboardData?.getData("text/plain") || "";
+    setStatus("✓ リッチテキスト（HTML）で取得しました。「変換して挿入」でMarkdownになります（下の欄は確認用。欄を手で編集するとHTML側を無視して欄の内容を挿入します）。");
+  });
+
+  // クリップボードの直接読み込み（ボタン）。ブラウザの許可プロンプトが出ることがある。
+  $("cf-read-btn").addEventListener("click", async () => {
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (item.types.includes("text/html") && cfAvailable()) {
+          cfPendingHtml = await (await item.getType("text/html")).text();
+          input.value = item.types.includes("text/plain")
+            ? await (await item.getType("text/plain")).text() : "";
+          setStatus("✓ クリップボードのHTMLを取得しました。");
+          return;
+        }
+        if (item.types.includes("text/plain")) {
+          cfPendingHtml = null;
+          input.value = await (await item.getType("text/plain")).text();
+          setStatus("プレーンテキストとして取得しました（そのまま挿入されます）。");
+          return;
+        }
+      }
+      setStatus("クリップボードが空です。");
+    } catch (e) {
+      setStatus("⚠ 読み込めませんでした: " + (e?.message || e) + "。下の欄へ Ctrl+V なら直接取れます。");
+    }
+  });
+
+  // textarea を手で編集したら、捕まえていたHTMLとは食い違うのでHTML側を捨てる。
+  input.addEventListener("input", () => { cfPendingHtml = null; });
+
+  $("cf-insert").addEventListener("click", () => {
+    if (!state.currentFile) { alert("先に挿入先のファイルを開いてください。"); return; }
+    let text;
+    try {
+      text = cfPendingHtml != null ? htmlToMarkdown(cfPendingHtml) : input.value;
+    } catch (e) {
+      alert("⚠ 変換に失敗しました: " + e.message);
+      return;
+    }
+    if (!text.trim()) { setStatus("貼り付ける内容がありません。"); return; }
+    state.editor.executeEdits("confluence-paste", [{
+      range: state.editor.getSelection(),
+      text: pasteSeparator() + text.replace(/\s+$/, "") + "\n",
+    }]);
+    state.editor.focus();
+    close();
+  });
 }
 
 // ---- 全文検索 ----
@@ -1446,8 +1666,9 @@ function beginAssistantStream(el) {
       // 対象から外す。無ければ splitThink は素通しなので Code モードにも無害。
       const { think, visible } = splitThink(raw);
       showThink(think, true);   // 完了したら折りたたむ
-      // 本文が出揃ったのでここで一度だけ Markdown へ
-      if (visible.trim()) renderInto(el.querySelector(".body"), visible);
+      // 本文が出揃ったのでここで一度だけ Markdown へ。assetBase は「今のノートの
+      // ディレクトリ」を明示する（モジュール共通の基準は最後にプレビューしたディレクトリで止まるため）
+      if (visible.trim()) renderInto(el.querySelector(".body"), visible, { assetBase: currentDir() });
       return visible;
     },
   };
@@ -2006,7 +2227,7 @@ function renderPatchAction(el, text, edits) {
     pos = b.end;
   }
   folded += text.slice(pos);
-  renderInto(el.querySelector(".body"), folded);
+  renderInto(el.querySelector(".body"), folded, { assetBase: currentDir() });
   const actions = document.createElement("div");
   actions.className = "apply-actions";
   const btn = document.createElement("button");
@@ -2483,7 +2704,9 @@ function bindUI() {
   updatePreviewAvailability();
   $("save-btn").addEventListener("click", () => saveFile());  // MouseEvent を引数に渡さない
   $("preview-btn").addEventListener("click", togglePreview);
+  $("richcopy-btn").addEventListener("click", copyRichPreview);
   bindMdflowUI();
+  bindConfluenceUI();
   $("refresh-btn").addEventListener("click", () => loadFileList());
   $("file-search").addEventListener("input", onSearch);
   // モードバッジ（🛠 Code → 📋 Plan → 📝 Note の循環）
@@ -2556,6 +2779,7 @@ function bindUI() {
     }
     if (e.key === "Escape" && !$("root-modal").classList.contains("hidden")) closeRootModal();
     else if (e.key === "Escape" && !$("pick-modal").classList.contains("hidden")) closePickModal();
+    else if (e.key === "Escape" && !$("cf-modal").classList.contains("hidden")) $("cf-modal").classList.add("hidden");
     else if (e.key === "Escape" && !$("settings-modal").classList.contains("hidden")) closeSettings();
     else if (e.key === "Escape" && !$("diff-overlay").classList.contains("hidden")) closeDiffPreview();
     // Esc は「修正を依頼」と同じ扱い（計画は捨てずに引っ込めるだけ）
