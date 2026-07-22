@@ -74,10 +74,16 @@ def list_files() -> list[dict]:
         if _hidden(rel_parts):
             continue
         rel = p.relative_to(root).as_posix()
-        if p.is_dir():
-            out.append({"path": rel, "type": "dir"})
-        elif p.is_file():
-            out.append({"path": rel, "type": "file", "size": p.stat().st_size, "text": is_text(rel)})
+        # OneDrive のプレースホルダ・同期競合・壊れた参照が1件あるだけで一覧全体が
+        # 500 にならないよう、読めないエントリはスキップする。
+        try:
+            if p.is_dir():
+                out.append({"path": rel, "type": "dir"})
+            elif p.is_file():
+                out.append({"path": rel, "type": "file", "size": p.stat().st_size,
+                            "text": is_text(rel)})
+        except OSError:
+            continue
     return out
 
 
