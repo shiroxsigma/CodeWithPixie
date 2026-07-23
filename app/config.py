@@ -179,6 +179,53 @@ def active_server() -> dict:
     return load_servers()[get_active_server_index()]
 
 
+#: 手動コンテキスト長の許容範囲（トークン）。0 は「自動」（バックエンドが
+#: LM Studio の meta.n_ctx を取得、取れなければ pixie_core の N_CTX=32768 を仮定）。
+CONTEXT_LENGTH_MIN = 512
+CONTEXT_LENGTH_MAX = 2_000_000
+
+
+def get_active_server_context_length() -> int:
+    """アクティブサーバに設定された手動コンテキスト長（トークン）。未設定は 0（＝自動）。
+
+    リモートの LM Studio / llama-server は /v1/models に meta.n_ctx を返さないことが多く、
+    その場合バックエンドは 32768 にフォールバックする。実際の窓長と食い違うと文脈溢れや
+    無駄な切り詰めが起きるので、ここで手動指定した値でエンジンの n_ctx を上書きする。"""
+    try:
+        return int(active_server().get("context_length") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_active_server_context_length(n) -> int:
+    """アクティブサーバの手動コンテキスト長を更新し config.json に永続化する。
+
+    0（または空）で「自動」に戻す。接続先・モデルは変えずこの値だけを差し替える。"""
+    try:
+        v = int(n)
+    except (TypeError, ValueError):
+        raise ValueError(f"コンテキスト長は整数で指定してください: {n!r}")
+    if v != 0 and not (CONTEXT_LENGTH_MIN <= v <= CONTEXT_LENGTH_MAX):
+        raise ValueError(
+            f"コンテキスト長は 0（自動）または {CONTEXT_LENGTH_MIN}〜{CONTEXT_LENGTH_MAX} "
+            f"トークンで指定してください: {v}")
+    data = _read_config_json()
+    servers = data.get("servers")
+    if not servers:
+        # フォールバック単一構成 → 実体化してから書き込む（set_active_server_model と同じ）
+        servers = load_servers()
+        data["servers"] = servers
+    idx = get_active_server_index()
+    if not (0 <= idx < len(servers)):
+        raise ValueError("アクティブサーバが範囲外です")
+    if v:
+        servers[idx]["context_length"] = v
+    else:
+        servers[idx].pop("context_length", None)  # 0 は「自動」= キー自体を消す
+    _write_config_json(data)
+    return v
+
+
 def set_copilot_enabled(enabled: bool) -> bool:
     """Copilot 連携の on/off を切り替え、config.json に永続化する。"""
     data = _read_config_json()

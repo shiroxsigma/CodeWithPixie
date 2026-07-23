@@ -211,6 +211,14 @@
           <span id="settings-think-budget-status" class="hint"></span>
         </span>
       </div>
+      <div class="settings-row" style="flex-direction:column; align-items:stretch; gap:6px">
+        <span><b>コンテキスト長（トークン）</b><span class="hint">このサーバのモデル窓長。<b>0 で自動</b>（LM Studio の <code>meta.n_ctx</code> を取得）。リモートの LM Studio / llama-server は取れず 32768 と仮定するので、実際の窓長を手で入れると溢れ・無駄な切り詰めを防げます。変更するとこのサーバの会話は作り直されます。</span></span>
+        <span class="settings-inline">
+          <input id="settings-context-length" type="number" min="0" max="2000000" step="1024" placeholder="0（自動）" />
+          <button id="settings-context-length-save">保存</button>
+          <span id="settings-context-length-status" class="hint"></span>
+        </span>
+      </div>
       <label class="settings-row toggle">
         <input type="checkbox" id="settings-copilot" />
         <span>

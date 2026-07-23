@@ -301,6 +301,29 @@ def apply_think_budget(seconds, sessions=()) -> int:
     return v
 
 
+def _apply_context_length(engine, server: dict) -> None:
+    """アクティブサーバに手動コンテキスト長が設定されていれば、バックエンドの n_ctx を上書きする。
+
+    リモート LM Studio / llama-server は /v1/models に meta.n_ctx を返さず、バックエンドが
+    32768 にフォールバックする。エンジンは get_total_context(llm)=llm.n_ctx() で窓長を測り
+    切り詰め・チェックポイントを決めるので、実窓長とズレると溢れる。ここで生成直後に
+    backend._n_ctx を実測値へ差し替える（pixie_core 本体は非改変。private 属性だが、
+    LMStudioBackend.n_ctx() が返すのはこの値なので、これで get_total_context に効く）。"""
+    n = 0
+    try:
+        n = int(server.get("context_length") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return  # 0 = 自動（バックエンドが取得した値／フォールバックのまま）
+    try:
+        llm = engine.context.llm
+        if hasattr(llm, "_n_ctx"):
+            llm._n_ctx = n
+    except Exception:  # noqa: BLE001 - 上書きに失敗しても自動値で動作は続く
+        pass
+
+
 def _register_copilot_tool(pixie_core) -> None:
     """CWP 固有の ask_copilot ツールを AWP レジストリに登録する（pack="copilot"）。
 
@@ -471,6 +494,7 @@ class AgentSession(HistoryOps):
         self._core = core
         self._CancelTurn = core.CancelTurn
         self._engine = core.create_engine(server, str(workspace))  # 自セッション専用の Engine
+        _apply_context_length(self._engine, server)  # 手動コンテキスト長（設定時のみ）
         self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))
 
         self._approval_required = frozenset(core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
@@ -622,6 +646,7 @@ class NoteSession(HistoryOps):
             tool_set=self._allowed,
             system_suffix=self.SYSTEM_SUFFIX,
         )
+        _apply_context_length(self._engine, server)  # 手動コンテキスト長（設定時のみ）
         self.workspace = getattr(self._engine, "workspace", workspace)
         self.model_name = self._engine.model_name
         self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))

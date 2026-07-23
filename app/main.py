@@ -387,6 +387,7 @@ class SettingsReq(BaseModel):
     active_server: int | None = None
     model: str | None = None
     think_budget_sec: int | None = None   # 思考許容時間（deep 思考の <think> 上限秒）
+    context_length: int | None = None     # 手動コンテキスト長（トークン、0=自動）。アクティブサーバに紐づく
 
 
 @app.get("/api/servers")
@@ -445,6 +446,9 @@ def api_settings_get():
         "think_budget_sec": settings.think_budget_sec,
         "think_budget_min": config.THINK_BUDGET_MIN,
         "think_budget_max": config.THINK_BUDGET_MAX,
+        "context_length": config.get_active_server_context_length(),  # 0=自動
+        "context_length_min": config.CONTEXT_LENGTH_MIN,
+        "context_length_max": config.CONTEXT_LENGTH_MAX,
     }
 
 
@@ -468,12 +472,19 @@ def api_settings(req: SettingsReq):
             raise HTTPException(400, str(e))
     if req.model is not None and req.model.strip():
         config.set_active_server_model(req.model.strip())
-    # モデル/サーバを変えたら両エンジンのセッションを破棄する。古い model で束縛された
-    # セッションが残っていると、config を更新してもそちらが使われ続け（LM Studio が
-    # 解決できない旧 model 名で 400 になる）、反映されたように見えない。
+    if req.context_length is not None:
+        try:
+            config.set_active_server_context_length(req.context_length)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    # モデル/サーバ/コンテキスト長を変えたら両エンジンのセッションを破棄する。古い model で
+    # 束縛されたセッションが残っていると、config を更新してもそちらが使われ続け（LM Studio が
+    # 解決できない旧 model 名で 400 になる）、反映されたように見えない。コンテキスト長も
+    # n_ctx はセッション生成時に上書きするので、作り直さないと反映されない。
     # Note は get 時に再生成、Code は次のチャットで新規セッションになる。
     # 思考許容時間だけの更新では破棄しない（Note の会話文脈を無用に失わせない）。
-    changed = (req.active_server is not None) or bool(req.model and req.model.strip())
+    changed = (req.active_server is not None) or bool(req.model and req.model.strip()) \
+        or (req.context_length is not None)
     if changed:
         engine_adapter.reset_note_session()
         try:
@@ -482,7 +493,8 @@ def api_settings(req: SettingsReq):
             pass  # engine 未初期化時などは無害（次回起動で新 model が使われる）
     return {"ok": True, "active": config.get_active_server_index(),
             "model": config.active_server().get("model"),
-            "think_budget_sec": settings.think_budget_sec}
+            "think_budget_sec": settings.think_budget_sec,
+            "context_length": config.get_active_server_context_length()}
 
 
 # --- Copilot 連携（PrayLight 経由）--------------------------------------------

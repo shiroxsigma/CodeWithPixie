@@ -2592,10 +2592,12 @@ async function openSettings() {
       alert("⚠️ 設定を保存できません: " + e.message);
     }
     await loadModelOptions();  // サーバが変わればモデル一覧も切り替わる
+    await loadContextLength();  // コンテキスト長はサーバ単位なので切替先の値を出す
     await loadStatus();
   };
   await loadModelOptions();
   await loadThinkBudget();
+  await loadContextLength();
   await refreshCopilot();
   $("settings-modal").classList.remove("hidden");
 }
@@ -2620,6 +2622,33 @@ async function saveThinkBudget() {
     const r = await postJSON("/api/settings", { think_budget_sec: Number(inp.value) });
     inp.value = r.think_budget_sec;
     st.textContent = `✓ ${r.think_budget_sec} 秒にしました`;
+  } catch (e) {
+    st.textContent = "⚠ " + e.message;
+  }
+}
+
+// コンテキスト長（トークン）。アクティブサーバに紐づく。0=自動（バックエンドの取得値）。
+// 変更するとそのサーバのセッションは作り直され、新しい n_ctx で切り詰め判定が動く。
+async function loadContextLength() {
+  const inp = $("settings-context-length");
+  if (!inp) return;
+  const s = await getJSON("/api/settings").catch(() => ({}));
+  if (s.context_length_min != null) inp.min = s.context_length_min;
+  if (s.context_length_max != null) inp.max = s.context_length_max;
+  if (s.context_length != null) inp.value = s.context_length || 0;
+  $("settings-context-length-status").textContent = "";
+}
+
+async function saveContextLength() {
+  const inp = $("settings-context-length");
+  const st = $("settings-context-length-status");
+  st.textContent = "保存中…";
+  try {
+    const r = await postJSON("/api/settings", { context_length: Number(inp.value) });
+    inp.value = r.context_length || 0;
+    st.textContent = r.context_length
+      ? `✓ ${r.context_length.toLocaleString()} トークンにしました（会話は作り直し）`
+      : "✓ 自動（バックエンドの取得値）に戻しました";
   } catch (e) {
     st.textContent = "⚠ " + e.message;
   }
@@ -2757,6 +2786,10 @@ function bindUI() {
   $("settings-think-budget-save").addEventListener("click", saveThinkBudget);
   $("settings-think-budget").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); saveThinkBudget(); }
+  });
+  $("settings-context-length-save").addEventListener("click", saveContextLength);
+  $("settings-context-length").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); saveContextLength(); }
   });
   $("settings-copilot").addEventListener("change", toggleCopilot);
   $("settings-copilot-open").addEventListener("click", openCopilotBrowser);
