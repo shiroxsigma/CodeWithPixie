@@ -16,6 +16,7 @@ CWP が静かに壊れるリスク（監査 Fable の Major）を解消する。
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -137,12 +138,24 @@ NOTE_SYSTEM_SUFFIX = (
 ツールの使い方:
 - 依頼に必要な資料が手元に無ければ、list_workspace / grep_workspace で探し、read_note で読む。
 - 最新情報・外部知識・推敲の別視点が必要なときだけ ask_copilot を使う（遅いので1依頼につき原則1回まで）。
+- 同じツール呼び出しが2回連続で同じエラーになった場合は、そのツールの再呼び出しをやめる。
+  手持ちの情報で進めるか、足りない点をユーザーに伝えて指示を仰ぐ（同じ呼び出しの反復は禁止）。
 - 必要な情報が揃ったら、ツールを呼ばずに最終回答を書く。ツール結果の丸写しではなく、依頼に沿って整理する。
 - 推測でパスを書かない。実在確認できたファイルだけを参照する。
 - 「現在エディタで開いているファイル」がメッセージに添付されている場合、その内容は未保存の編集を含む最新版。
   同じファイルを read_note で読み直さない（ディスク上の古い内容が返る）。
 - ファイルへの書き込み・削除・コマンド実行はできない。変更はすべて上記の search/replace / apply
   ブロックで提案し、反映はユーザーに委ねる。
+
+長い文書の段階的な執筆（複数ファイルのまとめ等、長い新規 Markdown を作る依頼）:
+- 一度の回答で全文を書き上げようとしない。ローカルモデルは出力がトークン上限で
+  途中で途切れることがあり、そのターンに進めた分がすべて無駄になるため。
+- 第1ターン: まず**骨子だけ**を書く — タイトル・見出しの全構造・各セクション
+  1行のプレースホルダ（例「（ここに config.py の役割を記述）」）。ファイルがまだ
+  存在しなければ、ユーザーに空の .md を作って開いてもらうよう先に伝える。
+- 第2ターン以降: 1ターンに1〜3セクションずつ、プレースホルダを search/replace で
+  本文に置き換えて埋めていく。ユーザーが区切りよく確認・適用できる粒度に保つ。
+- 各ターンの終わりに「次はどのセクションを埋めるか」を1行で示す。
 """
 )
 
@@ -365,9 +378,20 @@ def _register_note_tools(pixie_core) -> None:
     ここで再登録すると上書きになるだけなので、Note セッションは tool_set に
     "ask_copilot" を含めることで既存登録を再利用する。
     """
-    def make_impl(tool_name: str):
+    def make_impl(tool_name: str, properties: dict):
         def impl(**kwargs):  # noqa: ANN003 - AWP ツールは動的引数
             return note_tools.execute_sync(tool_name, kwargs)
+        # pixie_core のツールディスパッチ（tools.py の _execute_builtin_tool）は登録関数の
+        # 署名を inspect して引数を検証する。**kwargs だけの関数だと唯一の仮引数 "kwargs" が
+        # 「必要な引数」扱いになり、あらゆる呼び出しが「Error: 必要な引数 'kwargs' が不足
+        # しています。」で死ぬ（LLM には 'kwargs' という引数が見えないので自己修正できず、
+        # 永遠にリトライし続ける）。そこでスキーマの引数名から明示的な署名を組み立てて付ける。
+        # 全引数をオプショナル（既定 None）にするのは、必須引数の不足は execute_sync 内の
+        # _require が検出して、LLM に修正可能なエラー文で返す設計のため（二重検証の回避）。
+        impl.__signature__ = inspect.Signature([
+            inspect.Parameter(p, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=None)
+            for p in properties
+        ])
         return impl
 
     for spec in note_tools.TOOLS_SPEC:
@@ -381,7 +405,7 @@ def _register_note_tools(pixie_core) -> None:
             schema=fn["parameters"],
             prompt_desc=f"{name}: {fn['description'][:80]}",
             pack="note",
-        )(make_impl(name))
+        )(make_impl(name, fn["parameters"].get("properties", {})))
 
 
 class HistoryOps:

@@ -34,9 +34,80 @@ def test_note_system_suffix_contains_edit_protocol():
     assert note_prompts.EDIT_PROTOCOL in sfx
 
 
+def test_note_system_suffix_has_progressive_writing_guide():
+    """長文書の段階執筆ガイド（骨子→セクションごと）が suffix に含まれること。
+
+    ローカルモデルがトークン上限で出力を途切れさせ、進捗を全損する事故の対策。"""
+    sfx = engine_adapter.NOTE_SYSTEM_SUFFIX
+    assert "段階" in sfx
+    assert "骨子" in sfx
+    # ツールエラーの無限リトライを抑止する指示（kwargs バグ時の挙動が再発しても粘らない）
+    assert "2回連続" in sfx
+
+
 def test_note_tools_are_read_only_names():
     assert engine_adapter.NOTE_TOOLS == frozenset(
         {"list_workspace", "read_note", "grep_workspace", "describe_flows"})
+
+
+# --- Note ツール登録ラッパ（kwargs 署名バグの回帰テスト） ----------------------
+# pixie_core のディスパッチ（tools.py の _execute_builtin_tool）は登録関数の署名を
+# inspect して引数を検証する。**kwargs だけのラッパだと「必要な引数 'kwargs' が不足」
+# というエラーが全呼び出しで出て、LLM が自己修正できず永遠にリトライしていた。
+
+class _FakeCore:
+    """register_tool の呼び出しを捕まえる pixie_core 替わりの骨組み。"""
+
+    def __init__(self):
+        self.registered = {}
+
+    def register_tool(self, name, **_kw):
+        def deco(fn):
+            self.registered[name] = fn
+            return fn
+        return deco
+
+
+def test_note_tool_impls_have_explicit_signatures():
+    import inspect
+    core = _FakeCore()
+    engine_adapter._register_note_tools(core)
+    # read 系4ツールだけが登録される（ask_copilot は pack="copilot" の既存登録を再利用）
+    assert set(core.registered) == set(engine_adapter.NOTE_TOOLS)
+    for name, fn in core.registered.items():
+        params = inspect.signature(fn).parameters
+        assert "kwargs" not in params, f"{name} が **kwargs のまま（ディスパッチで必ず死ぬ）"
+    # スキーマの引数名が署名に載っている
+    assert "path" in inspect.signature(core.registered["read_note"]).parameters
+    assert "query" in inspect.signature(core.registered["grep_workspace"]).parameters
+
+
+def test_note_tool_dispatch_through_signature(tmp_path, monkeypatch):
+    """pixie_core._execute_builtin_tool の流れ（署名で絞り func(**valid_args)）を
+    再現し、実際に実行まで届くことを確かめる。"""
+    import inspect
+    monkeypatch.setattr(config, "WORKSPACE", tmp_path.resolve())
+    (tmp_path / "memo.md").write_text("# hello\n", encoding="utf-8")
+
+    core = _FakeCore()
+    engine_adapter._register_note_tools(core)
+
+    def dispatch(fn, arguments: dict) -> str:
+        sig = inspect.signature(fn)
+        valid = {p: arguments[p] for p in sig.parameters if p in arguments}
+        return fn(**valid)
+
+    # 通常呼び出しが通る（旧バグなら「必要な引数 'kwargs' が不足」が返る）
+    out = dispatch(core.registered["read_note"], {"path": "memo.md"})
+    assert "# hello" in out
+
+    # 必須引数の不足は LLM に修正可能なエラー文で返る（TypeError にならない）
+    out = dispatch(core.registered["read_note"], {})
+    assert "必須引数" in out
+
+    # 無引数のツールは空辞書で動く
+    out = dispatch(core.registered["list_workspace"], {})
+    assert "memo.md" in out
 
 
 # --- _guard（エンジン不要のユニットテスト） ---
@@ -103,6 +174,20 @@ def test_bootstrap_and_note_tools_registered():
     names = sorted(engine_adapter.NOTE_TOOLS | {"ask_copilot"})
     got = {t["function"]["name"] for t in registry_to_openai_tools(names)}
     assert got == set(names)
+
+
+@needs_awp
+def test_note_tools_execute_through_real_dispatcher(tmp_path, monkeypatch):
+    """本物の pixie_core ディスパッチで Note ツールが実行まで届くことの回帰テスト。
+    旧実装（**kwargs ラッパ）では「必要な引数 'kwargs' が不足しています。」が
+    全呼び出しで返り、エージェントが同じ呼び出しを永遠にリトライしていた。"""
+    engine_adapter.bootstrap(_AWP_SRC)
+    monkeypatch.setattr(config, "WORKSPACE", tmp_path.resolve())
+    (tmp_path / "memo.md").write_text("# hello\n", encoding="utf-8")
+
+    from pixie_core.tools import execute_builtin_tool
+    assert "# hello" in execute_builtin_tool("read_note", {"path": "memo.md"})
+    assert "memo.md:1" in execute_builtin_tool("grep_workspace", {"query": "hello"})
 
 
 @needs_awp
