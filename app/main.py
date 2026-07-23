@@ -172,6 +172,8 @@ class ChatReq(BaseModel):
     history: list[dict] = []               # フロント保持の履歴（セッション新規作成時のシード用）
     current_content: str = ""              # current_file の内容（未保存の編集を含むエディタバッファ）
     attach_files: list[str] = []           # 関連ファイル（バイナリ/外部）の絶対パス: Copilot 添付用
+    plan_first: bool = False               # Code モード plan-first サブモード: このターンは
+                                           # 読み取り専用ツールで調査し ```plan の計画だけを出す
 
 
 class ApproveReq(BaseModel):
@@ -577,6 +579,39 @@ def _code_user_text(req: ChatReq, message: str) -> str:
     return message
 
 
+# --- Code モード plan-first サブモード（先に計画 → 承認 → 実行） ----------------
+def _code_plan_prompt(message: str) -> str:
+    """計画フェーズの指示文。書き込みツールが無いターンであることを明示し、
+    計画を ```plan フェンスで出させる（フロントがこのフェンスを検出して承認ビューへ載せる）。"""
+    return (
+        "# まず実行計画を立てる（このターンは調査と計画立案のみ。書き込み・実行ツールは提示されていない）\n"
+        "ユーザーの依頼:\n" + message + "\n\n"
+        "手順:\n"
+        "1. read_file / grep_search / get_code_outline 等の読み取り専用ツールで、"
+        "関係するファイルの実物を確認する（推測で計画しない）。\n"
+        "2. このターンでは実装しない（書き込みツールは存在しない）。\n"
+        "3. 最後に ```plan フェンス1つで計画を出力する。中身は日本語で、"
+        "「変更するファイルと変更内容（順番付き）・検証方法・リスクや注意点」が分かるように。\n"
+        "   自明な依頼（typo修正・1行変更等）でも、短い計画を書いてその旨を添えること。\n"
+        "ユーザーが承認すると、この計画は次の指示としてそのままあなたに渡され、"
+        "そのターンでフルツールを使って実装する。\n"
+    )
+
+
+def _code_plan_phase(sess, message: str, emit) -> None:
+    """計画フェーズの1ターン: 読み取り専用ツールに制限して run_turn し、必ず元に戻す。
+
+    承認後の実行は別ターン（フロントが計画を本文にした通常送信）なので、ここでの
+    ツール制限はこのターン限りにする。中断・例外が起きても finally で復元すること —
+    制限が残留すると、以降のターンが読み取り専用になってしまう。
+    """
+    sess.set_plan_phase(True)
+    try:
+        sess.run_turn(_code_plan_prompt(message), emit, settings.approval_timeout)
+    finally:
+        sess.set_plan_phase(False)
+
+
 # --- /copilot 直行経路（NWP 移植）---------------------------------------------
 COPILOT_QUESTION_MAX_CHARS = copilot_flow.QUESTION_MAX_CHARS
 
@@ -882,6 +917,9 @@ async def api_chat(req: ChatReq):
         raise HTTPException(409, "このセッションは別のターンを実行中です。")
 
     message = _code_user_text(req, req.message)
+    if req.plan_first:
+        return _turn_stream(sess, lambda emit: _code_plan_phase(sess, message, emit),
+                            label=req.message)
     return _turn_stream(sess, lambda emit: sess.run_turn(message, emit, settings.approval_timeout),
                         label=req.message)
 

@@ -626,6 +626,17 @@ class AgentSession(HistoryOps):
         ctx = self._engine.context
         ctx.active_packs = {"copilot"} if enabled else set()
 
+    def set_plan_phase(self, on: bool) -> None:
+        """Code モードの plan-first サブモード: on の間だけ提示ツールを読み取り専用
+        （PLAN_TOOLS）に制限し、off で通常の Code ツール一式に戻す（fixed_tool_set=None
+        → pixie_core の code_mode 既定）。ターン境界での変更は pixie_core がサポートする
+        方法（set_copilot の active_packs 変更と同じ契約）。
+
+        計画フェーズのターンはこの制限下で ```plan フェンスの計画だけを出し、承認後
+        フロントが計画を次の指示として送り直すことで、フルツールの通常ターンに移る。
+        """
+        self._engine.context.fixed_tool_set = frozenset(PLAN_TOOLS) if on else None
+
     def set_stream_timeout(self, overall: float) -> None:
         """LLM ストリームの打ち切り秒（思考許容時間に追随させる）。API 1.5 未満では無視。"""
         setter = getattr(self._engine, "set_stream_timeout", None)

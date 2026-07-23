@@ -9,10 +9,12 @@
 //   mode-plan で出し分け。
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
 import {
-  available as mdAvailable, pngBackground, renderInto, renderPlain, setAssetBase, setDiagramSaver,
+  available as mdAvailable, pngBackground, renderInto, renderPlain, setAssetBase,
+  setDiagramEditor, setDiagramSaver, setOnDiagramRendered,
 } from "./markdown.js";
 import { blobToBase64, sanitizeName, svgToPngBlob } from "./mermaid-export.js";
 import { available as cfAvailable, htmlToMarkdown } from "./confluence.js";
+import * as mermaidEdit from "./mermaid-edit.js";
 import * as mdflow from "./mdflow.js";
 import { $ } from "./dom.js";
 import { addDeleteButton, addMessage, addToolStatus, scrollMessages } from "./chat-log.js";
@@ -49,6 +51,12 @@ const state = {
   features: {},             // /api/mode の features フラグ（UI 出し分けの判定に使う）
   copilotEnabled: false,    // Copilot 連携（features.copilot / /api/copilot で同期）
 
+  // --- Code モードの進め方（サブモード）---
+  // "plan": まず実行計画を出させて承認してから実装（plan_first でサーバへ）
+  // "normal": 従来どおり自律実装（破壊操作は承認制）
+  codeStyle: localStorage.getItem("pixie.codeStyle") === "plan" ? "plan" : "normal",
+  planExecNext: false,      // 一回限り: 次の送信は計画承認後の「実行フェーズ」（計画し直さない）
+
   // --- Plan モード専用 ---
   planText: "",             // 直近の実行計画（承認時に Code モードへ渡す本文）。
                             // ファイルには書かない: 承認して実行したら役目が終わるものなので、
@@ -65,6 +73,7 @@ const state = {
   pendingTarget: null,      // 反映先として追跡中の選択範囲（1つだけ）
   mdflowConditions: new Map(),  // 図ID → 条件JSON文字列。プレビュー再構築で input が
                                 // 作り直されるため、入力値はここが正（ファイル切替でクリア）
+  diagramEditing: null,         // 直接編集中の mermaid 図 {src, focusNodeId}（再入場のキー）
 };
 
 const isNote = () => state.mode === "note";
@@ -163,6 +172,9 @@ async function init() {
   // loadHistory() が復元するチャットにも図は含まれ、toBox はバーを組むときに
   // 登録済みかどうかを見る（未登録なら保存ボタンを出さない）。
   setDiagramSaver(saveDiagramPng);
+  // mermaid 図の直接編集（✏️ 編集ボタン → 編集モード。ソース変化→再描画で再入場）
+  setDiagramEditor(openDiagramEditor);
+  setOnDiagramRendered(onDiagramRendered);
   await loadMode();
   applyModeUI();
   await loadStatus();
@@ -206,7 +218,27 @@ function applyModeUI() {
   state.editor?.updateOptions({ glyphMargin: note });  // 付箋グリフの余白
   updateSelectionChip();  // #sel-info の文言と選択チップ（両モード共通）
   applyCopilotVisibility();  // Copilot バー・placeholder の /copilot 案内はトグル次第
+  updateCodeStyleBtn();  // Code モードの進め方（📋計画を先に/⚡通常）ボタン
   renderFileTree();  // コンテキストのチェックボックス有無が変わる
+}
+
+/** Code モードの進め方トグル（plan-first / normal）。.code-only なので Code モードでのみ見える。 */
+function updateCodeStyleBtn() {
+  const btn = $("code-style-btn");
+  const planFirst = state.codeStyle === "plan";
+  btn.textContent = planFirst ? "📋 計画を先に" : "⚡ 通常";
+  btn.title = planFirst
+    ? "Code モードの進め方: 📋 計画を先に — まず実行計画を提示し、承認してから実装する（クリックで「⚡ 通常」へ切替）"
+    : "Code モードの進め方: ⚡ 通常 — エージェントが自律的に実装（破壊操作は承認制）。クリックで「📋 計画を先に」へ切替";
+}
+
+function toggleCodeStyle() {
+  state.codeStyle = state.codeStyle === "plan" ? "normal" : "plan";
+  localStorage.setItem("pixie.codeStyle", state.codeStyle);
+  updateCodeStyleBtn();
+  addMessage("system", state.codeStyle === "plan"
+    ? "📋 計画を先に: エージェントはまず実行計画を提示し、承認してから実装します。"
+    : "⚡ 通常: エージェントが自律的に実装します（破壊操作は従来どおり承認制）。");
 }
 
 // Copilot 関連 UI の出し分け（NWP と同じ規則）。バーは .note-only だけでは足りない:
@@ -897,6 +929,7 @@ function renderPreview() {
   // 画像の相対パス（images/foo.png）は現在ファイルのディレクトリ基準で解決させる
   setAssetBase(currentDir());
   const { text, opts } = previewSource();
+  opts.editable = true;  // プレビューの図だけ ✏️ 直接編集の対象（チャットは対象外）
   renderInto($("preview"), text, opts);
   syncPreviewScroll();
 }
@@ -1195,6 +1228,95 @@ function bindConfluenceUI() {
     state.editor.focus();
     close();
   });
+}
+
+// ---- Mermaid 図の直接編集（プレビュー操作 → ソースの最小編集 → executeEdits） ----
+// state.diagramEditing = {src, focusNodeId} が編集中の図（src = mermaid ブロックの内容）。
+// 編集を適用するとエディタ内容が変わってプレビューが再描画され、onDiagramRendered が
+// 新しい src をキーに編集モードへ再入場する（1操作 = 1ターン分の差分、undo 可能）。
+
+function openDiagramEditor(box, meta) {
+  state.diagramEditing = { src: meta.src, focusNodeId: null };
+  mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), null);
+}
+
+function onDiagramRendered(box, meta) {
+  const ed = state.diagramEditing;
+  if (!ed || ed.src !== meta.src) return;
+  mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), ed.focusNodeId);
+  ed.focusNodeId = null;
+}
+
+function mermaidEditApi() {
+  return {
+    applyEdits(src, edits, focusNodeId = null) {
+      const editor = state.editor;
+      const model = editor.getModel();
+      const block = findMermaidBlock(model.getValue(), src);
+      if (!block) {
+        state.diagramEditing = null;
+        alert("⚠️ 対応する図が見つかりません（内容が外部で変わった可能性）。編集モードを終了します。");
+        return false;
+      }
+      const newSrc = mermaidEdit.applyEditsToText(src, edits);
+      const ranges = edits.map((e) => ({
+        range: state.monaco.Range.fromPositions(
+          model.getPositionAt(block.toRaw(e.start)),
+          model.getPositionAt(block.toRaw(e.end))),
+        text: e.text,
+      }));
+      editor.executeEdits("mermaid-edit", ranges);
+      state.diagramEditing = { src: newSrc, focusNodeId };
+      editor.focus();
+      return true;
+    },
+    onExit() { state.diagramEditing = null; },
+  };
+}
+
+/** ドキュメント内の ```mermaid ブロックを走査する（markdown-it の fence と同じ取り方:
+    内容はフェンス行の間の改行込み、閉じフェンスは同じ文字で開きと同じ長さ以上）。 */
+function scanMermaidBlocks(doc) {
+  const lines = doc.split("\n");
+  const lineStarts = [];
+  let off = 0;
+  for (const line of lines) { lineStarts.push(off); off += line.length + 1; }
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*(`{3,}|~{3,})\s*mermaid\b/i.exec(lines[i]);
+    if (!m) continue;
+    const fence = m[1];
+    const contentStart = lineStarts[i] + lines[i].length + 1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const cm = /^\s*(`{3,}|~{3,})\s*$/.exec(lines[j]);
+      if (!cm || cm[1][0] !== fence[0] || cm[1].length < fence.length) continue;
+      const contentEnd = lineStarts[j];  // 末尾 \n を含む（markdown-it の token.content と一致）
+      blocks.push({ start: contentStart, end: contentEnd, content: doc.slice(contentStart, contentEnd) });
+      i = j;
+      break;
+    }
+  }
+  return blocks;
+}
+
+/** src（描画に使われた mermaid ソース）に一致するブロックを探す。
+    戻り値の toRaw(i) は src 内オフセットをドキュメントオフセットへ変換する。
+    markdown-it は入力を \n に正規化するがエディタは \r\n を保持しうるので、その分だけずらす。 */
+function findMermaidBlock(doc, src) {
+  for (const b of scanMermaidBlocks(doc)) {
+    if (b.content === src) return { ...b, toRaw: (i) => i };
+    if (!b.content.includes("\r")) continue;
+    let norm = "";
+    const map = [];
+    for (let i = 0; i < b.content.length; i++) {
+      if (b.content[i] === "\r" && b.content[i + 1] === "\n") continue;
+      map.push(i);
+      norm += b.content[i];
+    }
+    map.push(b.content.length);
+    if (norm === src) return { ...b, toRaw: (i) => map[i] };
+  }
+  return null;
 }
 
 // ---- 全文検索 ----
@@ -1870,6 +1992,10 @@ async function sendChat() {
 
   const note = isNote();
   const plan = isPlan();
+  // Code モード plan-first サブモード: このターンは「計画フェーズ」（読み取り専用で計画だけ出す）。
+  // 計画承認直後の実行フェーズ（approvePlan が planExecNext を立てる）は除外する。
+  const codePlan = isCode() && state.codeStyle === "plan" && !state.planExecNext;
+  state.planExecNext = false;
   // 反映先の追跡は「送信時の選択範囲」。以降の編集にデコレーションで追随する。
   const applyTarget = note ? trackApplyTarget() : null;
   let body;
@@ -1883,7 +2009,7 @@ async function sendChat() {
              current_content: state.currentFile ? state.editor.getValue() : "" };
   } else {
     body = { message: msg, session_id: state.sessionId, current_file: state.currentFile,
-             selection: getSelection() };
+             selection: getSelection(), plan_first: codePlan };
   }
 
   input.value = "";
@@ -1949,7 +2075,7 @@ async function sendChat() {
   const turnId = state.turnId;
   const visible = finishStream();
   if (note) noteAfterTurn(assistantEl, msg, visible, applyTarget, cancelled);
-  else if (plan && !cancelled) planAfterTurn(visible);
+  else if ((plan || codePlan) && !cancelled) planAfterTurn(visible);
   if (state.compacted && assistantEl?.isConnected) collapseToSummary(assistantEl, state.compacted);
   else if (assistantEl?.isConnected) {
     // 往復が確定してから削除ボタンを付ける（生成中に消せると文脈と表示がずれる）。
@@ -2399,11 +2525,24 @@ function closePlanView() {
   state.planText = "";  // 計画はこのビューの持ち物。閉じたら残さない
 }
 
-/** [✓ この計画で実行]: Code モードへ切り替え、計画をそのまま最初の指示として送る。 */
+/** [✓ この計画で実行]: 計画をそのまま実行指示として送る。
+    Code モード（plan-first サブモード）なら同じセッションで実行フェーズへ、
+    Plan モードなら Code モードへ切り替えてから送る。 */
 async function approvePlan() {
   const planText = state.planText;  // closePlanView が消すので先に控える
   if (!planText) return;
   closePlanView();
+  if (isCode()) {
+    // plan-first サブモード: モード切替は不要。次の送信だけ計画フェーズから外し、
+    // 同じセッションの続き（フルツール）で実行させる。
+    state.planExecNext = true;
+    addMessage("system", "✓ 計画を承認しました。実装を開始します（書き込みは引き続き承認制）。");
+    $("chat-input").value =
+      "以下の実行計画を承認しました。この計画のとおりに実装してください。"
+      + "計画から外れる変更が必要になったら、実行する前に知らせてください。\n\n" + planText;
+    await sendChat();
+    return;
+  }
   // 確認ダイアログは出さない（このボタン自体が確認であり、二段確認は承認の意味を薄める）。
   const ok = await switchMode("code", { keepMessages: true });
   if (!ok) { openPlanView(planText); return; }  // 切替に失敗したら計画は消さずに戻す
@@ -2740,6 +2879,8 @@ function bindUI() {
   $("file-search").addEventListener("input", onSearch);
   // モードバッジ（🛠 Code → 📋 Plan → 📝 Note の循環）
   $("mode-btn").addEventListener("click", cycleMode);
+  // Code モードの進め方（📋 計画を先に / ⚡ 通常）トグル
+  $("code-style-btn").addEventListener("click", toggleCodeStyle);
   // 実行計画の承認 / 修正依頼（Plan モード）
   $("plan-approve").addEventListener("click", approvePlan);
   $("plan-reject").addEventListener("click", rejectPlan);

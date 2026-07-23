@@ -412,6 +412,7 @@ button:active { transform: translateY(1px); }
   margin: 8px 0; padding: 8px; background: var(--bg);
   border: 1px solid var(--border); border-radius: 6px;
   overflow-x: auto; text-align: center;
+  position: relative;  /* ノードラベル編集の absolute 入力欄の基準 */
 }
 /* 幅は markdown.js の toBox が自然幅で固定する（枠に合わせて縮小させないため）。
    ここで width/max-width を指定すると、それを打ち消してしまう。 */
@@ -446,6 +447,49 @@ button:active { transform: translateY(1px); }
 .mermaid-tools-status.error { color: var(--danger); }
 /* 結果が出ている間はバーを出したままにする（hover を外した瞬間に消えると読めない）。 */
 .mermaid-tools:has(.mermaid-tools-status:not(:empty)) { opacity: 1; }
+
+/* --- mermaid: 直接編集モード（mermaid-edit.js の enterEditMode） ---------------
+   プレビュー上のノード/矢印クリック → ソースの最小編集 → executeEdits で反映。 */
+.mermaid-editing { outline: 1px dashed var(--accent); outline-offset: 2px; }
+.mermaid-editing g[id^="flowchart-"],
+.mermaid-editing path.flowchart-link,
+.mermaid-editing .edgeLabel { cursor: pointer; }
+/* 選択ハイライト（mermaid の SVG 内部には触れず stroke だけ CSS で上書き） */
+.mermaid-editing g[id^="flowchart-"].selected > rect,
+.mermaid-editing g[id^="flowchart-"].selected > polygon,
+.mermaid-editing g[id^="flowchart-"].selected > circle,
+.mermaid-editing g[id^="flowchart-"].selected > ellipse,
+.mermaid-editing g[id^="flowchart-"].selected > path {
+  stroke: #ffb454 !important; stroke-width: 3px;
+}
+path.flowchart-link.selected { stroke: #ffb454 !important; stroke-width: 3px; }
+/* 編集ツールバー（図の下・通常フロー。横スクロールしてもついてくる） */
+.mermaid-editbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 6px; text-align: left;
+}
+.mermaid-editbar button {
+  padding: 1px 8px; font-size: 11px; line-height: 1.6;
+  background: var(--bg2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+}
+.mermaid-editbar button:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
+.mermaid-editbar button:disabled { cursor: default; opacity: .45; }
+.mermaid-edit-hint { flex: 1; min-width: 120px; font-size: 11px; color: var(--muted); }
+.mermaid-edge-label {
+  width: 160px; padding: 2px 8px; font-size: 11px;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.mermaid-edge-label:focus { outline: none; border-color: var(--accent); }
+/* ノードラベルのインライン編集（.mermaid-box 基準の absolute。内容と一緒にスクロールする） */
+.mermaid-node-input {
+  position: absolute; z-index: 30;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--accent); border-radius: 6px;
+  padding: 4px 8px; font-size: 13px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
 
 /* --- mdflow: 条件別フロー可視化 ---------------------------------------------
    図の直下に出る条件プリセットのリスト。DOM は markdown.js の buildPresetList、

@@ -142,8 +142,24 @@ export function setDiagramSaver(fn) {
   saveDiagram = fn;
 }
 
+// ---- 図の直接編集（mermaid-edit.js との接続点）---------------------------------
+// diagramEditor: ✏️ 編集ボタンのハンドラ。diagramRendered: 図が描画されるたびに呼ぶ
+// フック（編集適用→ソース変化→再描画のあと、編集モードへ再入場するために使う）。
+// どちらも setDiagramSaver と同じ「app.js が注入する」形。
+let diagramEditor = null;
+let diagramRendered = null;
+
+export function setDiagramEditor(fn) {
+  diagramEditor = fn;
+}
+
+export function setOnDiagramRendered(fn) {
+  diagramRendered = fn;
+}
+
 /** 図の右上に出す書き出しバー（hover で見える）。 */
-function buildExportBar(box, id) {
+function buildExportBar(box, meta) {
+  const id = diagramId(meta.src, meta.index || 0);
   const bar = document.createElement("div");
   bar.className = "mermaid-tools";
   const status = document.createElement("span");
@@ -179,6 +195,15 @@ function buildExportBar(box, id) {
   const png = () => svgToPngBlob(box.querySelector("svg"), { background: pngBackground() });
 
   bar.appendChild(status);  // 結果は左、ボタンは右
+  // 直接編集はプレビューの図だけ（meta.editable）。チャット内の図は編集対象外。
+  if (meta.editable && diagramEditor) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.title = "この図を直接編集する（ノード/矢印の操作がMermaidソースへ反映される）";
+    edit.textContent = "✏️ 編集";
+    edit.addEventListener("click", () => diagramEditor(box, meta));
+    bar.appendChild(edit);
+  }
   if (saveDiagram) {
     const save = document.createElement("button");
     save.type = "button";
@@ -226,7 +251,9 @@ function toBox(svg, meta = {}) {
   }
   // バーは図の「上」に通常フローで置く。.mermaid-box は overflow-x:auto なので、
   // 絶対配置にすると横スクロールに連れて流れていく。
-  if (el) box.prepend(buildExportBar(box, diagramId(meta.src, meta.index || 0)));
+  if (el) box.prepend(buildExportBar(box, meta));
+  // 描画完了の通知（編集モードの再入場用）。box が DOM に入る直前に呼ぶ。
+  if (diagramRendered) diagramRendered(box, meta);
   return box;
 }
 
@@ -236,8 +263,9 @@ function toBox(svg, meta = {}) {
  * ctx（renderInto の opts.mdflow）があるときは、条件マッピングの選択に応じて
  * classDef を注入したソースで描き、図の直下にプリセットリストを差し込む。
  */
-async function renderMermaid(el, gen, ctx) {
+async function renderMermaid(el, gen, opts) {
   if (!mermaid) return;
+  const ctx = opts.mdflow || null;
   let index = -1;  // 文書内の通し番号。`%% id:` の無い図のファイル名に使う
   for (const block of el.querySelectorAll("pre.mermaid-src")) {
     index += 1;
@@ -252,7 +280,7 @@ async function renderMermaid(el, gen, ctx) {
       if (flow) box.after(buildPresetList(flow, ctx));
     };
 
-    const meta = { src, index };
+    const meta = { src, index, editable: !!opts.editable };
     const cached = svgCache.get(renderSrc);
     if (cached) { finish(toBox(cached, meta)); continue; }
 
@@ -471,7 +499,7 @@ export function renderInto(el, text, opts = {}) {
   }
   const gen = (generation.get(el) || 0) + 1;
   generation.set(el, gen);
-  renderMermaid(el, gen, opts.mdflow || null);
+  renderMermaid(el, gen, opts);
 }
 
 /** 生テキストとして描画する。ストリーミング中など、まだ Markdown が完成していない段階用。 */
