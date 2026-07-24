@@ -34,7 +34,9 @@ const state = {
   saving: false,
   savePromise: null,        // 進行中の保存。切替前の待ち合わせに使う
   saveError: null,          // 直近の保存失敗（ApiError）。成功でクリア
-  fsEntries: [],            // /api/files の結果 [{path, type, size?, text?}]
+  fsMap: new Map(),         // ツリー遅延読み込み: path → {path, type, size?, text?, loaded?}
+                            // （loaded は dir のみ: 子を取得済みか。未展开の dir は子が無い）
+  treeTruncated: false,     // いずれかのディレクトリ一覧が上限で打ち切られた
   collapsedDirs: new Set(), // 折りたたみ中のフォルダ
   knownDirs: new Set(),     // 既出のフォルダ。初出だけを閉じる（開いた状態の記憶を壊さない）
   changedPaths: new Set(),  // 直近ターンでエージェントが変更したファイル
@@ -423,24 +425,60 @@ function renderRootPath(root) {
   $("root-project-btn").title = "ルートプロジェクト: " + root + "（クリックで変更）";
 }
 
-// ---- ファイルツリー ----
-async function loadFileList() {
-  const r = await tryJSON("/api/files");
-  if (!r) return;
-  state.fsEntries = r.files;
-  renderRootPath(r.root);
-  // 巨大ワークスペースでは一覧がサーバ側で打ち切られる（ツリーを固めないため）
-  $("files-trunc").classList.toggle("hidden", !r.truncated);
-  // フォルダは既定で閉じた状態にする（深い階層が全部開いていると目的のファイルが埋もれる）。
-  // 「初めて見るフォルダだけ」閉じるので、ユーザーが開いたフォルダは再読込でも開いたまま。
-  for (const f of r.files) {
-    if (f.type !== "dir" || state.knownDirs.has(f.path)) continue;
-    state.knownDirs.add(f.path);
-    state.collapsedDirs.add(f.path);
+// ---- ファイルツリー（遅延読み込み: ルートだけ取得し、フォルダ展開時に子を取得） ----
+const parentPath = (p) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+
+/** あるディレクトリ直下の一覧を fsMap にマージする（古くなった子はサブツリーごと削除）。
+    初めて見るフォルダは閉じた状態で登録する（再読込でユーザーの展開状態は壊さない）。 */
+function mergeDirListing(dir, r) {
+  const fresh = new Set((r.files || []).map((f) => f.path));
+  for (const p of [...state.fsMap.keys()]) {
+    if (parentPath(p) === dir && !fresh.has(p)) removeTreeEntry(p);
   }
-  // 消えたファイルはコンテキストのチェック集合からも掃除する（Note/Code モード）
-  const alive = new Set(r.files.filter((f) => f.type === "file").map((f) => f.path));
-  for (const p of [...state.checkedFiles]) if (!alive.has(p)) state.checkedFiles.delete(p);
+  for (const f of r.files || []) {
+    const ex = state.fsMap.get(f.path);
+    if (ex) { ex.size = f.size; ex.text = f.text; }  // loaded フラグは保持
+    else state.fsMap.set(f.path, { ...f, loaded: f.type === "dir" ? false : undefined });
+  }
+  for (const f of r.files || []) {
+    if (f.type === "dir" && !state.knownDirs.has(f.path)) {
+      state.knownDirs.add(f.path);
+      state.collapsedDirs.add(f.path);
+    }
+  }
+  if (r.truncated) state.treeTruncated = true;
+}
+
+/** 指定ディレクトリの直下をサーバから取得してマージ（遅延読み込みの1単位）。 */
+async function fetchDir(dir) {
+  const r = await tryJSON("/api/files/list?path=" + encodeURIComponent(dir || ""));
+  if (!r) return false;
+  mergeDirListing(dir, r);
+  return true;
+}
+
+/** エントリとサブツリーを fsMap（とコンテキストのチェック）から消す。 */
+function removeTreeEntry(p) {
+  for (const q of [...state.fsMap.keys()]) {
+    if (q === p || q.startsWith(p + "/")) {
+      state.fsMap.delete(q);
+      state.checkedFiles.delete(q);
+    }
+  }
+}
+
+async function loadFileList() {
+  // ルート直下だけ取得（root 表示もここから）。24万ファイルのワークスペースでも
+  // 一瞬。深い階層はフォルダ展開のクリック時に fetchDir で取得する。
+  state.treeTruncated = false;
+  const r = await tryJSON("/api/files/list?path=");
+  if (!r) return;
+  renderRootPath(r.root);
+  mergeDirListing("", r);
+  // すでに展開済みのフォルダは再取得して内容を最新化する
+  for (const [p, e] of [...state.fsMap]) {
+    if (e.type === "dir" && e.loaded && p) await fetchDir(p);
+  }
   renderFileTree();
 }
 
@@ -455,12 +493,18 @@ function isHiddenByCollapse(parentPath) {
   return false;
 }
 
-/** 指定パスの祖先フォルダを開く（閉じた木の中に開いたファイルが埋もれないように）。 */
-function revealInTree(path) {
+/** 指定パスの祖先フォルダを開く（閉じた木の中に開いたファイルが埋もれないように）。
+    遅延ツリーでは未取得の祖先をその都度サーバから読む。 */
+async function revealInTree(path) {
   const parts = String(path || "").split("/");
   let cur = "";
   for (const part of parts.slice(0, -1)) {
     cur = cur ? cur + "/" + part : part;
+    if (!state.fsMap.has(cur)) await fetchDir(parentPath(cur));  // 親を取得してこの dir を出現させる
+    const ent = state.fsMap.get(cur);
+    if (ent && ent.type === "dir" && !ent.loaded) {
+      if (await fetchDir(cur)) ent.loaded = true;
+    }
     state.collapsedDirs.delete(cur);
   }
 }
@@ -468,9 +512,13 @@ function revealInTree(path) {
 function renderFileTree() {
   const ul = $("file-list");
   ul.innerHTML = "";
-  for (const f of state.fsEntries) {
+  // fsMap（読み込み済みのエントリ）から「見えるもの」だけパス順に描画する。
+  // 未展開フォルダの子はまだ取得していない（＝map に無い）ので描画されない。
+  const visible = [...state.fsMap.values()]
+    .filter((f) => !isHiddenByCollapse(parentPath(f.path)))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  for (const f of visible) {
     const parts = f.path.split("/");
-    if (isHiddenByCollapse(parts.slice(0, -1).join("/"))) continue;
 
     const li = document.createElement("li");
     li.dataset.path = f.path;
@@ -487,9 +535,16 @@ function renderFileTree() {
       li.classList.add("dir");
       icon.textContent = state.collapsedDirs.has(f.path) ? "📁" : "📂";
       li.append(icon, name);
-      li.addEventListener("click", () => {
-        if (state.collapsedDirs.has(f.path)) state.collapsedDirs.delete(f.path);
-        else state.collapsedDirs.add(f.path);
+      li.addEventListener("click", async () => {
+        if (state.collapsedDirs.has(f.path)) {
+          state.collapsedDirs.delete(f.path);
+          // 遅延読み込み: 初回展開のときだけ子をサーバから取る
+          if (!f.loaded) {
+            if (await fetchDir(f.path)) f.loaded = true;
+          }
+        } else {
+          state.collapsedDirs.add(f.path);
+        }
         renderFileTree();
       });
     } else {
@@ -533,6 +588,7 @@ function renderFileTree() {
     li.addEventListener("contextmenu", (e) => { e.preventDefault(); openFsMenu(e, f); });
     ul.appendChild(li);
   }
+  $("files-trunc").classList.toggle("hidden", !state.treeTruncated);
 }
 
 // ドラッグ&ドロップ: ファイル/フォルダをフォルダへ移動。ルート（一覧の余白）へ落とすと最上位へ。
@@ -672,7 +728,7 @@ async function moveEntry(entry, dst) {
 
 // ドロップ先フォルダ（空文字＝ルート）へ entry を移動する。
 async function moveIntoDir(srcPath, dstDir) {
-  const entry = state.fsEntries.find((f) => f.path === srcPath);
+  const entry = state.fsMap.get(srcPath);
   if (!entry) return;
   const base = srcPath.split("/").pop();
   const dst = dstDir ? dstDir + "/" + base : base;
@@ -725,7 +781,7 @@ async function openFile(path, force) {
   $("current-file").textContent = path;
   updatePreviewAvailability();
   renderPreview();  // setValue でも更新はされるが、150ms 待たずに新ファイルを映す
-  revealInTree(path);  // 既定は閉じた木なので、開いたファイルの祖先だけ開いて見せる
+  await revealInTree(path);  // 既定は閉じた木なので、開いたファイルの祖先だけ開いて見せる
   renderFileTree();
   if (isNote()) { await loadNotes(); await loadRefs(); }  // 付箋・関連ファイルはノートに随伴
 }
@@ -789,7 +845,7 @@ async function doSave() {
   const path = state.currentFile;
   const content = state.editor.getValue();
   const versionAtSave = state.editor.getModel().getAlternativeVersionId();
-  const isNew = !state.fsEntries.some((f) => f.path === path);
+  const isNew = !state.fsMap.has(path);  // 遅延ツリー未読込の親でも「新規」扱いで問題ない
   // 付箋は本文と一緒にスナップショットして保存する（Note モードのみ）
   const noteMode = isNote();
   let notesAtSave = null;
@@ -1584,7 +1640,7 @@ function setupRefDrop() {
 
     // 1) アプリ内ファイルツリーからのドラッグ（ワークスペース相対パスが確実に取れる）
     if (_dragging) {
-      const ent = state.fsEntries.find((f) => f.path === _dragging);
+      const ent = state.fsMap.get(_dragging);
       if (ent && ent.type === "file") {
         await addRef({ path: _dragging, external: false, name: baseName(_dragging) });
       } else {

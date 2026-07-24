@@ -100,6 +100,46 @@ def iter_text_files():
             yield rel, Path(e.path)
 
 
+#: 1ディレクトリあたりのエントリ上限（遅延ツリーの1回の取得分）。
+MAX_DIR_ENTRIES = 20_000
+
+
+def list_dir(rel: str = "") -> dict:
+    """指定ディレクトリの**直下だけ**を1階層ぶん返す（非再帰・枝刈り済み）。
+
+    ツリーの遅延読み込み用 — フォルダ展開のたびにフロントが呼ぶ。rel="" は
+    ワークスペースルート。エントリ形式は list_files と同じ + truncated。
+    """
+    base = safe_path(rel) if rel else config.WORKSPACE
+    if not base.is_dir():
+        raise ValueError(f"ディレクトリではありません: {rel}")
+    out: list[dict] = []
+    truncated = False
+    try:
+        with os.scandir(base) as it:
+            entries = sorted(it, key=lambda e: e.name.lower())
+    except OSError as e:
+        raise ValueError(f"ディレクトリを開けません: {rel} ({e})")
+    for e in entries:
+        if e.name.startswith("."):
+            continue
+        if e.name in IGNORE_DIRS and e.is_dir():
+            continue
+        r = (base / e.name).relative_to(config.WORKSPACE).as_posix()
+        if e.is_dir():
+            out.append({"path": r, "type": "dir"})
+        elif e.is_file():
+            try:
+                size = e.stat().st_size
+            except OSError:
+                size = 0
+            out.append({"path": r, "type": "file", "size": size, "text": is_text(r)})
+        if len(out) >= MAX_DIR_ENTRIES:
+            truncated = True
+            break
+    return {"files": out, "truncated": truncated}
+
+
 def list_files() -> dict:
     """ワークスペース内のファイルとフォルダをフラットリストで返す（type 付き）。
 

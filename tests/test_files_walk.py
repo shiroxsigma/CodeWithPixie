@@ -80,3 +80,41 @@ def test_iter_text_files_yields_paths(workspace):
     got = {rel: p for rel, p in files.iter_text_files()}
     assert set(got) == {"src/a.py", "README.md"}
     assert got["src/a.py"].read_text(encoding="utf-8") == "x = 1\n"
+
+
+# --- 遅延ツリー用: list_dir / /api/files/list（1階層だけ・非再帰） ---
+
+def test_list_dir_root_is_nonrecursive(workspace):
+    _mktree(workspace)
+    r = files.list_dir("")
+    paths = {f["path"] for f in r["files"]}
+    # 直下だけ（src の中身は出ない）＋無視ディレクトリは姿ごと消える
+    assert paths == {"src", "README.md", "logo.png"}
+    assert r["truncated"] is False
+
+
+def test_list_dir_subdir(workspace):
+    _mktree(workspace)
+    r = files.list_dir("src")
+    assert [f["path"] for f in r["files"]] == ["src/a.py"]
+
+
+def test_list_dir_bad_paths(workspace):
+    _mktree(workspace)
+    assert client.get("/api/files/list", params={"path": "../.."}).status_code == 400
+    assert client.get("/api/files/list", params={"path": "nope"}).status_code == 400
+
+
+def test_list_dir_truncates(workspace, monkeypatch):
+    for i in range(5):
+        (workspace / f"g{i}.txt").write_text(str(i), encoding="utf-8")
+    monkeypatch.setattr(files, "MAX_DIR_ENTRIES", 3)
+    r = files.list_dir("")
+    assert len(r["files"]) == 3 and r["truncated"] is True
+
+
+def test_api_files_list_returns_root(workspace):
+    _mktree(workspace)
+    r = client.get("/api/files/list").json()
+    assert r["root"] == str(workspace.resolve())
+    assert {f["path"] for f in r["files"]} == {"src", "README.md", "logo.png"}

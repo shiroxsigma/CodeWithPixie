@@ -204,6 +204,20 @@ def api_files():
     return {"files": r["files"], "truncated": r["truncated"], "root": str(config.WORKSPACE)}
 
 
+@app.get("/api/files/list")
+def api_files_list(path: str = ""):
+    """ツリー遅延読み込み: 指定ディレクトリの直下だけ返す（path="" はルート）。
+
+    フロントはルートだけ取得して木を描き、フォルダ展開のたびにここを呼ぶ
+    （VS Code 型。24万ファイルのワークスペースでも初期表示が一瞬になる）。
+    """
+    try:
+        r = files.list_dir(path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"files": r["files"], "truncated": r["truncated"], "root": str(config.WORKSPACE)}
+
+
 @app.get("/api/file")
 def api_read(path: str):
     """ファイル内容を返す。Office 系（pptx/docx/xlsx/pdf）は Markdown へ抽出して返す
