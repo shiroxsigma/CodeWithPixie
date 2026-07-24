@@ -761,6 +761,10 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
 
     def worker() -> None:
         try:
+            # ⏪ ロールバック用のターン前スナップショット（Code の AgentSession のみ持つ。
+            # worker スレッドで実行し、イベントループをブロックしない）。
+            if turn_id and hasattr(sess, "take_turn_snapshot"):
+                sess.take_turn_snapshot(turn_id)
             start_turn(emit)
         finally:
             sess.end_turn()  # 中断・例外時も必ず閉じる（次ターンの境界がずれる）
@@ -970,6 +974,29 @@ def api_approve_edit(req: ApproveEditReq):
     )
     ok = sess.resolve_approval(req.id, False, override)
     return {"ok": ok}
+
+
+class RollbackReq(BaseModel):
+    session_id: str
+    turn_id: int
+
+
+@app.post("/api/rollback")
+def api_rollback(req: RollbackReq):
+    """指定ターン開始前の状態へファイルを戻す（⏪ ボタン）。
+
+    直近 ROLLBACK_KEEP_TURNS ターンぶんだけスナップショットを持つ。それより古い
+    ターンや容量上限で捕まえられなかったターンは ok=False。
+    """
+    sess = _require_manager().get(_valid_sid(req.session_id))
+    if sess is None:
+        raise HTTPException(404, "session not found")
+    if not hasattr(sess, "rollback"):
+        raise HTTPException(400, "このモードはロールバック非対応です。")
+    restored = sess.rollback(req.turn_id)
+    if restored is None:
+        return {"ok": False, "reason": "no snapshot"}
+    return {"ok": True, "restored": restored}
 
 
 @app.post("/api/interrupt")

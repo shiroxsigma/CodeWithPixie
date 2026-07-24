@@ -37,6 +37,11 @@ APPROVAL_SKIP = frozenset({
     "gather_project_info", "view_image", "make_directory",
 })
 
+#: ⏪ ロールバック用: ターン開始前のスナップショットを保持するターン数（セッションごと）。
+ROLLBACK_KEEP_TURNS = 10
+_ROLLBACK_MAX_FILE_BYTES = 1_000_000    # 1ファイル上限（超えるファイルは対象外）
+_ROLLBACK_MAX_TOTAL_BYTES = 30_000_000  # 1スナップショットの総量上限（超えたら打ち切り＝部分対象）
+
 #: 出力ストリーム中の非本文インジケータ（token ではなく status に回す）。
 _INDICATOR_HINTS = ("🧠", "⏳", "Prefill", "Thinking...")
 _STATUS_PREFIXES = ("🔧", "✅", "⚠️", "🕊️", "🔍", "[System]", "[システム", "[Warning]", "[警告]")
@@ -630,6 +635,10 @@ class AgentSession(HistoryOps):
         self._cancel = False
         self._classifier = _StreamClassifier()
 
+        # ⏪ ロールバック用: {turn_id: {相対パス: ターン開始前のバイト列}}。
+        # ターン開始直前（main._turn_stream の worker）で take_turn_snapshot が記録する。
+        self._snapshots: dict[int, dict[str, bytes]] = {}
+
     # ---- ターン実行（worker スレッドで呼ばれる） ----
     def run_turn(self, message: str, emit_event, approval_timeout: float = 0.0) -> None:
         self._emit_event = emit_event
@@ -744,6 +753,63 @@ class AgentSession(HistoryOps):
     def cancel(self) -> None:
         self._cancel = True
         self._approval_event.set()  # 承認待ちを解放（_approve が [] を返して終了）
+
+    # ---- ⏪ ロールバック（ターン開始前のスナップショット） ----
+    def take_turn_snapshot(self, turn_id: int) -> None:
+        """ターン開始前のワークスペースのテキスト文件内容を記録する。
+
+        対象は mtime 変更検知と同じ集合（TEXT_EXTS・隠しディレクトリ除外）。
+        1ファイル1MB超は飛ばし、総量30MBで打ち切る（そのターンのロールバックは
+        捕まえた分だけ＝部分適用になる。巨大ワークスペースでメモリが爆発しないため）。
+        """
+        if not turn_id:
+            return
+        root = config.WORKSPACE
+        snap: dict[str, bytes] = {}
+        total = 0
+        for p in root.rglob("*"):
+            # files._hidden / is_text と同じフィルタ（重複定義しない）
+            if files._hidden(p.relative_to(root).parts) or not p.is_file():
+                continue
+            if not files.is_text(p.relative_to(root).as_posix()):
+                continue
+            try:
+                if p.stat().st_size > _ROLLBACK_MAX_FILE_BYTES:
+                    continue
+                data = p.read_bytes()
+            except OSError:
+                continue
+            snap[p.relative_to(root).as_posix()] = data
+            total += len(data)
+            if total >= _ROLLBACK_MAX_TOTAL_BYTES:
+                break
+        self._snapshots[turn_id] = snap
+        # 古いターン分から手放す（全部持ちはメモリ的に危ない）
+        for old in sorted(self._snapshots)[:-ROLLBACK_KEEP_TURNS]:
+            del self._snapshots[old]
+
+    def rollback(self, turn_id: int) -> list[str] | None:
+        """そのターンのスナップショット時点へファイルを戻す。
+
+        戻したのは「スナップショットに捕まっているファイル」だけ — スナップショット
+        以降に**作られた**ファイルは消さない（ユーザーが手で消せるよう残す。
+        戻したファイルの相対パス一覧を返す。スナップショットが無ければ None。
+        """
+        snap = self._snapshots.get(int(turn_id))
+        if snap is None:
+            return None
+        restored: list[str] = []
+        for rel, data in snap.items():
+            try:
+                p = files.safe_path(rel)
+                if p.is_file() and p.read_bytes() == data:
+                    continue  # 既に同じ内容（以降のターンで戻っている等）
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(data)
+                restored.append(rel)
+            except (ValueError, OSError):
+                continue  # ワークスペース外・IOエラーは黙って飛ばす
+        return restored
 
 
 class NoteSession(HistoryOps):

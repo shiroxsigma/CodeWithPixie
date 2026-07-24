@@ -66,6 +66,19 @@ export function addDeleteButton(el, onDelete) {
   el.appendChild(btn);
 }
 
+/** 発言に「⏪ このターンの変更を戻す」ボタンを付ける（Code モード。🗑 の隣）。 */
+export function addRollbackButton(el, onRollback) {
+  if (!el || el.querySelector(".msg-rollback")) return;
+  const btn = document.createElement("button");
+  btn.className = "msg-rollback";
+  btn.type = "button";
+  btn.textContent = "⏪";
+  btn.title = "このターンで変更されたファイルを、ターンの前の状態へ戻す"
+    + "（以降のターンで同じファイルに加えられた変更も巻き戻る）";
+  btn.addEventListener("click", onRollback);
+  el.appendChild(btn);
+}
+
 /** エージェントのツール実行ステータスを本文の上のログ枠に積む。 */
 export function addToolStatus(el, text) {
   let log = el.querySelector(".tool-log");

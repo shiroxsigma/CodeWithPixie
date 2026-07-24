@@ -17,7 +17,7 @@ import { available as cfAvailable, htmlToMarkdown } from "./confluence.js";
 import * as mermaidEdit from "./mermaid-edit.js";
 import * as mdflow from "./mdflow.js";
 import { $ } from "./dom.js";
-import { addDeleteButton, addMessage, addToolStatus, scrollMessages } from "./chat-log.js";
+import { addDeleteButton, addMessage, addRollbackButton, addToolStatus, scrollMessages } from "./chat-log.js";
 import { splitThink, scanEditBlocks, extractEdits, extractProposed } from "./edit-blocks.js";
 
 function newSessionId() {
@@ -2082,6 +2082,8 @@ async function sendChat() {
   else if (assistantEl?.isConnected) {
     // 往復が確定してから削除ボタンを付ける（生成中に消せると文脈と表示がずれる）。
     addDeleteButton(assistantEl, () => deleteExchange(assistantEl, turnId));
+    // Code モード: このターンの変更を巻き戻すボタン（スナップショットは直近10ターン分）
+    if (isCode() && turnId) addRollbackButton(assistantEl, () => rollbackTurn(turnId));
   }
 }
 
@@ -2335,6 +2337,27 @@ async function interrupt() {
   if (isCode()) await postJSON("/api/interrupt", { session_id: state.sessionId }).catch(() => {});
   if (state.abort) state.abort.abort();
   if (approvalPreviews.length) closeDiffPreview();
+}
+
+/** ⏪ このターンの変更を戻す（スナップショットはサーバがターン開始前に取得・直近10ターン分）。 */
+async function rollbackTurn(turnId) {
+  if (state.streaming) { alert("⚠️ 実行中です。中断してから巻き戻してください。"); return; }
+  if (!confirm("このターンの前の状態へファイルを戻しますか？\n"
+      + "以降のターンで同じファイルに加えた変更も巻き戻ります。\n"
+      + "（このターンより後に作られたファイルは消さずに残ります。）")) return;
+  try {
+    const r = await postJSON("/api/rollback", { session_id: state.sessionId, turn_id: turnId });
+    if (!r.ok) {
+      addMessage("system", "⚠️ 巻き戻せませんでした（スナップショット無し: 古すぎるか容量上限）。");
+      return;
+    }
+    addMessage("system", r.restored.length
+      ? `⏪ ${r.restored.length} 件を巻き戻しました: ${r.restored.join(", ")}`
+      : "⏪ 戻す変更はありませんでした（既にターン前の内容と同じです）。");
+    if (r.restored.length) await onFilesChanged(r.restored);  // ツリー更新＋開いていれば再読込
+  } catch (e) {
+    alert("⚠️ 巻き戻しに失敗しました: " + e.message);
+  }
 }
 
 function newSession() {
