@@ -429,6 +429,8 @@ async function loadFileList() {
   if (!r) return;
   state.fsEntries = r.files;
   renderRootPath(r.root);
+  // 巨大ワークスペースでは一覧がサーバ側で打ち切られる（ツリーを固めないため）
+  $("files-trunc").classList.toggle("hidden", !r.truncated);
   // フォルダは既定で閉じた状態にする（深い階層が全部開いていると目的のファイルが埋もれる）。
   // 「初めて見るフォルダだけ」閉じるので、ユーザーが開いたフォルダは再読込でも開いたまま。
   for (const f of r.files) {

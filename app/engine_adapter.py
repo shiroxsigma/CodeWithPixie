@@ -764,22 +764,18 @@ class AgentSession(HistoryOps):
         """
         if not turn_id:
             return
-        root = config.WORKSPACE
         snap: dict[str, bytes] = {}
         total = 0
-        for p in root.rglob("*"):
-            # files._hidden / is_text と同じフィルタ（重複定義しない）
-            if files._hidden(p.relative_to(root).parts) or not p.is_file():
-                continue
-            if not files.is_text(p.relative_to(root).as_posix()):
-                continue
+        # 枝刈り付きの共通走査（files.iter_text_files）を使う — rglob だと
+        # node_modules 等の巨大ツリーを全走査して各ターンが固まるため。
+        for rel, p in files.iter_text_files():
             try:
                 if p.stat().st_size > _ROLLBACK_MAX_FILE_BYTES:
                     continue
                 data = p.read_bytes()
             except OSError:
                 continue
-            snap[p.relative_to(root).as_posix()] = data
+            snap[rel] = data
             total += len(data)
             if total >= _ROLLBACK_MAX_TOTAL_BYTES:
                 break

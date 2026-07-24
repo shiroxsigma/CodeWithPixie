@@ -200,7 +200,8 @@ class PatchReq(BaseModel):
 # --- ファイル API -------------------------------------------------------------
 @app.get("/api/files")
 def api_files():
-    return {"files": files.list_files(), "root": str(config.WORKSPACE)}
+    r = files.list_files()
+    return {"files": r["files"], "truncated": r["truncated"], "root": str(config.WORKSPACE)}
 
 
 @app.get("/api/file")
@@ -423,12 +424,12 @@ async def api_models():
     ⚙️設定のモデル選択ドロップダウン用。LM Studio 未起動・モデル未ロード時は空配列を返す
     （フロントは「取得できません」表示にフォールバックする）。
     チャット対象外（mmproj / embedding 等）は _is_chat_capable で除外する。"""
-    import httpx
     srv = config.active_server()
     base = (srv.get("base_url") or "").rstrip("/")
     headers = {"Authorization": f"Bearer {srv.get('api_key') or 'lm-studio'}"}
     models: list[str] = []
     try:
+        import httpx  # 実行時依存。未取得でも 500 にせず空配列で返す（try の内側で import）
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.get(f"{base}/models", headers=headers)
             r.raise_for_status()

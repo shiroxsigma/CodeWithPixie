@@ -205,6 +205,7 @@ button:active { transform: translateY(1px); }
 }
 #root-bar button { padding: 2px 8px; font-size: 12px; }
 #root-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+#files-trunc { flex: none; color: var(--plan); font-size: 11px; margin-left: 8px; cursor: help; }
 
 #root-modal {
   position: fixed; inset: 0; z-index: 200;

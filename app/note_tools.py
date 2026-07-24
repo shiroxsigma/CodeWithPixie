@@ -163,7 +163,7 @@ def execute_sync(name: str, args: dict) -> str:
     subprocess.run 等のブロッキング呼び出しも worker スレッド上なのでそのまま使える。"""
     try:
         if name == "list_workspace":
-            items = files.list_files()
+            items = files.list_files()["files"]  # truncated はツール結果では無視（agent は read/grep で辿れる）
             if not items:
                 return "（ワークスペースは空です）"
             return _truncate("\n".join(_format_entry(f) for f in items))

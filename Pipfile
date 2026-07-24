@@ -8,6 +8,7 @@ fastapi = "*"
 "uvicorn" = {extras = ["standard"], version = "*"}
 pydantic-settings = "*"
 python-dotenv = "*"
+httpx = "*"         # /api/models（アクティブサーバのモデル一覧取得・実行時依存）
 # --- Note モード（Stage C: NWP から移植したモジュールの依存）---
 pyyaml = "*"        # mdflow（条件別フロー可視化）
 python-pptx = "*"   # extract: pptx テキスト抽出

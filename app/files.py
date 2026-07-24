@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 
 from . import config  # WORKSPACE を動的に参照する
@@ -50,9 +52,6 @@ def resolve_ref(path: str, external: bool) -> Path:
     return Path(path).expanduser().resolve()
 
 
-def _hidden(parts: tuple[str, ...]) -> bool:
-    """無視ディレクトリ配下、またはドット始まりを隠す。"""
-    return any(part in IGNORE_DIRS or part.startswith(".") for part in parts)
 
 
 def is_text(rel: str) -> bool:
@@ -61,24 +60,68 @@ def is_text(rel: str) -> bool:
     return p.suffix.lower() in TEXT_EXTS or p.name.lower() in {"makefile", "dockerfile"}
 
 
-def list_files() -> list[dict]:
+#: ツリー一覧の件数上限。これを超えると UI 側の DOM が重くなる（本来はツリーの
+#: 遅延読み込み化が本丸。まずは「固まらない」ことを優先して刈る）。
+MAX_LIST_ENTRIES = 20_000
+
+
+def iter_entries():
+    """ワークスペース内のファイル/フォルダを (相対パス, os.DirEntry) で巡る。
+
+    **走査時に** IGNORE_DIRS / ドット始まりディレクトリへは降りない（dirnames の
+    枝刈り）。旧実装（rglob して出力時に除外）は node_modules や .git の中まで
+    一度全部辿るため、10万ファイル規模のツリーで致命的に遅かった（実測31秒→1.6秒）。
+    scandir の DirEntry は is_dir/is_file/stat がキャッシュされる（追加 syscall 回避）。
+    """
+    root = config.WORKSPACE
+    for dirpath, dirnames, _ in os.walk(root):
+        # 降りないディレクトリをその場で捨てる（os.walk は dirnames の変更に従う）
+        dirnames[:] = [d for d in dirnames
+                       if d not in IGNORE_DIRS and not d.startswith(".")]
+        try:
+            with os.scandir(dirpath) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            continue  # 権限等で行けないディレクトリは黙って飛ばす
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            # 無視ディレクトリは中身だけでなくディレクトリ自体も一覧に出さない（旧挙動との整合）
+            if e.name in IGNORE_DIRS and e.is_dir():
+                continue
+            yield os.path.relpath(e.path, root).replace(os.sep, "/"), e
+
+
+def iter_text_files():
+    """ワークスペース内のテキストファイルを (相対パス, Path) で巡る
+    （mtime スナップショット・ロールバック用。枝刈り付きの共通走査を使う）。"""
+    for rel, e in iter_entries():
+        if e.is_file() and is_text(rel):
+            yield rel, Path(e.path)
+
+
+def list_files() -> dict:
     """ワークスペース内のファイルとフォルダをフラットリストで返す（type 付き）。
 
     拡張子でフィルタしない: .png や .pdf も一覧に出す（エディタでは開けないので
     フロントが OS の既定アプリに渡す）。text フラグでどちらかを示す。
+    巨大ワークスペース向けに MAX_LIST_ENTRIES で打ち切る（truncated で伝える）。
     """
-    root = config.WORKSPACE
     out: list[dict] = []
-    for p in sorted(root.rglob("*")):
-        rel_parts = p.relative_to(root).parts
-        if _hidden(rel_parts):
-            continue
-        rel = p.relative_to(root).as_posix()
-        if p.is_dir():
+    truncated = False
+    for rel, e in iter_entries():
+        if e.is_dir():
             out.append({"path": rel, "type": "dir"})
-        elif p.is_file():
-            out.append({"path": rel, "type": "file", "size": p.stat().st_size, "text": is_text(rel)})
-    return out
+        elif e.is_file():
+            try:
+                size = e.stat().st_size
+            except OSError:
+                size = 0
+            out.append({"path": rel, "type": "file", "size": size, "text": is_text(rel)})
+        if len(out) >= MAX_LIST_ENTRIES:
+            truncated = True
+            break
+    return {"files": out, "truncated": truncated}
 
 
 def create(rel: str, kind: str) -> None:
@@ -133,18 +176,14 @@ def write_file(rel: str, content: str) -> None:
 
 
 def snapshot_mtimes() -> dict[str, float]:
-    """ワークスペース内テキストファイルの (相対パス -> mtime) を撮る。変更検知用。"""
-    root = config.WORKSPACE
+    """ワークスペース内テキストファイルの (相対パス -> mtime) を撮る。変更検知用。
+    枝刈り付きの共通走査を使う（各ターンで呼ばれるので、巨大ツリー全走査は許容できない）。"""
     snap: dict[str, float] = {}
-    for p in root.rglob("*"):
-        rel_parts = p.relative_to(root).parts
-        if _hidden(rel_parts) or not p.is_file():
+    for rel, e in iter_text_files():
+        try:
+            snap[rel] = e.stat().st_mtime
+        except OSError:
             continue
-        if p.suffix.lower() in TEXT_EXTS or p.name.lower() in {"makefile", "dockerfile"}:
-            try:
-                snap[p.relative_to(root).as_posix()] = p.stat().st_mtime
-            except OSError:
-                continue
     return snap
 
 
