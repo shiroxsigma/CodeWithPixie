@@ -2276,6 +2276,14 @@ function renderApproval(ev) {
     box.appendChild(div);
   }
 
+  // 書き込み系ツールにはサーバが実行前/実行後の内容を付けてくる → 左ペインに差分表示。
+  // （無いもの（run_command 等・巨大ファイル等）はこのバーの引数表示だけで判断する）
+  const previews = ev.calls.filter((c) => c.preview).map((c) => c.preview);
+  // 単一のファイル書き込み承認なら、右ペインを編集して「✓ 修正して承認」できる
+  const editInfo = (ev.calls.length === 1 && previews.length === 1)
+    ? { id: ev.id, path: previews[0].path } : null;
+  if (previews.length) openApprovalDiff(previews, editInfo);
+
   const row = document.createElement("div");
   row.className = "row";
   const ta = document.createElement("textarea");
@@ -2296,6 +2304,7 @@ function renderApproval(ev) {
 async function resolveApproval(id, approve, override) {
   $("approval").classList.add("hidden");
   $("approval").innerHTML = "";
+  if (approvalPreviews.length) closeDiffPreview();  // 承認判断が済んだら差分ビューを閉じる
   if (state.assistantEl) {
     addToolStatus(state.assistantEl, approve ? "✓ 承認しました。" : "✗ 却下しました。");
   }
@@ -2323,6 +2332,7 @@ async function interrupt() {
   // SSE ジェネレータの finally が協調キャンセルを送るので、それに任せる。
   if (isCode()) await postJSON("/api/interrupt", { session_id: state.sessionId }).catch(() => {});
   if (state.abort) state.abort.abort();
+  if (approvalPreviews.length) closeDiffPreview();
 }
 
 function newSession() {
@@ -2330,6 +2340,7 @@ function newSession() {
   state.sessionId = newSessionId();
   $("messages").innerHTML = "";
   $("approval").classList.add("hidden");
+  if (approvalPreviews.length) closeDiffPreview();
   state.assistantEl = null;
   addMessage("system", "新しい会話を開始しました（別セッション）。");
   updateSessionInfo();
@@ -2471,13 +2482,23 @@ function resolveTargetRange(target) {
 }
 
 // --- 差分プレビュー オーバーレイ（Monaco DiffEditor）---
+// 2つの用途: (1) Note モードの修正案反映（右を編集可・✓適用あり）
+//           (2) Code モードの承認確認（右は編集不可・適用/キャンセルの代わりに ✕閉じる。
+//               承認の判断は右ペインの承認バーで行う）
 let diffEditor = null;
 let diffApplyFn = null;
+let approvalPreviews = [];  // 承認で表示中のプレビュー [{path, before, after}]
+let approvalEditInfo = null;  // 「修正して承認」が有効なとき {id, path}
 
-function openDiffPreview(base, proposed, onApply, label) {
+function openDiffPreview(base, proposed, onApply, label, opts = {}) {
   const m = state.monaco;
   $("diff-label").textContent = label || "差分プレビュー：左＝現在 ／ 右＝提案（右は編集して調整可）";
   $("diff-overlay").classList.remove("hidden");
+  // 承認確認は確認専用（適用はエージェントがやる）: 右ペイン編集不可＋ボタンを出し分け。
+  // 例外: 単一ファイル書き込みの承認（opts.editable）は右を編集して「修正して承認」できる。
+  $("diff-apply").classList.toggle("hidden", !!opts.approval);
+  $("diff-cancel").classList.toggle("hidden", !!opts.approval);
+  $("diff-close").classList.toggle("hidden", !opts.approval);
   if (!diffEditor) {
     diffEditor = m.editor.createDiffEditor($("diff-editor"), {
       theme: "vs-dark", automaticLayout: true, renderSideBySide: true,
@@ -2485,27 +2506,74 @@ function openDiffPreview(base, proposed, onApply, label) {
       minimap: { enabled: false }, wordWrap: "on", fontSize: 14,
     });
   }
-  // 現在ファイルの言語でハイライトする（Note の md 以外への提案でも読める）
-  const lang = state.currentFile ? langFor(state.currentFile) : "markdown";
+  diffEditor.updateOptions({ readOnly: !onApply && !opts.editable });
+  // 対象ファイルの言語でハイライト（Note の md 以外への提案・承認のコードファイルでも読める）
+  const lang = opts.lang || (state.currentFile ? langFor(state.currentFile) : "markdown");
   const original = m.editor.createModel(base, lang);
   const modified = m.editor.createModel(proposed, lang);
   diffEditor.setModel({ original, modified });
-  diffApplyFn = () => {
+  diffApplyFn = onApply ? () => {
     const finalText = diffEditor.getModel().modified.getValue();
     closeDiffPreview();
     onApply(finalText);
-  };
+  } : null;
   diffEditor.focus();
 }
 
 function closeDiffPreview() {
   $("diff-overlay").classList.add("hidden");
   diffApplyFn = null;
+  approvalPreviews = [];
+  approvalEditInfo = null;
+  $("diff-tabs").innerHTML = "";
+  $("diff-approve-edit").classList.add("hidden");
   if (diffEditor) {
     const models = diffEditor.getModel();
     diffEditor.setModel(null);
     if (models) { models.original.dispose(); models.modified.dispose(); }
   }
+}
+
+// ---- 承認時の差分表示（Code モード: 書き込み要求の実行前/実行後を左ペインに）----
+
+function openApprovalDiff(previews, editInfo = null) {
+  approvalPreviews = previews;
+  approvalEditInfo = editInfo;
+  $("diff-approve-edit").classList.toggle("hidden", !editInfo);
+  const tabs = $("diff-tabs");
+  tabs.innerHTML = "";
+  // 複数ファイルが一度に書き込まれるときはタブで切り替え
+  if (previews.length > 1) {
+    previews.forEach((p, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = (p.path || "").split("/").pop() || p.path;
+      b.title = p.path;
+      b.addEventListener("click", () => showApprovalPreview(i));
+      tabs.appendChild(b);
+    });
+  }
+  showApprovalPreview(0);
+}
+
+function showApprovalPreview(i) {
+  const p = approvalPreviews[i];
+  if (!p) return;
+  [...$("diff-tabs").children].forEach((b, j) => b.classList.toggle("active", j === i));
+  openDiffPreview(p.before, p.after, null,
+    `📄 承認確認: ${p.path}（左＝現在 ／ 右＝書き込まれる内容${approvalEditInfo ? "・右を編集して修正して承認できます" : ""}）`,
+    { approval: true, editable: !!approvalEditInfo, lang: langFor(p.path || "") });
+}
+
+/** 「✓ 修正して承認」: 右ペインの内容をそのまま書き込み、元ツール呼び出しは
+    「完了済み」の案内付きで却下（エージェントは後続ステップへ進む）。 */
+async function resolveApprovalEdit(id, path, content) {
+  $("approval").classList.add("hidden");
+  $("approval").innerHTML = "";
+  closeDiffPreview();
+  if (state.assistantEl) addToolStatus(state.assistantEl, "✓ 修正して承認しました（編集内容を適用）。");
+  await postJSON("/api/approve-edit", { id, path, content, session_id: state.sessionId })
+    .catch((e) => addToolStatus(state.assistantEl, "⚠️ 修正内容を適用できませんでした: " + e.message));
 }
 
 // --- 実行計画ビュー オーバーレイ（Plan モード） -------------------------------
@@ -2899,6 +2967,12 @@ function bindUI() {
   // 差分プレビューの確定/キャンセル（Esc でもキャンセル）
   $("diff-apply").addEventListener("click", () => { if (diffApplyFn) diffApplyFn(); });
   $("diff-cancel").addEventListener("click", closeDiffPreview);
+  $("diff-close").addEventListener("click", closeDiffPreview);  // 承認確認ビュー用（判断は承認バーで）
+  $("diff-approve-edit").addEventListener("click", () => {
+    if (!approvalEditInfo || !diffEditor) return;
+    const content = diffEditor.getModel().modified.getValue();
+    resolveApprovalEdit(approvalEditInfo.id, approvalEditInfo.path, content);
+  });
   $("chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
   });

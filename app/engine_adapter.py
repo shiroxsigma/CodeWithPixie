@@ -23,7 +23,9 @@ import re
 import sys
 import threading
 
-from . import config, files, note_prompts, note_tools
+from pathlib import Path
+
+from . import config, files, note_prompts, note_tools, patch
 from .config import settings
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -228,6 +230,93 @@ def _tc_args(tc) -> dict:
         except Exception:
             return {"_raw": a}
     return a or {}
+
+
+# ---- 承認時の差分プレビュー計算 ------------------------------------------------
+#: 差分プレビューの上限。超えるものはスキップ（SSE の肥大化・メモリ防止）。
+_PREVIEW_MAX_BYTES = 1_000_000   # 読み込む既存ファイルのサイズ上限
+_PREVIEW_MAX_CHARS = 300_000     # before/after 文字列の長さ上限
+
+
+def _read_preview_base(path: str) -> str | None:
+    """プレビュー用に書き換え対象の現在内容を読む。
+    未存在 → ""（新規ファイル）、読めない（バイナリ・巨大・権限等）→ None（preview 見送り）。
+    ここに来る path はエンジンがディスパッチ境界で絶対化したもの（相対で来ても
+    config.WORKSPACE 基準で解決を試みる＝ベストエフォート）。"""
+    p = Path(path)
+    if not p.is_absolute():
+        p = (config.WORKSPACE / p).resolve()
+    try:
+        if not p.exists():
+            return ""
+        if not p.is_file() or p.stat().st_size > _PREVIEW_MAX_BYTES:
+            return None
+        text = p.read_text(encoding="utf-8")  # strict: バイナリは UnicodeDecodeError → None
+        if len(text) > _PREVIEW_MAX_CHARS:
+            return None
+        return text
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _tool_preview(name: str, args: dict) -> dict | None:
+    """承認対象の書き込み系ツールについて、実行前後のファイル内容を計算する
+    （{"path", "before", "after"} — 承認ビューが左ペインの差分エディタで表示する）。
+
+    計算は AWP のツール実装と一致させる: search_and_replace は app/patch.py（AWP の
+    _fuzzy_apply 移植・3層ファジー）、replace_lines は _compute_replace_lines_content
+    （1オリジン・両端含む・範囲クランプ）の再現。計算できないものは None を返し、
+    承認バーは従来どおり引数全文表示にフォールバックする。"""
+    if not isinstance(args, dict):
+        return None
+    try:
+        if name == "write_file":
+            path = str(args.get("path") or "")
+            after = args.get("content")
+            if not path or not isinstance(after, str):
+                return None
+            before = _read_preview_base(path)
+            if before is None or len(after) > _PREVIEW_MAX_CHARS:
+                return None
+            return {"path": path, "before": before, "after": after}
+
+        if name == "search_and_replace":
+            path = str(args.get("path") or "")
+            search = args.get("search_block")
+            replace = args.get("replace_block")
+            if not path or not isinstance(search, str) or not isinstance(replace, str):
+                return None
+            before = _read_preview_base(path)
+            if before is None:
+                return None
+            res = patch.apply_edits(before, [{"search": search, "replace": replace}])
+            if not res["applied"]:
+                return None  # マッチしない＝ツール側も失敗するので、紛らわしい差分は出さない
+            return {"path": path, "before": before, "after": res["content"]}
+
+        if name == "replace_lines":
+            path = str(args.get("path") or "")
+            new_content = args.get("new_content")
+            if not path or not isinstance(new_content, str):
+                return None
+            before = _read_preview_base(path)
+            if before is None:
+                return None
+            start = int(args.get("start_line"))
+            end = int(args.get("end_line"))
+            lines = before.splitlines(keepends=True)
+            # AWP _compute_replace_lines_content と同じガード（範囲外ならツールも失敗）
+            if start < 1 or start > len(lines) or end < start:
+                return None
+            prefix = lines[: start - 1]
+            suffix = lines[min(end, len(lines)):]
+            new_lines = new_content.splitlines(keepends=True)
+            if new_content and new_lines and not new_content.endswith(("\n", "\r\n")):
+                new_lines[-1] = new_lines[-1] + "\n"
+            return {"path": path, "before": before, "after": "".join(prefix + new_lines + suffix)}
+    except (ValueError, TypeError, OSError):
+        return None
+    return None
 
 
 # --- プロセス1回だけの AWP ブートストラップ（全セッション共有） ---
@@ -588,9 +677,18 @@ class AgentSession(HistoryOps):
         self._approval_id += 1
         aid = self._approval_id
         self._pending_id = aid
-        calls_view = [{"name": _tc_name(tc), "args": _tc_args(tc),
-                       "needs_approval": _tc_name(tc) in self._approval_required}
-                      for tc in tool_calls]
+        calls_view = []
+        for tc in tool_calls:
+            name = _tc_name(tc)
+            args = _tc_args(tc)
+            entry = {"name": name, "args": args, "needs_approval": name in self._approval_required}
+            # 書き込み系は「実行するとどう変わるか」の差分を添える（承認ビューが左ペインに
+            # 表示する）。計算できないもの（対象外ツール・巨大ファイル等）は従来どおり引数表示だけ。
+            if entry["needs_approval"]:
+                preview = _tool_preview(name, args)
+                if preview:
+                    entry["preview"] = preview
+            calls_view.append(entry)
         self._approval_decision = None
         self._approval_event.clear()
         self._emit_event({"type": "approval", "id": aid, "calls": calls_view,

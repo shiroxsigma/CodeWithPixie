@@ -38,7 +38,10 @@
       <div id="diff-overlay" class="hidden">
         <div id="diff-bar">
           <span id="diff-label">差分プレビュー：左＝現在 ／ 右＝提案（右は編集して調整可）</span>
+          <span id="diff-tabs"></span>
           <span class="spacer"></span>
+          <button id="diff-close" class="hidden" title="差分表示を閉じる（承認の判断は右の承認バーで行う）">✕ 閉じる</button>
+          <button id="diff-approve-edit" class="apply-btn hidden" title="右ペインで編集した内容をそのまま書き込み、エージェントには完了済みと伝える">✓ 修正して承認</button>
           <button id="diff-apply" class="apply-btn">✓ 適用</button>
           <button id="diff-cancel">キャンセル</button>
         </div>

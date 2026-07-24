@@ -114,6 +114,14 @@ button:active { transform: translateY(1px); }
 }
 #diff-bar .spacer { flex: 1; }
 #diff-editor { flex: 1; min-height: 0; }
+/* 承認確認のファイルタブ（1回の承認で複数ファイル書き込むときの切替） */
+#diff-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+#diff-tabs button {
+  padding: 1px 8px; font-size: 11px;
+  background: var(--bg); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+}
+#diff-tabs button.active { border-color: var(--accent); color: var(--accent2); }
 
 /* --- 実行計画オーバーレイ（Plan モード）---
    差分プレビューと同じ「左ペインを覆う」パターン。計画を読みながら承認/修正依頼を

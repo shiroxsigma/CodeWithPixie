@@ -933,6 +933,45 @@ def api_approve(req: ApproveReq):
     return {"ok": ok}
 
 
+class ApproveEditReq(BaseModel):
+    id: int
+    session_id: str
+    path: str      # 書き込み対象（プレビュー由来の絶対パス）
+    content: str   # 差分ビューの右ペインでユーザーが編集した最終内容
+
+
+@app.post("/api/approve-edit")
+def api_approve_edit(req: ApproveEditReq):
+    """「修正して承認」: 承認差分ビューで編集した内容をそのまま適用する。
+
+    適用はこのエンドポイントが直接行い、元ツール呼び出しは override 付きで却下する —
+    pixie_core は override をユーザーメッセージとして会話に積み、エージェントは
+    「その書き込みは完了済み」と理解して後続のステップへ進む（二重書き込みしない）。
+    """
+    sess = _require_manager().get(_valid_sid(req.session_id))
+    if sess is None:
+        raise HTTPException(404, "session not found")
+    # サンドボックス: セッションの workspace 配下のみ書き込み可（プレビューは絶対パスで来る）
+    ws = Path(getattr(sess, "workspace", None) or config.WORKSPACE).resolve()
+    p = Path(req.path)
+    p = p.resolve() if p.is_absolute() else (ws / p).resolve()
+    if p != ws and ws not in p.parents:
+        raise HTTPException(400, "path outside workspace")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(req.content, encoding="utf-8")
+    try:
+        rel = p.relative_to(ws).as_posix()
+    except ValueError:
+        rel = str(p)
+    override = (
+        f"ユーザーがあなたの書き込み提案を差分ビューで修正し、そのまま適用しました"
+        f"（{rel} は更新済みです）。この書き込みは完了したものとして扱い、"
+        f"同じ書き込みを再度出さず、後続のステップを続けてください。"
+    )
+    ok = sess.resolve_approval(req.id, False, override)
+    return {"ok": ok}
+
+
 @app.post("/api/interrupt")
 def api_interrupt(req: InterruptReq):
     sess = _require_manager().get(_valid_sid(req.session_id))
