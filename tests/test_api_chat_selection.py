@@ -84,3 +84,35 @@ def test_long_selection_is_truncated(sess):
 def test_whitespace_only_selection_ignored(sess):
     _post(selection="   \n  ")
     assert sess.messages[0] == "この関数を直して"
+
+
+# --- チェック済み参考ファイル（context_files）の埋め込み ---
+
+def test_checked_context_files_are_embedded(sess):
+    _post(context_files=[{"path": "ref/one.py", "content": "AAA = 1"},
+                         {"path": "ref/two.py", "content": "BBB = 2"}])
+    sent = sess.messages[0]
+    assert "参考ファイル（チェック済み）" in sent
+    assert "## ref/one.py" in sent and "AAA = 1" in sent
+    assert "## ref/two.py" in sent and "BBB = 2" in sent
+    assert sent.endswith("この関数を直して")  # 本題は末尾のまま
+
+
+def test_current_file_not_duplicated_in_context_files(sess):
+    """開いているファイルは未保存編集込みの方を優先し、context_files 側は重複させない。"""
+    _post(current_file="src/a.py",
+          context_files=[{"path": "src/a.py", "content": "OLD ON DISK"}])
+    sent = sess.messages[0]
+    assert "OLD ON DISK" not in sent
+    assert sent.count("src/a.py") == 1
+
+
+def test_context_files_budget_omits_excess(sess, monkeypatch):
+    big = "y" * 1000
+    monkeypatch.setattr(main.settings, "context_char_budget", 1500)
+    _post(context_files=[{"path": "a.py", "content": big},
+                         {"path": "b.py", "content": big}])
+    sent = sess.messages[0]
+    assert "## a.py" in sent             # 1件目は予算内
+    assert "## b.py" not in sent         # 2件目は予算超過で本文省略
+    assert "b.py" in sent and "省略した" in sent  # 注記に出る

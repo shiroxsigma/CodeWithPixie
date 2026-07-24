@@ -67,7 +67,7 @@ const state = {
   historyLoaded: false,     // 履歴を読めたか。読めていないのに保存すると履歴を消してしまう
   notes: [],                // 付箋 [{line, text}]
   noteDecorations: null,    // Monaco decorations collection（付箋グリフ）
-  checkedFiles: new Set(),  // AI コンテキストに含めるファイル（再描画をまたいで保持）
+  checkedFiles: new Set(),  // AI コンテキストに含めるファイル（Note/Code。再描画をまたいで保持）
   refs: [],                 // 現在ノートの関連ファイル [{path, external, name}]
   checkedRefs: new Set(),   // AI コンテキストに含める関連ファイル（refKey で識別）
   pendingTarget: null,      // 反映先として追跡中の選択範囲（1つだけ）
@@ -436,7 +436,7 @@ async function loadFileList() {
     state.knownDirs.add(f.path);
     state.collapsedDirs.add(f.path);
   }
-  // 消えたファイルはコンテキストのチェック集合からも掃除する（Note モード）
+  // 消えたファイルはコンテキストのチェック集合からも掃除する（Note/Code モード）
   const alive = new Set(r.files.filter((f) => f.type === "file").map((f) => f.path));
   for (const p of [...state.checkedFiles]) if (!alive.has(p)) state.checkedFiles.delete(p);
   renderFileTree();
@@ -491,9 +491,10 @@ function renderFileTree() {
         renderFileTree();
       });
     } else {
-      // Note モード: text と extract はチェックで AI 文脈に入れられる（extract はサーバで
+      // Note/Code モード: text と extract はチェックで AI 文脈に入れられる（extract はサーバで
       // Markdown 化）。画像などはテキスト化の手段が無いのでダミーで位置だけ揃える。
-      if (isNote()) {
+      // Plan モードは自分で read_file して調査するのでチェック不要。
+      if (!isPlan()) {
         if (f.text || isExtractPath(f.path)) {
           const cb = document.createElement("input");
           cb.type = "checkbox";
@@ -2008,8 +2009,16 @@ async function sendChat() {
              current_file: state.currentFile || "",
              current_content: state.currentFile ? state.editor.getValue() : "" };
   } else {
+    // チェック済みファイルをコンテキストに同梱（Note の buildNotePayload と同じ扱い。
+    // 抽出失敗は tryJSON が alert してそのファイルだけ抜く）
+    const context_files = [];
+    for (const p of [...state.checkedFiles]) {
+      const r = await tryJSON("/api/file?path=" + encodeURIComponent(p));
+      if (r && r.content != null) context_files.push({ path: p, content: r.content });
+    }
     body = { message: msg, session_id: state.sessionId, current_file: state.currentFile,
              selection: getSelection(), plan_first: codePlan };
+    if (context_files.length) body.context_files = context_files;
   }
 
   input.value = "";
