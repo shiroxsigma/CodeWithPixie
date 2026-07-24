@@ -288,6 +288,39 @@ button:active { transform: translateY(1px); }
 #pick-list li:hover { background: var(--bg3); }
 #pick-list li.pick-file { color: var(--accent2); }
 
+/* 保存済み会話ダイアログ（Code モード） */
+#sessions-modal {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+#sessions-dialog {
+  width: min(560px, 92vw); max-height: 80vh;
+  display: flex; flex-direction: column; gap: 10px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); padding: 16px;
+}
+#sessions-list {
+  flex: 1; min-height: 120px; max-height: 50vh; overflow-y: auto;
+  margin: 0; padding: 4px; list-style: none;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+#sessions-list li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+#sessions-list li:hover { background: var(--bg3); }
+#sessions-list li.current { outline: 1px solid var(--accent); }
+#sessions-list li.sess-empty { color: var(--muted); cursor: default; }
+.sess-item { flex: 1; min-width: 0; }
+.sess-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-sub { font-size: 11px; color: var(--muted); }
+#sessions-list li > button {
+  padding: 1px 8px; font-size: 12px; background: transparent;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+}
+#sessions-list li > button:hover { color: var(--danger); border-color: var(--danger); }
+
 /* Confluence / Web 貼り付けダイアログ（関連ファイル選択ダイアログのスタイルを踏襲） */
 #cf-modal {
   position: fixed; inset: 0; z-index: 200;

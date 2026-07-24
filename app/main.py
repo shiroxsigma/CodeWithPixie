@@ -19,8 +19,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import (compact, config, copilot, copilot_flow, engine_adapter, extract, files, mdflow,
-               mode, note_api, note_prompts, patch, search)
+from . import (code_chat, compact, config, copilot, copilot_flow, engine_adapter, extract,
+               files, mdflow, mode, note_api, note_prompts, patch, search)
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -1042,6 +1042,32 @@ def api_session_clear(req: SessionClearReq):
 # --- Note 系 API・モード切替（Stage C） -----------------------------------------
 app.include_router(note_api.router)
 app.include_router(mode.router)
+app.include_router(code_chat.router)  # Code モードの会話ログ永続化
+
+
+class RestoreSessionReq(BaseModel):
+    session_id: str
+    messages: list[dict] = []  # [{role, content}]（未指定ならサイドカーから読む）
+
+
+@app.post("/api/code-chat/restore")
+def code_chat_restore(req: RestoreSessionReq):
+    """復元した会話をエンジン文脈にシードする（history_replace = API 1.6）。
+
+    ツール呼び出し/結果のメッセージは pixie_core 側でフィルタされ、user/assistant の
+    本文だけが文脈になる（会話の「筋」は残る。詳細なツール履歴は表示側のログで読める）。
+    API 1.6 未満の pixie_core ではシードせず表示復元だけになる（ok=False で伝える）。
+    """
+    sid = _valid_sid(req.session_id)
+    messages = req.messages
+    if not messages:
+        entry = code_chat.load_store().get(sid)
+        messages = (entry or {}).get("messages") or []
+    sess = _require_manager().get_or_create(sid)
+    seeded = sess.replace_history([
+        {"role": m.get("role"), "content": m.get("content") or ""} for m in messages
+    ]) if messages else True
+    return {"ok": bool(seeded)}
 
 # モード切替時に旧モードの LLM 文脈を持ち越さない（mode.py の POST /api/mode が呼ぶ）。
 mode.register_reset_hook(engine_adapter.reset_note_session)

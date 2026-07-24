@@ -114,6 +114,7 @@
           <span class="fm-actions">
             <span id="session-info" class="hint code-only" title="この会話のセッションID"></span>
             <button id="new-session-btn" class="code-only" title="新しい会話を開始（並行セッション）">＋新規会話</button>
+            <button id="sessions-btn" class="code-only" title="保存済みの会話を一覧から復元する">🗂 会話</button>
             <button id="chat-clear-btn" class="note-only" title="この保存先の会話履歴を消去する">🗑 履歴を消去</button>
           </span>
         </div>
@@ -190,6 +191,21 @@
       <div class="root-actions">
         <button id="cf-cancel">閉じる</button>
         <button id="cf-insert" class="apply-btn">✓ 変換して挿入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 保存済み会話（Code モード: ログとエンジン文脈を復元） -->
+  <div id="sessions-modal" class="hidden">
+    <div id="sessions-dialog">
+      <div class="root-head">🗂 保存済みの会話</div>
+      <div class="root-hint hint">
+        クリックで会話を復元します（チャット表示＋エンジン文脈。ツール実行の詳細は失われ、
+        会話の本文だけが文脈として引き継がれます）。会話はターン確定ごとに自動保存されます。
+      </div>
+      <ul id="sessions-list"></ul>
+      <div class="root-actions">
+        <button id="sessions-close" class="apply-btn">閉じる</button>
       </div>
     </div>
   </div>

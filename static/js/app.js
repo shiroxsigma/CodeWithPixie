@@ -2076,6 +2076,8 @@ async function sendChat() {
   const visible = finishStream();
   if (note) noteAfterTurn(assistantEl, msg, visible, applyTarget, cancelled);
   else if ((plan || codePlan) && !cancelled) planAfterTurn(visible);
+  // Code モードの会話はターン確定ごとにサイドカーへ保存（再起動後の復元用）
+  if (isCode() && !cancelled) saveCodeTurn(msg, visible);
   if (state.compacted && assistantEl?.isConnected) collapseToSummary(assistantEl, state.compacted);
   else if (assistantEl?.isConnected) {
     // 往復が確定してから削除ボタンを付ける（生成中に消せると文脈と表示がずれる）。
@@ -2344,6 +2346,93 @@ function newSession() {
   state.assistantEl = null;
   addMessage("system", "新しい会話を開始しました（別セッション）。");
   updateSessionInfo();
+}
+
+// ---- Code 会話の永続化（サイドカー保存・一覧から復元） -------------------------
+
+/** 1往復を保存（失敗しても会話は妨げない）。 */
+function saveCodeTurn(user, assistant) {
+  postJSON("/api/code-chat/log", { session_id: state.sessionId, user, assistant })
+    .catch(() => {});
+}
+
+function fmtAgo(ts) {
+  if (!ts) return "";
+  const d = Math.max(0, Date.now() / 1000 - ts);
+  if (d < 60) return "たった今";
+  if (d < 3600) return `${Math.floor(d / 60)}分前`;
+  if (d < 86400) return `${Math.floor(d / 3600)}時間前`;
+  return `${Math.floor(d / 86400)}日前`;
+}
+
+async function openSessionsModal() {
+  if (state.streaming) { alert("⚠️ 実行中です。中断してから開いてください。"); return; }
+  $("sessions-modal").classList.remove("hidden");
+  const list = $("sessions-list");
+  list.innerHTML = "";
+  let sessions = [];
+  try {
+    sessions = (await getJSON("/api/code-chat/sessions")).sessions || [];
+  } catch (e) {
+    const li = document.createElement("li");
+    li.textContent = "⚠ 一覧を取得できませんでした: " + e.message;
+    list.appendChild(li);
+    return;
+  }
+  if (!sessions.length) {
+    const li = document.createElement("li");
+    li.className = "sess-empty";
+    li.textContent = "保存済みの会話はまだありません（Code モードの会話はターンごとに自動保存されます）。";
+    list.appendChild(li);
+    return;
+  }
+  for (const s of sessions) {
+    const li = document.createElement("li");
+    if (s.session_id === state.sessionId) li.classList.add("current");
+    const info = document.createElement("div");
+    info.className = "sess-item";
+    const title = document.createElement("div");
+    title.className = "sess-title";
+    title.textContent = s.title;
+    const sub = document.createElement("div");
+    sub.className = "sess-sub";
+    sub.textContent = `${fmtAgo(s.updated_at)} ・ ${s.messages} メッセージ`
+      + (s.session_id === state.sessionId ? " ・現在の会話" : "");
+    info.append(title, sub);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.textContent = "🗑";
+    del.title = "この会話を削除";
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm(`「${s.title}」を削除しますか？`)) return;
+      await postJSON("/api/code-chat/delete", { session_id: s.session_id }).catch(() => {});
+      openSessionsModal();
+    });
+    li.append(info, del);
+    li.addEventListener("click", () => restoreCodeSession(s.session_id));
+    list.appendChild(li);
+  }
+}
+
+/** 保存済み会話を復元: チャット表示＋エンジン文脈（history_replace）をシード。 */
+async function restoreCodeSession(sid) {
+  $("sessions-modal").classList.add("hidden");
+  try {
+    const r = await getJSON("/api/code-chat/session?session_id=" + encodeURIComponent(sid));
+    const res = await postJSON("/api/code-chat/restore",
+      { session_id: sid, messages: r.messages });
+    state.sessionId = sid;
+    updateSessionInfo();
+    $("messages").innerHTML = "";
+    for (const m of r.messages || []) addMessage(m.role, m.content, { assetBase: currentDir() });
+    addMessage("system", res.ok
+      ? "✓ 会話を復元しました（エンジンの文脈も引き継がれています。続きから話せます）。"
+      : "✓ 会話の表示を復元しました（このエンジンでは文脈の復元は未対応です）。");
+    scrollMessages(true);
+  } catch (e) {
+    alert("⚠️ 会話を復元できませんでした: " + e.message);
+  }
 }
 
 function updateSessionInfo() {
@@ -2936,6 +3025,11 @@ async function openCopilotBrowser() {
 function bindUI() {
   $("send-btn").addEventListener("click", () => (state.streaming ? interrupt() : sendChat()));
   $("new-session-btn").addEventListener("click", newSession);
+  $("sessions-btn").addEventListener("click", openSessionsModal);
+  $("sessions-close").addEventListener("click", () => $("sessions-modal").classList.add("hidden"));
+  $("sessions-modal").addEventListener("click", (e) => {
+    if (e.target === $("sessions-modal")) $("sessions-modal").classList.add("hidden");
+  });
   updateSessionInfo();
   updatePreviewAvailability();
   $("save-btn").addEventListener("click", () => saveFile());  // MouseEvent を引数に渡さない
@@ -3028,6 +3122,7 @@ function bindUI() {
     if (e.key === "Escape" && !$("root-modal").classList.contains("hidden")) closeRootModal();
     else if (e.key === "Escape" && !$("pick-modal").classList.contains("hidden")) closePickModal();
     else if (e.key === "Escape" && !$("cf-modal").classList.contains("hidden")) $("cf-modal").classList.add("hidden");
+    else if (e.key === "Escape" && !$("sessions-modal").classList.contains("hidden")) $("sessions-modal").classList.add("hidden");
     else if (e.key === "Escape" && !$("settings-modal").classList.contains("hidden")) closeSettings();
     else if (e.key === "Escape" && !$("diff-overlay").classList.contains("hidden")) closeDiffPreview();
     // Esc は「修正を依頼」と同じ扱い（計画は捨てずに引っ込めるだけ）
