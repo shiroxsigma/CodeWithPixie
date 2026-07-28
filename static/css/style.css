@@ -525,15 +525,19 @@ path.flowchart-link.selected { stroke: #ffb454 !important; stroke-width: 3px; }
 }
 .mermaid-editbar button:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
 .mermaid-editbar button:disabled { cursor: default; opacity: .45; }
+/* 矢印追加の待ち状態（始点/終点のクリック待ち）を押しっぱなしに見せる */
+.mermaid-editbar button.active { color: var(--fg); border-color: var(--accent); background: var(--bg); }
 .mermaid-edit-hint { flex: 1; min-width: 120px; font-size: 11px; color: var(--muted); }
-.mermaid-edge-label {
-  width: 160px; padding: 2px 8px; font-size: 11px;
-  background: var(--bg); color: var(--fg);
-  border: 1px solid var(--border); border-radius: 4px;
+/* 矢印の線種セレクタ（矢印を選択している間だけ出る） */
+.mermaid-arrow-kind {
+  padding: 1px 4px; font-size: 11px;
+  background: var(--bg2); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
 }
-.mermaid-edge-label:focus { outline: none; border-color: var(--accent); }
-/* ノードラベルのインライン編集（.mermaid-box 基準の absolute。内容と一緒にスクロールする） */
-.mermaid-node-input {
+.mermaid-arrow-kind:focus { outline: none; border-color: var(--accent); color: var(--fg); }
+/* ラベルのインライン編集（.mermaid-box 基準の absolute。内容と一緒にスクロールする）。
+   ノードラベルと矢印ラベルで同じものを使う。 */
+.mermaid-inline-input {
   position: absolute; z-index: 30;
   background: var(--bg); color: var(--fg);
   border: 1px solid var(--accent); border-radius: 6px;

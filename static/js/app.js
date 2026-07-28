@@ -75,7 +75,7 @@ const state = {
   pendingTarget: null,      // 反映先として追跡中の選択範囲（1つだけ）
   mdflowConditions: new Map(),  // 図ID → 条件JSON文字列。プレビュー再構築で input が
                                 // 作り直されるため、入力値はここが正（ファイル切替でクリア）
-  diagramEditing: null,         // 直接編集中の mermaid 図 {src, focusNodeId}（再入場のキー）
+  diagramEditing: null,         // 直接編集中の mermaid 図 {src, index, restore, dispose}
 };
 
 const isNote = () => state.mode === "note";
@@ -1290,29 +1290,40 @@ function bindConfluenceUI() {
 }
 
 // ---- Mermaid 図の直接編集（プレビュー操作 → ソースの最小編集 → executeEdits） ----
-// state.diagramEditing = {src, focusNodeId} が編集中の図（src = mermaid ブロックの内容）。
-// 編集を適用するとエディタ内容が変わってプレビューが再描画され、onDiagramRendered が
-// 新しい src をキーに編集モードへ再入場する（1操作 = 1ターン分の差分、undo 可能）。
+// state.diagramEditing = {src, index, restore, dispose} が編集中の図
+// （src = mermaid ブロックの内容、index = 文書内の何枚目か）。編集を適用すると
+// エディタ内容が変わってプレビューが再描画され、onDiagramRendered が同じ図
+// （src と index の両方が一致）を見つけて編集モードへ再入場する
+// （1操作 = 1ターン分の差分、undo 可能）。
+//
+// src だけで照合しないのは、同じ内容の図が2枚あると別の図を書き換えてしまうため。
 
 function openDiagramEditor(box, meta) {
-  state.diagramEditing = { src: meta.src, focusNodeId: null };
-  mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), null);
+  state.diagramEditing?.dispose?.();  // 別の図を編集中ならそちらを畳む
+  const ed = { src: meta.src, index: meta.index, restore: null, dispose: null };
+  state.diagramEditing = ed;
+  ed.dispose = mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), null);
 }
 
 function onDiagramRendered(box, meta) {
   const ed = state.diagramEditing;
-  if (!ed || ed.src !== meta.src) return;
-  mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), ed.focusNodeId);
-  ed.focusNodeId = null;
+  if (!ed || ed.src !== meta.src || ed.index !== meta.index) return;
+  // 再描画で捨てられた前の box の後始末（document のキー listener を外す）
+  ed.dispose?.();
+  ed.dispose = mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), ed.restore);
+  // 選択の復帰は再描画のたびに効かせたいが、ラベル編集の自動オープンは1回だけ
+  if (ed.restore) ed.restore = { ...ed.restore, editNodeId: null };
 }
 
 function mermaidEditApi() {
   return {
-    applyEdits(src, edits, focusNodeId = null) {
+    applyEdits(src, edits, restore = null) {
       const editor = state.editor;
       const model = editor.getModel();
-      const block = findMermaidBlock(model.getValue(), src);
+      const ed = state.diagramEditing;
+      const block = findMermaidBlock(model.getValue(), src, ed?.index ?? 0);
       if (!block) {
+        state.diagramEditing?.dispose?.();
         state.diagramEditing = null;
         alert("⚠️ 対応する図が見つかりません（内容が外部で変わった可能性）。編集モードを終了します。");
         return false;
@@ -1325,11 +1336,19 @@ function mermaidEditApi() {
         text: e.text,
       }));
       editor.executeEdits("mermaid-edit", ranges);
-      state.diagramEditing = { src: newSrc, focusNodeId };
-      editor.focus();
+      // dispose は今の box のもの。再描画時に onDiagramRendered が呼んで畳む。
+      state.diagramEditing = { src: newSrc, index: ed?.index ?? 0, restore, dispose: ed?.dispose ?? null };
+      // エディタへフォーカスは移さない。移すと図の上での Esc / Delete が
+      // 「エディタへの入力」になってしまい、GUI 操作が続けられなくなる。
+      // undo だけは下の undo/redo で肩代わりする。
       return true;
     },
-    onExit() { state.diagramEditing = null; },
+    // 図の上での Ctrl+Z / Ctrl+Y。エディタにフォーカスが無くても効かせる。
+    undo() { state.editor?.trigger("mermaid-edit", "undo", null); },
+    redo() { state.editor?.trigger("mermaid-edit", "redo", null); },
+    onExit() {
+      state.diagramEditing = null;
+    },
   };
 }
 
@@ -1358,22 +1377,34 @@ function scanMermaidBlocks(doc) {
   return blocks;
 }
 
-/** src（描画に使われた mermaid ソース）に一致するブロックを探す。
-    戻り値の toRaw(i) は src 内オフセットをドキュメントオフセットへ変換する。
+/** ブロックの内容が src と一致するか見て、一致すればオフセット変換付きで返す。
     markdown-it は入力を \n に正規化するがエディタは \r\n を保持しうるので、その分だけずらす。 */
-function findMermaidBlock(doc, src) {
-  for (const b of scanMermaidBlocks(doc)) {
-    if (b.content === src) return { ...b, toRaw: (i) => i };
-    if (!b.content.includes("\r")) continue;
-    let norm = "";
-    const map = [];
-    for (let i = 0; i < b.content.length; i++) {
-      if (b.content[i] === "\r" && b.content[i + 1] === "\n") continue;
-      map.push(i);
-      norm += b.content[i];
-    }
-    map.push(b.content.length);
-    if (norm === src) return { ...b, toRaw: (i) => map[i] };
+function matchMermaidBlock(b, src) {
+  if (b.content === src) return { ...b, toRaw: (i) => i };
+  if (!b.content.includes("\r")) return null;
+  let norm = "";
+  const map = [];
+  for (let i = 0; i < b.content.length; i++) {
+    if (b.content[i] === "\r" && b.content[i + 1] === "\n") continue;
+    map.push(i);
+    norm += b.content[i];
+  }
+  map.push(b.content.length);
+  return norm === src ? { ...b, toRaw: (i) => map[i] } : null;
+}
+
+/** src（描画に使われた mermaid ソース）に一致するブロックを探す。
+    index（プレビュー内で何枚目の図か）と一致するブロックを最優先する — 同じ内容の
+    図が複数あるとき、先頭のブロックを黙って書き換えてしまわないため。
+    戻り値の toRaw(i) は src 内オフセットをドキュメントオフセットへ変換する。 */
+function findMermaidBlock(doc, src, index = 0) {
+  const blocks = scanMermaidBlocks(doc);
+  const at = blocks[index] ? matchMermaidBlock(blocks[index], src) : null;
+  if (at) return at;
+  // フェンスの数え方が markdown-it と食い違った場合の保険（内容一致で最初の1つ）
+  for (const b of blocks) {
+    const m = matchMermaidBlock(b, src);
+    if (m) return m;
   }
   return null;
 }

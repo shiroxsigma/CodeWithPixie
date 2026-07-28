@@ -6,6 +6,7 @@
 
 import * as mdflow from "./mdflow.js";
 import { copyPngToClipboard, diagramId, svgToPngBlob } from "./mermaid-export.js";
+import { diagramEditability } from "./mermaid-edit.js";
 
 const md = window.markdownit
   ? window.markdownit({
@@ -197,11 +198,17 @@ function buildExportBar(box, meta) {
   bar.appendChild(status);  // 結果は左、ボタンは右
   // 直接編集はプレビューの図だけ（meta.editable）。チャット内の図は編集対象外。
   if (meta.editable && diagramEditor) {
+    // 直接編集は flowchart/graph 限定。押しても壊すだけのボタンは出さず、
+    // 無効化したうえで理由を tooltip に出す（sequenceDiagram / subgraph 等）。
+    const { ok, reason } = diagramEditability(meta.src);
     const edit = document.createElement("button");
     edit.type = "button";
-    edit.title = "この図を直接編集する（ノード/矢印の操作がMermaidソースへ反映される）";
+    edit.title = ok
+      ? "この図を直接編集する（ノード/矢印の操作がMermaidソースへ反映される）"
+      : `この図は直接編集できません（${reason}）`;
     edit.textContent = "✏️ 編集";
-    edit.addEventListener("click", () => diagramEditor(box, meta));
+    edit.disabled = !ok;
+    if (ok) edit.addEventListener("click", () => diagramEditor(box, meta));
     bar.appendChild(edit);
   }
   if (saveDiagram) {
