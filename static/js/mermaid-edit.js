@@ -33,7 +33,9 @@ const SHAPES = [
 // ---- 矢印記法（長いものを先に試す） -------------------------------------------
 const ARROWS = ["<==>", "<-.->", "<-->", "<->", "-.->", "-.-", "-->", "---", "==>", "===", "--x", "--o"];
 
-const HEADER_RE = /^\s*(flowchart|graph)\s*(TD|TB|BT|LR|RL)?\s*$/i;
+// ヘッダ行。`graph TD;` `flowchart TD %% コメント` `flowchart-elk LR` まで許す
+// （ここを厳しくすると図が丸ごと編集不可になる。方向は2文字なので {2} で足りる）。
+const HEADER_RE = /^\s*(?:flowchart(?:-elk)?|graph)(?:\s+[A-Za-z]{2})?\s*;?\s*(?:%%.*)?$/i;
 const PASSTHROUGH_RE = /^\s*(classDef|class|style|linkStyle|click|direction|accTitle|accDescr|title)\b/i;
 const ID_RE = /^[A-Za-z0-9_\u0080-\uFFFF][A-Za-z0-9_.\-\u0080-\uFFFF]*/;
 
@@ -206,13 +208,19 @@ function parseEdgeOrNode(line, lineStart, lineEnd, model) {
     return null;
   }
 
+  /** 文の終わり（行末 or %% コメント）か。手前の `;` は読み飛ばす。 */
+  function atStatementEnd() {
+    skipWs();
+    if (line[s.pos] === ";") { s.pos++; skipWs(); }
+    return s.pos >= line.length || line.slice(s.pos).startsWith("%%");
+  }
+
   const first = parseRef();
   if (!first) return null;
   const arrow1 = parseArrow();
   if (!arrow1) {
-    // ノード単独文（行末、または %% コメントのみ許容）
-    skipWs();
-    if (s.pos < line.length && !line.slice(s.pos).startsWith("%%")) return null;
+    // ノード単独文（行末、`;`、または %% コメントのみ許容）
+    if (!atStatementEnd()) return null;
     return { type: "node", start: lineStart, end: lineEnd, indent, ref: first };
   }
   // 辺チェイン: ref (arrow ref)*
@@ -222,8 +230,7 @@ function parseEdgeOrNode(line, lineStart, lineEnd, model) {
     const r = parseRef();
     if (!r) return null;
     refs.push(r);
-    skipWs();
-    if (s.pos >= line.length || line.slice(s.pos).startsWith("%%")) break;
+    if (atStatementEnd()) break;
     const a = parseArrow();
     if (!a) return null;
     arrows.push(a);

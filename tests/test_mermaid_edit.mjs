@@ -172,4 +172,68 @@ t("辺ラベルを空にすると削除される", () => {
     "flowchart TD\n  A --> B\n");
 });
 
+// ---- 実際に出回る書き方（ここが厳しすぎると図が丸ごと編集不可になる） ----------
+
+const REAL_WORLD = {
+  "基本の flowchart": "flowchart TD\n    A[開始] --> B{条件?}\n    B -->|Yes| C[処理]\n    B -->|No| D[終了]\n",
+  "graph + セミコロン": "graph TD;\n    A-->B;\n    B-->C;\n",
+  "ヘッダ行に末尾コメント": "flowchart TD %% メインフロー\n    A --> B\n",
+  "ヘッダ行にセミコロン": "flowchart TD;\n    A --> B\n",
+  "flowchart-elk": "flowchart-elk LR\n    A --> B\n",
+  "mermaid frontmatter": "---\ntitle: 図\n---\nflowchart TD\n    A --> B\n",
+  "init ディレクティブ": "%%{init: {'theme':'dark'}}%%\nflowchart TD\n    A --> B\n",
+  "mdflow の id コメント": "%% id: flow1\nflowchart TD\n    A[a] --> B[b]\n",
+  "direction 行": "flowchart\n    direction LR\n    A --> B\n",
+  "末尾に改行なし": "flowchart TD\n    A --> B",
+};
+
+for (const [name, src] of Object.entries(REAL_WORLD)) {
+  t(`編集できる: ${name}`, () => {
+    const r = M.diagramEditability(src);
+    assert.equal(r.ok, true, r.reason);
+    const m = parse(src);
+    assert.ok(m.edges.length >= 1, `辺が拾えていない: ${JSON.stringify([...m.nodes.keys()])}`);
+  });
+}
+
+t("セミコロン付きの辺もラベル編集できる", () => {
+  const src = "graph TD;\n    A-->B;\n";
+  const out = apply(src, M.editEdgeLabel(parse(src), src, 0, "yes"));
+  assert.equal(out, "graph TD;\n    A-->|yes|B;\n");
+});
+
+t("セミコロン付きのノードもラベル編集できる", () => {
+  const src = "graph TD;\n    A[a];\n";
+  const out = apply(src, M.editNodeLabel(parse(src), src, "A", "b"));
+  assert.equal(out, "graph TD;\n    A[b];\n");
+});
+
+// 編集の結果が「また編集できる図」であること。壊れた出力を作っていないかの安全網。
+const OPS = {
+  "ノードのラベル変更": (m, src) => M.editNodeLabel(m, src, [...m.nodes.keys()][0], "新ラベル"),
+  "辺のラベル変更": (m, src) => M.editEdgeLabel(m, src, 0, "ラベル"),
+  "ノード追加": (m, src) => M.addNode(m, src, {}).edits,
+  "辺追加": (m, src) => {
+    const ids = [...m.nodes.keys()];
+    return M.addEdge(m, src, ids[0], ids[ids.length - 1], "x").edits;
+  },
+  "辺の反転": (m, src) => M.reverseEdge(m, src, 0),
+  "線種の変更": (m, src) => M.setEdgeArrow(m, src, 0, "-.->"),
+  "辺の削除": (m, src) => M.deleteEdge(m, src, 0),
+  "ノードの削除": (m, src) => M.deleteNode(m, src, [...m.nodes.keys()][0]),
+};
+
+for (const [name, src] of Object.entries(REAL_WORLD)) {
+  for (const [op, run] of Object.entries(OPS)) {
+    t(`${op}のあとも編集できる図のまま: ${name}`, () => {
+      const m = parse(src);
+      const edits = run(m, src);
+      assertNoOverlap(edits);
+      const out = apply(src, edits);
+      const again = M.diagramEditability(out);
+      assert.equal(again.ok, true, `${again.reason}\n--- 出力 ---\n${out}`);
+    });
+  }
+}
+
 console.log(`\n${pass} passed`);
