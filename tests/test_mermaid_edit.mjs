@@ -236,4 +236,82 @@ for (const [name, src] of Object.entries(REAL_WORLD)) {
   }
 }
 
+// ---- SVG id とモデルの対応付け（resolveNodeId / resolveEdgeIndex） -------------
+// mermaid のバージョンで id 形式が揺れる。v11 は図IDを前置し辺は _ 区切り
+// （pixie-mermaid-0-flowchart-A-0 / pixie-mermaid-0-L_A_B_0）。旧形式は
+// flowchart-A-0 / L-A-B-0 + LS-/LE- クラス。両対応であることを固定する。
+
+const NODESET = (...ids) => new Map(ids.map((id) => [id, { id }]));
+
+t("resolveNodeId: 旧形式", () => {
+  assert.equal(M.resolveNodeId("flowchart-A-0", NODESET("A")), "A");
+});
+
+t("resolveNodeId: v11 の図ID前置形式", () => {
+  assert.equal(M.resolveNodeId("pixie-mermaid-0-flowchart-A-0", NODESET("A")), "A");
+});
+
+t("resolveNodeId: ハイフン入りノードID", () => {
+  assert.equal(M.resolveNodeId("pixie-mermaid-12-flowchart-my-node-3", NODESET("my-node")), "my-node");
+});
+
+t("resolveNodeId: A-1 と A が共存しても長い方を優先", () => {
+  assert.equal(M.resolveNodeId("flowchart-A-1-0", NODESET("A", "A-1")), "A-1");
+  assert.equal(M.resolveNodeId("flowchart-A-1", NODESET("A", "A-1")), "A");
+});
+
+t("resolveNodeId: ノードID自体が flowchart- を含む", () => {
+  assert.equal(
+    M.resolveNodeId("pixie-mermaid-0-flowchart-flowchart-A-0", NODESET("flowchart-A")),
+    "flowchart-A");
+});
+
+t("resolveNodeId: 日本語ノードID", () => {
+  assert.equal(M.resolveNodeId("pixie-mermaid-0-flowchart-開始-0", NODESET("開始")), "開始");
+});
+
+t("resolveNodeId: 対応しない id は null", () => {
+  assert.equal(M.resolveNodeId("", NODESET("A")), null);
+  assert.equal(M.resolveNodeId("pixie-mermaid-0", NODESET("A")), null);
+  assert.equal(M.resolveNodeId("flowchart-X-0", NODESET("A")), null);
+});
+
+const EDGE_MODEL = (src) => parse(src);
+const pathOf = (id, cls = "") => ({ id, classList: cls ? cls.split(" ") : [] });
+
+t("resolveEdgeIndex: v11 の L_A_B_0 形式", () => {
+  const m = EDGE_MODEL("flowchart TD\n  A --> B\n  B --> C\n");
+  assert.equal(M.resolveEdgeIndex(pathOf("pixie-mermaid-0-L_A_B_0"), m), 0);
+  assert.equal(M.resolveEdgeIndex(pathOf("pixie-mermaid-0-L_B_C_0"), m), 1);
+});
+
+t("resolveEdgeIndex: 旧形式 L-A-B-0", () => {
+  const m = EDGE_MODEL("flowchart TD\n  A --> B\n");
+  assert.equal(M.resolveEdgeIndex(pathOf("L-A-B-0"), m), 0);
+});
+
+t("resolveEdgeIndex: LS-/LE- クラスが最優先", () => {
+  const m = EDGE_MODEL("flowchart TD\n  A --> B\n  B --> C\n");
+  assert.equal(M.resolveEdgeIndex(pathOf("junk", "flowchart-link LS-B LE-C"), m), 1);
+});
+
+t("resolveEdgeIndex: _ 入りノードIDでも実在する辺で解決", () => {
+  // L_A_B_C_0 は A/B_C とも A_B/C とも読める。モデルに実在する辺（A_B --> C）を選ぶ
+  const m = EDGE_MODEL("flowchart TD\n  A_B --> C\n  A[a]\n  B_C[b]\n");
+  assert.equal(M.resolveEdgeIndex(pathOf("pixie-mermaid-0-L_A_B_C_0"), m), 0);
+});
+
+t("resolveEdgeIndex: 曖昧（両方実在）なら誤選択せず null", () => {
+  // A --> B_C と A_B --> C が両方あると DOM id はどちらも L_A_B_C_n。
+  // 取り違えて削除する事故より選択不能のほうが安全（Fable レビュー指摘）。
+  const m = EDGE_MODEL("flowchart TD\n  A --> B_C\n  A_B --> C\n");
+  assert.equal(M.resolveEdgeIndex(pathOf("pixie-mermaid-0-L_A_B_C_0"), m), null);
+});
+
+t("resolveEdgeIndex: 平行辺は pairIdx で選ぶ", () => {
+  const m = EDGE_MODEL("flowchart TD\n  A -->|x| B\n  A -->|y| B\n");
+  assert.equal(M.resolveEdgeIndex(pathOf("pixie-mermaid-0-L_A_B_0"), m), 0);
+  assert.equal(M.resolveEdgeIndex(pathOf("pixie-mermaid-0-L_A_B_1"), m), 1);
+});
+
 console.log(`\n${pass} passed`);

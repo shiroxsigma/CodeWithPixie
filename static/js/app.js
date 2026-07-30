@@ -1307,7 +1307,14 @@ function openDiagramEditor(box, meta) {
 
 function onDiagramRendered(box, meta) {
   const ed = state.diagramEditing;
-  if (!ed || ed.src !== meta.src || ed.index !== meta.index) return;
+  if (!ed || ed.index !== meta.index) return;
+  if (ed.src !== meta.src) {
+    // undo / エディタでの手編集で内容が変わった。同じ位置の図なら編集モードを
+    // 維持して新しい内容に追従する（選択は意味を失うので捨てる）。図が
+    // 編集不可になっていれば enterEditMode が理由を出して畳む。
+    ed.src = meta.src;
+    ed.restore = null;
+  }
   // 再描画で捨てられた前の box の後始末（document のキー listener を外す）
   ed.dispose?.();
   ed.dispose = mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), ed.restore);
@@ -1329,13 +1336,17 @@ function mermaidEditApi() {
         return false;
       }
       const newSrc = mermaidEdit.applyEditsToText(src, edits);
+      // toRaw はブロック内容内の相対オフセット。文書位置は block.start を足して初めて決まる
+      // （足し忘れると編集が文書先頭付近＝無関係な本文に着弾する）。
       const ranges = edits.map((e) => ({
         range: state.monaco.Range.fromPositions(
-          model.getPositionAt(block.toRaw(e.start)),
-          model.getPositionAt(block.toRaw(e.end))),
+          model.getPositionAt(block.start + block.toRaw(e.start)),
+          model.getPositionAt(block.start + block.toRaw(e.end))),
         text: e.text,
       }));
+      editor.pushUndoStop();  // 直前までの編集と合体させない（1操作 = 1 undo）
       editor.executeEdits("mermaid-edit", ranges);
+      editor.pushUndoStop();
       // dispose は今の box のもの。再描画時に onDiagramRendered が呼んで畳む。
       state.diagramEditing = { src: newSrc, index: ed?.index ?? 0, restore, dispose: ed?.dispose ?? null };
       // エディタへフォーカスは移さない。移すと図の上での Esc / Delete が

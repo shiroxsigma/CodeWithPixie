@@ -501,15 +501,15 @@ button:active { transform: translateY(1px); }
 /* --- mermaid: 直接編集モード（mermaid-edit.js の enterEditMode） ---------------
    プレビュー上のノード/矢印クリック → ソースの最小編集 → executeEdits で反映。 */
 .mermaid-editing { outline: 1px dashed var(--accent); outline-offset: 2px; }
-.mermaid-editing g[id^="flowchart-"],
+.mermaid-editing g[id*="flowchart-"],
 .mermaid-editing path.flowchart-link,
 .mermaid-editing .edgeLabel { cursor: pointer; }
 /* 選択ハイライト（mermaid の SVG 内部には触れず stroke だけ CSS で上書き） */
-.mermaid-editing g[id^="flowchart-"].selected > rect,
-.mermaid-editing g[id^="flowchart-"].selected > polygon,
-.mermaid-editing g[id^="flowchart-"].selected > circle,
-.mermaid-editing g[id^="flowchart-"].selected > ellipse,
-.mermaid-editing g[id^="flowchart-"].selected > path {
+.mermaid-editing g[id*="flowchart-"].selected > rect,
+.mermaid-editing g[id*="flowchart-"].selected > polygon,
+.mermaid-editing g[id*="flowchart-"].selected > circle,
+.mermaid-editing g[id*="flowchart-"].selected > ellipse,
+.mermaid-editing g[id*="flowchart-"].selected > path {
   stroke: #ffb454 !important; stroke-width: 3px;
 }
 path.flowchart-link.selected { stroke: #ffb454 !important; stroke-width: 3px; }

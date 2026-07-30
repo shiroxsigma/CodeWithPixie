@@ -512,15 +512,25 @@ export function applyEditsToText(text, edits) {
 }
 
 // ---- SVG とモデルの対応付け ----------------------------------------------------
-// mermaid v11 はノードを <g id="flowchart-<nodeId>-<n>">、辺を <path class="flowchart-link">
-// で描く（辺の id は L-<from>-<to>-<n> 系、class に LS-/LE- が入る場合あり）。
-// nodeId に - や数字が含まれうるので、既知のノードID集合で照合して曖昧さを潰す。
+// mermaid はノードを <g id="[<図ID>-]flowchart-<nodeId>-<n>">、辺を
+// <path class="flowchart-link"> で描く。id の形式はバージョンで揺れる:
+//   - ノード: flowchart-A-0（旧） / pixie-mermaid-3-flowchart-A-0（v11 は図IDを前置）
+//   - 辺: L-A-B-0 + LS-/LE- クラス（旧） / <図ID>-L_A_B_0（v11 は _ 区切り・クラス無し）
+// どちらの形式も受ける。nodeId に - や _ や数字が含まれうるので、既知のノードID集合で
+// 照合して曖昧さを潰す。セレクタは id*='flowchart-'（前方一致だと前置形式を取りこぼす）。
 
-/** DOM ノードID（flowchart-A-3 形式）からモデルの nodeId を引く。 */
+/** DOM ノードID（[図ID-]flowchart-A-3 形式）からモデルの nodeId を引く。 */
 export function resolveNodeId(domId, nodes) {
-  const m = /^flowchart-(.+)-(\d+)$/.exec(domId || "");
-  if (!m) return null;
-  let cand = m[1];
+  // 最初の "flowchart-" 以降が本体（前置の図IDは捨てる）。ノードID自体に
+  // "flowchart-" が含まれる場合も、残り全体を候補にして下の照合ループで解決する。
+  const at = (domId || "").indexOf("flowchart-");
+  if (at < 0) return null;
+  let cand = domId.slice(at + "flowchart-".length);
+  {
+    const m = /^(.+)-(\d+)$/.exec(cand);
+    if (!m) return null;
+    cand = m[1];
+  }
   for (;;) {
     if (nodes.has(cand)) return cand;
     const m2 = /^(.+)-\d+$/.exec(cand);
@@ -538,20 +548,26 @@ export function resolveEdgeIndex(pathEl, model) {
     if (c.startsWith("LE-")) to = c.slice(3);
   }
   if (!(from && to && ids.has(from) && ids.has(to))) {
-    // id 例: L-A-B-0 / E-A-B-2（先頭に diagram 接頭辞が付く版もある）
-    const m = /[LE]-(.+)-(\d+)$/.exec(pathEl.id || "");
+    // id 例: L-A-B-0（旧）/ L_A_B_0（v11）。どちらも diagram 接頭辞が付く版がある。
+    const m = /[LE]-(.+)-(\d+)$/.exec(pathEl.id || "")
+      || /[LE]_(.+)_(\d+)$/.exec(pathEl.id || "");
     if (!m) return null;
     pairIdx = parseInt(m[2], 10);
     const mid = m[1];
-    let found = null;
-    for (let i = 1; i < mid.length && !found; i++) {
+    // ノードIDに - や _ が含まれると分割が一意に決まらない（A_B_C は A/B_C とも
+    // A_B/C とも読める）。全分割を列挙し「モデルに実在する辺」を持つものだけ残す。
+    // それでも複数残ったら null（誤った辺を選択・削除するより選択不能のほうが安全）。
+    const splits = [];
+    for (let i = 1; i < mid.length; i++) {
       const sep = mid[i - 1];
       if (sep !== "-" && sep !== "_") continue;
       const a = mid.slice(0, i - 1), b = mid.slice(i);
-      if (a && b && ids.has(a) && ids.has(b)) found = [a, b];
+      if (a && b && ids.has(a) && ids.has(b)) splits.push([a, b]);
     }
-    if (!found) return null;
-    [from, to] = found;
+    const real = splits.filter(([a, b]) => model.edges.some((e) => e.from === a && e.to === b));
+    const pick = real.length ? real : splits;
+    if (pick.length !== 1) return null;
+    [from, to] = pick[0];
   }
   const matches = [];
   model.edges.forEach((e, i) => { if (e.from === from && e.to === to) matches.push(i); });
@@ -690,7 +706,7 @@ export function enterEditMode(box, meta, api, restore = null) {
     box.querySelectorAll(".selected").forEach((el) => el.classList.remove("selected"));
     state.selected = null;
   };
-  const nodeGById = (id) => [...box.querySelectorAll("g[id^='flowchart-']")]
+  const nodeGById = (id) => [...box.querySelectorAll("g[id*='flowchart-']")]
     .find((g) => resolveNodeId(g.id, model.nodes) === id) || null;
   const edgePathByIdx = (idx) => [...box.querySelectorAll("path.flowchart-link")]
     .find((p) => resolveEdgeIndex(p, model) === idx) || null;
@@ -877,7 +893,7 @@ export function enterEditMode(box, meta, api, restore = null) {
 
   const onClick = (e) => {
     if (e.target.closest(".mermaid-editbar, .mermaid-inline-input")) return;
-    const g = e.target.closest("g[id^='flowchart-']");
+    const g = e.target.closest("g[id*='flowchart-']");
     if (g) {
       const id = resolveNodeId(g.id, model.nodes);
       if (!id) return;
@@ -915,7 +931,7 @@ export function enterEditMode(box, meta, api, restore = null) {
   };
   const onDblClick = (e) => {
     if (e.target.closest(".mermaid-editbar, .mermaid-inline-input")) return;
-    const g = e.target.closest("g[id^='flowchart-']");
+    const g = e.target.closest("g[id*='flowchart-']");
     if (g) {
       e.preventDefault();
       const id = resolveNodeId(g.id, model.nodes);
