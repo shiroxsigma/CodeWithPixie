@@ -1139,9 +1139,12 @@ mode.register_reset_hook(lambda: _manager.clear() if _manager is not None else N
 
 
 # --- 静的フロント -------------------------------------------------------------
-# app.js / style.css の mtime をクエリに埋め込んで返す（ブラウザの古い JS キャッシュで
-# 機能追加が反映されない事故を防ぐ）。ファイルを更新すると mtime が変わり URL が変わるので、
-# ブラウザは必ず新しい版を再取得するようになる。
+# index.html が直接参照する app.js / style.css には mtime をクエリに埋め込む。
+# ただしこれだけでは足りない —— markdown.js / mermaid-*.js は app.js から
+# `import "./markdown.js"` で読まれる ES モジュールなので、index.html を書き換えても
+# URL にクエリが付かず、更新しても古い版が使われ続ける（実際に「バーにボタンが増えない」
+# 事故が起きた: app.js は最新なのに markdown.js だけ数世代前、という状態になる）。
+# 本命の対策は下の NoCacheStatic（毎回必ず問い合わせる）。ここは補助。
 _BUILT_ASSETS = ("js/app.js", "css/style.css")
 
 
@@ -1155,10 +1158,27 @@ def index():
             continue
         target = f"/static/{rel}"
         html = html.replace(f'"{target}"', f'"{target}?v={mtime}"')
-    return HTMLResponse(html)
+    # index.html 自体も握られると ?v= の書き換えごと古いままになる
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+class NoCacheStatic(StaticFiles):
+    """静的ファイルに `Cache-Control: no-cache` を付ける。
+
+    サーバが Cache-Control を返さないと、ブラウザは Last-Modified からの経過時間を
+    元にした「推測の鮮度」でキャッシュを再利用し、サーバへ問い合わせすらしない。
+    ローカルの開発ツールとしてはこれが一番厄介な事故になるので、常に問い合わせさせる。
+    no-store ではないので、変わっていなければ ETag で 304（本体は流れない）。
+    localhost の往復なので、monaco のような大量のファイルでも実測の負担は無視できる。
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", NoCacheStatic(directory=STATIC), name="static")
 
 
 def run() -> None:
