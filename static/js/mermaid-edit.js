@@ -26,12 +26,24 @@
 
 // ---- ノード形状（開き/閉じの対。長いものを先に試す） --------------------------
 const SHAPES = [
-  ["((", "))"], ["{{", "}}"], ["[[", "]]"], ["[(", ")]"], ["[/", "/]"], ["[\\", "\\]"],
-  [">", "]"], ["[", "]"], ["(", ")"], ["{", "}"],
+  ["((", "))"], ["{{", "}}"], ["[[", "]]"], ["([", "])"], ["[(", ")]"], ["[/", "/]"],
+  ["[\\", "\\]"], [">", "]"], ["[", "]"], ["(", ")"], ["{", "}"],
 ];
 
 // ---- 矢印記法（長いものを先に試す） -------------------------------------------
 const ARROWS = ["<==>", "<-.->", "<-->", "<->", "-.->", "-.-", "-->", "---", "==>", "===", "--x", "--o"];
+
+// 中置ラベル記法 `A-- ラベル -->B`（`A-. ラベル .->B` / `A== ラベル ==>B` も同じ形）。
+// |ラベル| 形式と意味は同じで、実文書ではこちらのほうがよく使われる。開き記号ごとに
+// 許す閉じ記号は決まっていて、族をまたぐ組み合わせ（`-- x ==>`）は mermaid でも無効。
+// kind は「同じ意味の素の矢印」＝ラベルを外したときに残す記法。
+const MID_FORMS = [
+  { open: "-.", closers: [[".->", "-.->"], [".-", "-.-"]] },
+  { open: "--", closers: [["-->", "-->"], ["---", "---"], ["--x", "--x"], ["--o", "--o"]] },
+  { open: "==", closers: [["==>", "==>"], ["===", "==="], ["==x", "==x"], ["==o", "==o"]] },
+];
+// 中置ラベルの中に現れると、そこで矢印が閉じたと読まれてしまう記号（族を問わない）。
+const MID_CLOSERS = MID_FORMS.flatMap((f) => f.closers.map(([c]) => c));
 
 // ヘッダ行。`graph TD;` `flowchart TD %% コメント` `flowchart-elk LR` まで許す
 // （ここを厳しくすると図が丸ごと編集不可になる。方向は2文字なので {2} で足りる）。
@@ -99,10 +111,20 @@ export function parseFlowchart(src) {
   return model;
 }
 
+// 判定はソースだけで決まるので覚えておく。プレビューは打鍵のたびに描き直され、
+// 図1枚ごとに ✏️ ボタンの出し分けでこれを呼ぶ（＝毎回の全文パースになる）。
+const editabilityMemo = new Map();
+const EDITABILITY_MEMO_MAX = 100;
+
 /** 図が直接編集の対象か。markdown.js が ✏️ ボタンの出し分け（と理由の表示）に使う。 */
 export function diagramEditability(src) {
+  const hit = editabilityMemo.get(src);
+  if (hit) return hit;
   const model = parseFlowchart(src);
-  return { ok: model.supported, reason: model.reason };
+  const r = { ok: model.supported, reason: model.reason };
+  if (editabilityMemo.size >= EDITABILITY_MEMO_MAX) editabilityMemo.clear();
+  editabilityMemo.set(src, r);
+  return r;
 }
 
 /** パススルー行。class / style / linkStyle はノード・辺への参照部分も控えておく。 */
@@ -142,7 +164,13 @@ function parseEdgeOrNode(line, lineStart, lineEnd, model) {
     skipWs();
     const m = ID_RE.exec(line.slice(s.pos));
     if (!m) return null;
-    let id = m[0].replace(/[-.]+$/, ""); // 末尾の - や . は矢印の一部混入なので削る
+    // ノードIDには - や . を含めてよいので、ID_RE は矢印の頭まで一緒に飲み込む
+    // （`C---D` が丸ごと1つのIDになる）。矢印の書き出しで切り、末尾に残った
+    // - や . も削る。`my-node` のような普通のIDは切られない。
+    let id = m[0];
+    const cut = id.search(/--|-\.|\.-/);
+    if (cut > 0) id = id.slice(0, cut);
+    id = id.replace(/[-.]+$/, "");
     if (!id) return null;
     const idStart = abs();
     s.pos += id.length;
@@ -169,13 +197,15 @@ function parseEdgeOrNode(line, lineStart, lineEnd, model) {
       }
       const defEnd = labelEnd + (quoted ? 1 : 0) + close.length;
       let rawEnd = defEnd;
-      // :::className 修飾はそのまま保持（ラベル編集の span には影響しない）
+      // :::className 修飾はそのまま保持（ラベル編集の span には影響しない）。
+      // 形状の変更は定義を丸ごと組み直すので、そのとき書き戻せるよう別に控える。
       const cls = /^:::[A-Za-z0-9_-]+/.exec(line.slice(defEnd));
       if (cls) rawEnd = defEnd + cls[0].length;
       ref.def = {
         label: line.slice(contentStart, labelEnd),
         quoted,
         shape: [open, close],
+        cls: cls ? cls[0] : "",
         labelSpan: { start: lineStart + contentStart, end: lineStart + labelEnd },
         span: { start: idStart, end: lineStart + rawEnd },
         raw: line.slice(idStart - lineStart, rawEnd),
@@ -193,7 +223,10 @@ function parseEdgeOrNode(line, lineStart, lineEnd, model) {
       if (!line.startsWith(a, s.pos)) continue;
       const aStart = abs();
       s.pos += a.length;
-      const arrow = { text: a, span: { start: aStart, end: abs() }, label: null, labelSpan: null, pipeSpan: null };
+      const arrow = {
+        text: a, mid: null, span: { start: aStart, end: abs() },
+        label: null, labelSpan: null, pipeSpan: null,
+      };
       skipWs();
       if (line[s.pos] === "|") {
         const closeIdx = line.indexOf("|", s.pos + 1);
@@ -204,6 +237,44 @@ function parseEdgeOrNode(line, lineStart, lineEnd, model) {
         s.pos = closeIdx + 1;
       }
       return arrow;
+    }
+    return parseMidArrow();
+  }
+
+  /**
+   * 中置ラベル記法。素の矢印（ARROWS）が1つも当たらなかったときだけ試す
+   * ——「長いものから素の矢印を優先」は mermaid 自身の字句解析と同じ順序なので、
+   * `A--x---B` のような紛らわしい書き方でも mermaid と同じ読み方になる。
+   * 閉じ記号は同じ族の中から、左端で当たったもの（同位置なら長いもの）を採る。
+   */
+  function parseMidArrow() {
+    for (const form of MID_FORMS) {
+      if (!line.startsWith(form.open, s.pos)) continue;
+      const aStart = abs();
+      const textStart = s.pos + form.open.length;
+      let at = -1, close = "", kind = "";
+      for (let i = textStart; i < line.length && at < 0; i++) {
+        for (const [c, k] of form.closers) {
+          if (line.startsWith(c, i)) { at = i; close = c; kind = k; break; }
+        }
+      }
+      if (at < 0) continue;              // 閉じが無い（`A -- B` 等）→ 辺ではない
+      const rawLabel = line.slice(textStart, at);
+      if (!rawLabel.trim()) continue;    // `-- -->` は成立させない（素の矢印の書き損じ）
+      s.pos = at + close.length;
+      const lead = rawLabel.length - rawLabel.replace(/^\s+/, "").length;
+      const label = rawLabel.trim();
+      const labelStart = lineStart + textStart + lead;
+      return {
+        text: kind,
+        // mid があるものは「中置ラベル形式」。raw をそのまま書き戻せば見た目が保たれる。
+        mid: { open: form.open, close },
+        raw: line.slice(aStart - lineStart, s.pos),
+        span: { start: aStart, end: abs() },
+        label,
+        labelSpan: { start: labelStart, end: labelStart + label.length },
+        pipeSpan: null,
+      };
     }
     return null;
   }
@@ -265,7 +336,25 @@ export function decodeLabel(label) {
   return (label || "").replace(/#quot;/g, '"').replace(/#124;/g, "|");
 }
 
+// mermaid のラベルの改行は `<br/>`（`<br>` / `<br />` も同じ）。入力欄では本物の
+// 改行として見せ、ソースへ戻すときに畳む —— これが無いと 3 行のラベルを直すのに
+// `<br/>` を手打ちすることになり、事実上「編集できない」状態になる。
+const BR_RE = /<br\s*\/?>/gi;
+
+/** ソースのラベル → 入力欄に出すテキスト（`<br/>` を改行に開く）。 */
+export function labelToInput(label) {
+  return decodeLabel(label).replace(BR_RE, "\n");
+}
+
+/** 入力欄のテキスト → ソースのラベル（改行を `<br/>` に畳む）。 */
+export function inputToLabel(text) {
+  return String(text ?? "").replace(/\r\n?/g, "\n").split("\n").join("<br/>");
+}
+
 function serArrow(arrow) {
+  // 中置ラベル記法は元の字面をそのまま返す（`A-- No -->B` を |No| 形式に
+  // 化けさせない。辺の削除・反転はこの関数で行を組み直すため）。
+  if (arrow.mid) return arrow.raw;
   return arrow.text + (arrow.label != null ? `|${arrow.label}|` : "");
 }
 
@@ -305,16 +394,55 @@ export function editNodeLabel(model, src, nodeId, newLabel) {
   return [{ start: r.span.start, end: r.span.end, text: `${r.id}[${serLabel(newLabel, "]")}]` }];
 }
 
+/**
+ * ノードの形状を変える（[] → {} など）。ラベル・:::クラス・他の行からの参照はそのまま。
+ * 定義を持たない（裸のID参照だけの）ノードは、ID をラベルにして定義へ昇格させる
+ * —— mermaid は定義の無いノードのラベルに ID をそのまま使うので、こうすると見た目が変わらない。
+ */
+export function setNodeShape(model, src, nodeId, open, close) {
+  const node = model.nodes.get(nodeId);
+  if (!node) return [];
+  if (!node.def) {
+    const r = node.firstRef;
+    return [{
+      start: r.span.start, end: r.span.end,
+      text: `${r.id}${open}${serLabel(r.id, close)}${close}`,
+    }];
+  }
+  const d = node.def;
+  if (d.shape[0] === open && d.shape[1] === close) return [];
+  // ラベルはソース上の字面のまま持ち回る（#quot; 等のエスケープを二重にかけない）。
+  // 元が引用符付きならそのまま囲み直し、素のままなら新しい閉じ記号に対して
+  // 囲む必要があるかを serLabel に判定させる（`[/ /]` は / が閉じ記号の一部）。
+  const body = d.quoted ? `"${d.label}"` : serLabel(d.label, close);
+  return [{
+    start: d.span.start, end: d.span.end,
+    text: `${nodeId}${open}${body}${close}${d.cls || ""}`,
+  }];
+}
+
 /** 辺ラベルの設定（空文字はラベル削除）。 */
 export function editEdgeLabel(model, src, edgeIdx, newLabel) {
   const edge = model.edges[edgeIdx];
   if (!edge) return [];
   const arrow = edge.arrow;
+  const esc = newLabel.replace(/\|/g, "#124;");
+  if (arrow.mid) {
+    // 中置ラベルを空にするときは矢印ごと素の記法へ戻す（`-- -->` は構文エラー）。
+    if (!newLabel.trim()) {
+      return [{ start: arrow.span.start, end: arrow.span.end, text: arrow.text }];
+    }
+    // 中置のまま書けない文字（| と閉じ記号）が入るときだけ |ラベル| 形式へ倒す。
+    const breaks = newLabel.includes("|")
+      || MID_CLOSERS.some((c) => newLabel.includes(c))
+      || newLabel !== newLabel.trim();
+    if (!breaks) return [{ start: arrow.labelSpan.start, end: arrow.labelSpan.end, text: newLabel }];
+    return [{ start: arrow.span.start, end: arrow.span.end, text: `${arrow.text}|${esc}|` }];
+  }
   if (!newLabel.trim()) {
     if (arrow.pipeSpan) return [{ start: arrow.pipeSpan.start, end: arrow.pipeSpan.end, text: "" }];
     return [];
   }
-  const esc = newLabel.replace(/\|/g, "#124;");
   if (arrow.labelSpan) return [{ start: arrow.labelSpan.start, end: arrow.labelSpan.end, text: esc }];
   return [{ start: arrow.span.end, end: arrow.span.end, text: `|${esc}|` }];
 }
@@ -423,7 +551,14 @@ export function deleteEdge(model, src, edgeIdx) {
 export function setEdgeArrow(model, src, edgeIdx, arrowText) {
   const edge = model.edges[edgeIdx];
   if (!edge || edge.arrow.text === arrowText) return [];
-  return [{ start: edge.arrow.span.start, end: edge.arrow.span.end, text: arrowText }];
+  const a = edge.arrow;
+  // 中置ラベル記法（`A-- No -->B`）には <--> のような双向記法の対応形が無い。
+  // 記法を変えるときは |ラベル| 形式へ統一する（mermaid 上の意味は変わらない）。
+  if (a.mid) {
+    const lbl = a.label ? `|${a.label.replace(/\|/g, "#124;")}|` : "";
+    return [{ start: a.span.start, end: a.span.end, text: arrowText + lbl }];
+  }
+  return [{ start: a.span.start, end: a.span.end, text: arrowText }];
 }
 
 /** 矢印の向きを反転する（始点と終点を入れ替える。ラベル・記法は保つ）。 */
@@ -500,6 +635,14 @@ export function deleteNode(model, src, nodeId) {
   edits.push(...nodeRefEdits(model, src, nodeId));
   edits.push(...linkStyleEdits(model, src, removedEdges));
   return normalizeEdits(edits);
+}
+
+/** pos を含む文の範囲。選択中の要素がソースのどの行かをエディタ側で示すのに使う。 */
+export function statementSpanAt(model, pos) {
+  for (const s of model.statements) {
+    if (s.start <= pos && pos <= s.end) return { start: s.start, end: s.end };
+  }
+  return null;
 }
 
 /** {start,end,text} 編集列をテキストに適用（検証・テスト・新ソース算出用）。 */
@@ -594,6 +737,25 @@ const ARROW_CHOICES = [
   ["<==>", "太線 ←→"],
 ];
 
+// ノード形状セレクタの選択肢（SHAPES の部分集合＋表示名）。ここに無い形状の
+// ノードを選んだときは setNodeShapeChoice が「そのまま見せる」項目を足す。
+const SHAPE_CHOICES = [
+  ["[", "]", "□ 長方形"],
+  ["(", ")", "▢ 角丸"],
+  ["([", "])", "⬭ スタジアム"],
+  ["[[", "]]", "▥ サブルーチン"],
+  ["[(", ")]", "⛁ 円柱"],
+  ["((", "))", "◯ 円"],
+  ["{", "}", "◇ ひし形（判断）"],
+  ["{{", "}}", "⬡ 六角形"],
+  ["[/", "/]", "▱ 平行四辺形"],
+  ["[\\", "\\]", "▰ 平行四辺形（逆）"],
+  [">", "]", "▷ 旗"],
+];
+// select の値は文字列しか持てないので、開き/閉じを 1 本の値に詰める。区切りは
+// 形状記号に現れない文字であること（"|" はどの形状にも使われていない）。
+const SHAPE_SEP = "|";
+
 // キー入力を横取りしてはいけない相手（エディタ本体・各種入力欄）。Delete が
 // Monaco の文字削除ではなくノード削除になってしまう事故を防ぐ。
 const TYPING_TARGET = 'input, textarea, select, [contenteditable="true"], .monaco-editor';
@@ -661,6 +823,17 @@ export function enterEditMode(box, meta, api, restore = null) {
   }
   arrowSel.addEventListener("change", onArrowKind);
   bar.appendChild(arrowSel);
+  const shapeSel = document.createElement("select");
+  shapeSel.className = "mermaid-node-shape";
+  shapeSel.title = "選択中のノードの形状を変える";
+  for (const [open, close, text] of SHAPE_CHOICES) {
+    const o = document.createElement("option");
+    o.value = open + SHAPE_SEP + close;
+    o.textContent = text;
+    shapeSel.appendChild(o);
+  }
+  shapeSel.addEventListener("change", onShapeKind);
+  bar.appendChild(shapeSel);
   const delBtn = mkBtn("🗑 削除", "選択中のノード/矢印を削除（Delete キーでも可。Ctrl+Z で戻せます）", onDelete);
   const hint = document.createElement("span");
   hint.className = "mermaid-edit-hint";
@@ -679,16 +852,52 @@ export function enterEditMode(box, meta, api, restore = null) {
     }
     arrowSel.value = text;
   };
+  /** 同上（形状）。定義の無いノードは mermaid の既定＝長方形として見せる。 */
+  const setNodeShapeChoice = (shape) => {
+    const [open, close] = shape || ["[", "]"];
+    const value = open + SHAPE_SEP + close;
+    if (![...shapeSel.options].some((o) => o.value === value)) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = `${open}…${close}`;
+      shapeSel.appendChild(o);
+    }
+    shapeSel.value = value;
+  };
+  /**
+   * 選択中の要素がソースのどこかをエディタ側へ知らせる（app.js が反転表示＋スクロール）。
+   * line = 直す対象の文全体、focus = その中の字面（ノード定義 / 矢印そのもの）。
+   * 図をクリックしたときに「Markdown のどこを触ればよいか」が一目で分かるようにする。
+   */
+  const revealSelection = () => {
+    if (!api.reveal) return;
+    const s = state.selected;
+    if (!s) { api.reveal(null); return; }
+    if (s.kind === "node") {
+      const n = model.nodes.get(s.id);
+      const focus = n?.def ? n.def.span : n?.firstRef?.span;
+      api.reveal(focus ? { line: statementSpanAt(model, focus.start), focus } : null);
+      return;
+    }
+    const e = model.edges[s.idx];
+    const stmt = e ? model.statements[e.stmtIdx] : null;
+    api.reveal(e
+      ? { line: stmt ? { start: stmt.start, end: stmt.end } : null, focus: e.arrow.span }
+      : null);
+  };
   const updateBar = () => {
     const s = state.selected;
     const isEdge = s?.kind === "edge";
+    const isNode = s?.kind === "node";
     labelBtn.disabled = !s;
     delBtn.disabled = !s;
     labelBtn.textContent = isEdge ? "✏️ ラベル(矢印)" : "✏️ ラベル";
     revBtn.classList.toggle("hidden", !isEdge);
     arrowSel.classList.toggle("hidden", !isEdge);
+    shapeSel.classList.toggle("hidden", !isNode);
     addEdgeBtn.classList.toggle("active", !!state.arrowPick);
     if (isEdge) setArrowKind(model.edges[s.idx]?.arrow.text || "-->");
+    if (isNode) setNodeShapeChoice(model.nodes.get(s.id)?.def?.shape);
     if (state.arrowPick) {
       setHint(state.arrowPick.from
         ? `➕ 矢印: 始点 ${state.arrowPick.from} → 終点のノードをクリック（Escで中止）`
@@ -698,6 +907,8 @@ export function enterEditMode(box, meta, api, restore = null) {
         ? (s.kind === "node" ? `選択中: ノード ${s.id}（Delete で削除）` : "選択中: 矢印（Delete で削除）")
         : "クリック: 選択 ／ ダブルクリック: ラベル編集 ／ Esc: 終了");
     }
+    // 選択が変わるところは必ずここを通るので、ソースの反転表示もまとめて追従させる。
+    revealSelection();
   };
   updateBar();
 
@@ -744,10 +955,13 @@ export function enterEditMode(box, meta, api, restore = null) {
     // app.js のフックが新しい box で enterEditMode を呼び直す。
   };
 
-  // --- 位置合わせ（box は overflow スクロールするので内容座標へ直す） ---
+  // --- 位置合わせ ---
+  // 横スクロールするのは box ではなく内側の .mermaid-canvas（バーを sticky にするため
+  // 分離した）。入力欄はその中に置くので、座標もこの枠の内容座標へ直す。
+  const canvas = box.querySelector(":scope > .mermaid-canvas") || box;
   const toBoxXY = (x, y) => {
-    const br = box.getBoundingClientRect();
-    return { x: x - br.left + box.scrollLeft, y: y - br.top + box.scrollTop };
+    const br = canvas.getBoundingClientRect();
+    return { x: x - br.left + canvas.scrollLeft, y: y - br.top + canvas.scrollTop };
   };
   const rectOf = (el) => {
     const r = el.getBoundingClientRect();
@@ -782,17 +996,25 @@ export function enterEditMode(box, meta, api, restore = null) {
   };
 
   // --- インライン入力（ノードラベルも矢印ラベルも同じ見た目・同じ操作） ---
+  // textarea なのは複数行ラベル（ソース上の `<br/>`）を改行のまま見せて直せるようにするため。
+  // Enter=確定 / Shift+Enter=改行 —— 1行ラベルでの操作感（Enter で確定）を変えない。
   const openInlineInput = ({ left, top, width, value, placeholder }, onCommit) => {
     box.querySelectorAll(".mermaid-inline-input").forEach((el) => el.remove());
-    const input = document.createElement("input");
+    const input = document.createElement("textarea");
     input.className = "mermaid-inline-input";
-    input.type = "text";
-    input.style.left = `${Math.max(0, left)}px`;
-    input.style.top = `${Math.max(0, top)}px`;
-    input.style.width = `${Math.max(140, width)}px`;
+    input.rows = 1;
     input.value = value || "";
     if (placeholder) input.placeholder = placeholder;
-    box.appendChild(input);
+    input.style.left = `${Math.max(0, left)}px`;
+    input.style.top = `${Math.max(0, top)}px`;
+    input.style.width = `${Math.max(160, width)}px`;
+    canvas.appendChild(input);
+    // 行数に合わせて高さを追従（スクロールバーを出さずに全行見せる）
+    const fit = () => {
+      input.style.height = "auto";
+      input.style.height = `${input.scrollHeight}px`;
+    };
+    fit();
     input.focus();
     input.select();
     let closed = false;
@@ -806,26 +1028,30 @@ export function enterEditMode(box, meta, api, restore = null) {
     // 入力中のキーは編集モードのショートカット（Esc/Delete）へ渡さない
     input.addEventListener("keydown", (e) => {
       e.stopPropagation();
-      if (e.key === "Enter") finish(true);
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); finish(true); }
       else if (e.key === "Escape") finish(false);
     });
+    input.addEventListener("input", fit);
     input.addEventListener("blur", () => finish(true));
   };
 
   const openNodeEditor = (g, id) => {
-    const cur = decodeLabel(model.nodes.get(id)?.def?.label ?? "");
+    const cur = labelToInput(model.nodes.get(id)?.def?.label ?? "");
     const r = rectOf(g);
-    openInlineInput({ left: r.left, top: r.top, width: r.width + 24, value: cur }, (v) => {
-      if (v !== cur) commit(editNodeLabel(model, meta.src, id, v));
+    openInlineInput({
+      left: r.left, top: r.top, width: r.width + 24, value: cur,
+      placeholder: "ノードラベル（Shift+Enter で改行）",
+    }, (v) => {
+      if (v !== cur) commit(editNodeLabel(model, meta.src, id, inputToLabel(v)));
     });
   };
 
   const openEdgeLabelEditor = (idx, pathEl) => {
-    const cur = decodeLabel(model.edges[idx]?.arrow?.label || "");
+    const cur = labelToInput(model.edges[idx]?.arrow?.label || "");
     const at = anchorAt(pathEl ? pathMid(pathEl) : null);
     openInlineInput(
-      { ...at, value: cur, placeholder: "矢印ラベル（Enterで確定・空で削除）" },
-      (v) => { if (v !== cur) commit(editEdgeLabel(model, meta.src, idx, v)); });
+      { ...at, value: cur, placeholder: "矢印ラベル（Shift+Enter で改行・空で削除）" },
+      (v) => { if (v !== cur) commit(editEdgeLabel(model, meta.src, idx, inputToLabel(v))); });
   };
 
   // --- ボタンハンドラ ---
@@ -861,6 +1087,12 @@ export function enterEditMode(box, meta, api, restore = null) {
     const s = state.selected;
     if (s?.kind !== "edge") return;
     commit(setEdgeArrow(model, meta.src, s.idx, arrowSel.value));
+  }
+  function onShapeKind() {
+    const s = state.selected;
+    if (s?.kind !== "node") return;
+    const [open, close] = shapeSel.value.split(SHAPE_SEP);
+    commit(setNodeShape(model, meta.src, s.id, open, close));
   }
   function onDelete() {
     const s = state.selected;
@@ -910,8 +1142,8 @@ export function enterEditMode(box, meta, api, restore = null) {
           clearSelection();
           updateBar();
           openInlineInput(
-            { ...midOfNodes(from, id), value: "", placeholder: "矢印ラベル（空でも可）" },
-            (label) => commit(addEdge(model, meta.src, from, id, label).edits,
+            { ...midOfNodes(from, id), value: "", placeholder: "矢印ラベル（空でも可・Shift+Enter で改行）" },
+            (label) => commit(addEdge(model, meta.src, from, id, inputToLabel(label)).edits,
               { selection: { kind: "edge", from, to: id } }));
         }
         return;
@@ -983,6 +1215,7 @@ export function enterEditMode(box, meta, api, restore = null) {
     bar.remove();
     box.querySelectorAll(".mermaid-inline-input").forEach((el) => el.remove());
     clearSelection();
+    api.reveal?.(null);  // エディタ側の反転表示も消す（編集モードを出たら残さない）
     if (notify) api.onExit?.();
   }
 
@@ -1006,4 +1239,91 @@ export function enterEditMode(box, meta, api, restore = null) {
   }
 
   return () => teardown(false);
+}
+
+// ---- ドキュメント内の ```mermaid ブロックの特定 --------------------------------
+// プレビューに描かれている図（markdown-it が渡してきた content）が、エディタの
+// ドキュメントのどの範囲に対応するかを決める。ここを外すと編集は一切適用できない
+// （「図の位置を特定できませんでした」で編集モードが畳まれる）ので、markdown-it の
+// 取り方との食い違い —— 改行コードとフェンスの字下げ —— を吸収する。
+
+/** ドキュメント内の ```mermaid ブロックを走査する（markdown-it の fence と同じ取り方:
+    内容はフェンス行の間の改行込み、閉じフェンスは同じ文字で開きと同じ長さ以上）。 */
+export function scanMermaidBlocks(doc) {
+  const lines = doc.split("\n");
+  const lineStarts = [];
+  let off = 0;
+  for (const line of lines) { lineStarts.push(off); off += line.length + 1; }
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*(`{3,}|~{3,})\s*mermaid\b/i.exec(lines[i]);
+    if (!m) continue;
+    const fence = m[1];
+    const contentStart = lineStarts[i] + lines[i].length + 1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const cm = /^\s*(`{3,}|~{3,})\s*$/.exec(lines[j]);
+      if (!cm || cm[1][0] !== fence[0] || cm[1].length < fence.length) continue;
+      const contentEnd = lineStarts[j];  // 末尾 \n を含む（markdown-it の token.content と一致）
+      blocks.push({ start: contentStart, end: contentEnd, content: doc.slice(contentStart, contentEnd) });
+      i = j;
+      break;
+    }
+  }
+  return blocks;
+}
+
+/**
+ * ブロックの内容が src と一致するか見て、一致すればオフセット変換付きで返す。
+ * ドキュメント側と src 側の差は行単位でしか出ない:
+ *   - エディタは \r\n を保つが markdown-it は \n に正規化する
+ *   - フェンスが字下げされていると markdown-it は各行の字下げを削って content にする
+ * どちらも「ドキュメント側の行の末尾が src 側の行と一致し、その手前は空白だけ」に
+ * なるので、行ごとに突き合わせて対応表を作る（markdown-it の字下げ規則そのものを
+ * 再現しなくてよい）。戻り値の toRaw(i) は src 内オフセット→ブロック内オフセット、
+ * indent は削られていた字下げ（書き戻す行に足し直す分）。
+ */
+export function matchMermaidBlock(b, src) {
+  if (b.content === src) return { ...b, indent: "", toRaw: (i) => i };
+  const rawLines = b.content.split("\n");
+  const srcLines = src.split("\n");
+  if (rawLines.length !== srcLines.length) return null;
+  const rawStart = [];   // src の各行頭に対応するブロック内オフセット
+  const srcStart = [];
+  let rawOff = 0, srcOff = 0, indent = "";
+  for (let i = 0; i < rawLines.length; i++) {
+    const raw = rawLines[i].endsWith("\r") ? rawLines[i].slice(0, -1) : rawLines[i];
+    const line = srcLines[i];
+    if (!raw.endsWith(line)) return null;
+    const pre = raw.slice(0, raw.length - line.length);
+    if (/\S/.test(pre)) return null;   // 末尾一致が偶然なだけ（内容が違う）
+    if (pre && !indent) indent = pre;
+    rawStart.push(rawOff + pre.length);
+    srcStart.push(srcOff);
+    rawOff += rawLines[i].length + 1;
+    srcOff += line.length + 1;
+  }
+  const toRaw = (i) => {
+    let lo = 0, hi = srcStart.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (srcStart[mid] <= i) lo = mid; else hi = mid - 1;
+    }
+    return rawStart[lo] + (i - srcStart[lo]);
+  };
+  return { ...b, indent, toRaw };
+}
+
+/** src（描画に使われた mermaid ソース）に一致するブロックを探す。
+    index（プレビュー内で何枚目の図か）と一致するブロックを最優先する — 同じ内容の
+    図が複数あるとき、先頭のブロックを黙って書き換えてしまわないため。 */
+export function findMermaidBlock(doc, src, index = 0) {
+  const blocks = scanMermaidBlocks(doc);
+  const at = blocks[index] ? matchMermaidBlock(blocks[index], src) : null;
+  if (at) return at;
+  // フェンスの数え方が markdown-it と食い違った場合の保険（内容一致で最初の1つ）
+  for (const b of blocks) {
+    const m = matchMermaidBlock(b, src);
+    if (m) return m;
+  }
+  return null;
 }

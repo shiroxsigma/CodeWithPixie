@@ -70,7 +70,12 @@ if (md) {
     const token = tokens[idx];
     if (token.info.trim().toLowerCase() === "mermaid" && mermaid) {
       // 中身は escapeHtml 相当で入れる。描画失敗時はこのテキストがそのまま見える。
-      return `<pre class="mermaid-src">${escapeHtml(token.content)}</pre>`;
+      // 先頭の "\n" は必須（見た目には出ない）。HTML パーサは <pre> 直後の改行を
+      // 1つ捨てる規定なので、これが無いと ```mermaid の次が空行のソースで
+      // block.textContent（= renderMermaid が読む図のソース）が先頭の改行を失い、
+      // エディタ側の ```mermaid ブロックと一致しなくなる—— 直接編集が
+      // 「図の位置を特定できませんでした」で一切使えなくなる。
+      return `<pre class="mermaid-src">\n${escapeHtml(token.content)}</pre>`;
     }
     // mdflow-mapping（条件マッピング定義）は生 YAML を見せず折りたたむ。
     // テキストが正であることの透明性のため、開けばソースは見える。
@@ -125,6 +130,80 @@ const SVG_CACHE_MAX = 50;
 // 戻ってきたとき世代が古ければ、既に作り直された DOM なので捨てる。
 const generation = new WeakMap();
 
+// 直前の描画で作った図の box を要素ごとに覚えておく
+// （el -> Map<図の通し番号, {src, renderSrc, box, meta}>）。
+// プレビューは打鍵のたびに innerHTML から作り直されるが、図のソースが変わっていなければ
+// SVG 文字列の再パース（大きな図では一番重い）もバーの組み直しも要らない。前の box を
+// そのまま新しい DOM へ挿し戻す＝図の DOM は使い回す。副作用として、図に付いている
+// 編集モードの listener・選択状態もそのまま生き残る（毎打鍵の解除→再入場が消える）。
+const lastBoxes = new WeakMap();
+
+// ---- 図の拡大縮小 -------------------------------------------------------------
+// mermaid の SVG は viewBox を持つので、width/height に「自然サイズ × 倍率」を入れれば
+// ベクタのまま拡大縮小される（画像の引き伸ばしではないので線もラベルも滲まない）。
+// 倍率は図ごと（描画先の要素 × 図の通し番号）に覚えておき、打鍵で描き直されても保つ。
+// PNG 書き出し（🖼 / 📋）はここで入れた inline style を捨てて viewBox の自然サイズで
+// 描くので、表示倍率をいくら動かしても出力の解像度は変わらない。
+const ZOOM_STEPS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3];
+const zoomStore = new WeakMap();   // el -> Map<図の通し番号, 倍率>
+
+function zoomApiFor(el, index) {
+  return {
+    get() { return zoomStore.get(el)?.get(index) || 1; },
+    set(z) {
+      let m = zoomStore.get(el);
+      if (!m) { m = new Map(); zoomStore.set(el, m); }
+      m.set(index, z);
+    },
+  };
+}
+
+function stepZoom(cur, dir) {
+  const at = ZOOM_STEPS.findIndex((z) => z >= cur - 1e-6);
+  const i = at < 0 ? ZOOM_STEPS.length - 1 : at;
+  return ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, Math.max(0, i + dir))];
+}
+
+/** box の SVG に倍率を反映し、バーの表示も合わせる。 */
+function applyZoom(box, z) {
+  const svg = box.querySelector("svg");
+  const nat = box.__mermaidNatural;
+  if (!svg || !nat) return;
+  svg.style.width = `${Math.round(nat.w * z)}px`;
+  svg.style.height = `${Math.round(nat.h * z)}px`;
+  svg.style.maxWidth = "none";
+  const label = box.querySelector(".mermaid-zoom-label");
+  if (label) label.textContent = `${Math.round(z * 100)}%`;
+}
+
+/** 拡大縮小の操作（➖ / 倍率 / ➕）。Ctrl+ホイールも同じ倍率列を動かす。 */
+function buildZoomControls(box, zoom) {
+  const wrap = document.createElement("span");
+  wrap.className = "mermaid-zoom";
+  const set = (z) => { zoom.set(z); applyZoom(box, z); };
+  const mk = (text, title, fn) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = text;
+    b.title = title;
+    b.addEventListener("click", fn);
+    wrap.appendChild(b);
+    return b;
+  };
+  mk("➖", "縮小（図の上で Ctrl+ホイールでも）", () => set(stepZoom(zoom.get(), -1)));
+  const label = mk("100%", "等倍に戻す", () => set(1));
+  label.className = "mermaid-zoom-label";
+  mk("➕", "拡大（図の上で Ctrl+ホイールでも）", () => set(stepZoom(zoom.get(), 1)));
+  // Ctrl+ホイールは既定ではブラウザのページ拡大。図の上ではそれを止めて図だけを拡大する
+  // （バーは hover でしか出ないので、マウスだけで操作できる道を残しておく）。
+  box.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    set(stepZoom(zoom.get(), e.deltaY < 0 ? 1 : -1));
+  }, { passive: false });
+  return wrap;
+}
+
 function putSvg(src, svg) {
   if (svgCache.size >= SVG_CACHE_MAX) svgCache.delete(svgCache.keys().next().value);
   svgCache.set(src, svg);
@@ -159,7 +238,7 @@ export function setOnDiagramRendered(fn) {
 }
 
 /** 図の右上に出す書き出しバー（hover で見える）。 */
-function buildExportBar(box, meta) {
+function buildExportBar(box, meta, zoom = null) {
   const id = diagramId(meta.src, meta.index || 0);
   const bar = document.createElement("div");
   bar.className = "mermaid-tools";
@@ -196,6 +275,8 @@ function buildExportBar(box, meta) {
   const png = () => svgToPngBlob(box.querySelector("svg"), { background: pngBackground() });
 
   bar.appendChild(status);  // 結果は左、ボタンは右
+  // 拡大縮小は viewBox が読めた図だけ（自然サイズが分からないと倍率を決められない）
+  if (zoom && box.__mermaidNatural) bar.appendChild(buildZoomControls(box, zoom));
   // 直接編集はプレビューの図だけ（meta.editable）。チャット内の図は編集対象外。
   if (meta.editable && diagramEditor) {
     // 直接編集は flowchart/graph 限定。押しても壊すだけのボタンは出さず、
@@ -240,25 +321,33 @@ export function pngBackground() {
   return v || "#1e1e2a";
 }
 
-function toBox(svg, meta = {}) {
+function toBox(svg, meta = {}, zoom = null) {
   const box = document.createElement("div");
   box.className = "mermaid-box";
-  box.innerHTML = svg;  // mermaid が securityLevel:'strict' で生成した SVG
+  // 図の本体は内側の .mermaid-canvas に入れる。横スクロールを box ではなくこちらに
+  // 持たせるのが要点 —— box 自身を overflow コンテナにすると box が「スクロールの
+  // 親」になってしまい、中のバーに position:sticky が効かない（縦に長い図で
+  // ツールバーが画面外へ流れて届かなくなる）。バーは box 直下＝スクロール枠の外。
+  const canvas = document.createElement("div");
+  canvas.className = "mermaid-canvas";
+  canvas.innerHTML = svg;  // mermaid が securityLevel:'strict' で生成した SVG
+  box.appendChild(canvas);
 
   // mermaid は svg に width="100%" と inline の max-width:<自然幅> を付ける。
   // その結果、狭い枠では図全体が縮尺され（1098px の図が 360px の枠で 1/3 に潰れる）、
-  // ラベルが読めなくなる。自然幅を明示して縮小を止め、溢れる分は .mermaid-box 側で
-  // 横スクロールさせる。CSS で width:auto にしてはいけない — viewBox しか持たない
-  // SVG は幅 auto だと既定の 300px になり、かえって小さくなる。
-  const el = box.querySelector("svg");
+  // ラベルが読めなくなる。自然サイズ（viewBox）を基準に px で明示して縮小を止め、
+  // 溢れる分は .mermaid-canvas 側で横スクロールさせる。CSS で width:auto にしては
+  // いけない — viewBox しか持たない SVG は幅 auto だと既定の 300px になる。
+  // 倍率 1 のときの見た目は従来どおり（自然サイズそのまま）。
+  const el = canvas.querySelector("svg");
   const vb = el?.getAttribute("viewBox")?.trim().split(/[\s,]+/);
-  if (vb?.length === 4 && Number.isFinite(parseFloat(vb[2]))) {
-    el.style.width = `${parseFloat(vb[2])}px`;
-    el.style.maxWidth = "none";
-  }
-  // バーは図の「上」に通常フローで置く。.mermaid-box は overflow-x:auto なので、
-  // 絶対配置にすると横スクロールに連れて流れていく。
-  if (el) box.prepend(buildExportBar(box, meta));
+  const natW = vb?.length === 4 ? parseFloat(vb[2]) : NaN;
+  const natH = vb?.length === 4 ? parseFloat(vb[3]) : NaN;
+  if (Number.isFinite(natW) && Number.isFinite(natH)) box.__mermaidNatural = { w: natW, h: natH };
+  // バーは図の「上」。CSS の position:sticky で、縦に長い図でも画面内に貼り付く。
+  if (el) box.prepend(buildExportBar(box, meta, zoom));
+  // 倍率の反映はバーを組んだあと（倍率表示のラベルがバーの中にあるため）
+  applyZoom(box, zoom ? zoom.get() : 1);
   // 描画完了の通知（編集モードの再入場用）。box が DOM に入る直前に呼ぶ。
   if (diagramRendered) diagramRendered(box, meta);
   return box;
@@ -273,9 +362,15 @@ function toBox(svg, meta = {}) {
 async function renderMermaid(el, gen, opts) {
   if (!mermaid) return;
   const ctx = opts.mdflow || null;
+  const prev = lastBoxes.get(el) || new Map();
+  const kept = new Map();
+  lastBoxes.set(el, kept);  // 先に差し替える（後発の描画が古い世代の結果を拾わないように）
   let index = -1;  // 文書内の通し番号。`%% id:` の無い図のファイル名に使う
   for (const block of el.querySelectorAll("pre.mermaid-src")) {
     index += 1;
+    // 待っている間に描き直されていたら、この DOM はもう捨てられている。
+    // 使い回しの box を「死んだ木」へ移してしまわないよう、毎回見る。
+    if (generation.get(el) !== gen) return;
     const src = block.textContent;
     const flow = ctx ? prepareFlow(src, ctx) : null;
     // svgCache のキーは注入済みソース。プリセットを切り替えるとキーが変わるので、
@@ -288,8 +383,24 @@ async function renderMermaid(el, gen, opts) {
     };
 
     const meta = { src, index, editable: !!opts.editable };
+    // 同じ位置に同じ図が居るなら、前回の box をそのまま挿し戻す（再パースしない）。
+    // diagramRendered も呼ばない — box が同一なので編集モードは継続中のまま。
+    const before = prev.get(index);
+    if (before && before.src === src && before.renderSrc === renderSrc) {
+      // 上の図が増減して通し番号だけずれることがある。meta は前回のものを使い回して
+      // いるので（バーの closure もこれを見る）、index だけ現在値へ直す。
+      before.meta.index = index;
+      kept.set(index, before);
+      finish(before.box);
+      // 「作り直していない」通知。編集モードは生きたままなので入り直させない。
+      if (diagramRendered) diagramRendered(before.box, before.meta, true);
+      continue;
+    }
+    const remember = (box) => { kept.set(index, { src, renderSrc, box, meta }); return box; };
+    const zoom = zoomApiFor(el, index);   // 倍率は図の位置ごとに覚えている
+
     const cached = svgCache.get(renderSrc);
-    if (cached) { finish(toBox(cached, meta)); continue; }
+    if (cached) { finish(remember(toBox(cached, meta, zoom))); continue; }
 
     let svg;
     try {
@@ -319,7 +430,7 @@ async function renderMermaid(el, gen, opts) {
     putSvg(renderSrc, svg);
     // await の間に描き直されていたら、この block は既に捨てられた DOM
     if (generation.get(el) !== gen) return;
-    finish(toBox(svg, meta));
+    finish(remember(toBox(svg, meta, zoom)));
   }
 }
 
@@ -483,6 +594,7 @@ function buildPresetList(flow, ctx) {
  * opts.mdflow（{doc, conditions, focus?}）を渡すと、条件マッピングのある図は
  * 選択プリセットでハイライトされ、直下にプリセットリストが付く（エディタの
  * プレビュー専用）。
+ * 戻り値は図の描画まで含めた完了の Promise（markdown-it が無ければ undefined）。
  * opts.assetBase（文字列、"" はワークスペースのルート）を渡すと、この描画の間だけ
  * 相対画像の解決基準を上書きする。チャット描画用 — モジュール共通の基準
  * （setAssetBase）は「最後にプレビューしたディレクトリ」のままで止まるため、
@@ -506,7 +618,9 @@ export function renderInto(el, text, opts = {}) {
   }
   const gen = (generation.get(el) || 0) + 1;
   generation.set(el, gen);
-  renderMermaid(el, gen, opts);
+  // 図の描画は非同期。呼び出し側が「完了までの実測時間」を測れるように返す
+  // （エディタのプレビューは、これを次回の待ち時間に反映している）。
+  return renderMermaid(el, gen, opts);
 }
 
 /** 生テキストとして描画する。ストリーミング中など、まだ Markdown が完成していない段階用。 */

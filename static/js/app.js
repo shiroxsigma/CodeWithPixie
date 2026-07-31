@@ -925,8 +925,13 @@ async function flushAutosave() {
 
 // ---- Markdown プレビュー ----
 // 既定は非表示。Markdown ファイルを開いているときだけ使える（コードには意味がない）。
+// プレビューは打鍵のたびに描き直す。図の無い文書なら一瞬だが、大きな mermaid 図が
+// あると mermaid の描画だけで 100ms 単位掛かる。前回の実測に合わせて待ち時間を伸ばし、
+// 「打つたびに固まる」状態にならないようにする（軽い文書は 150ms のまま）。
 const PREVIEW_DEBOUNCE_MS = 150;
+const PREVIEW_DEBOUNCE_MAX_MS = 600;
 let previewTimer = null;
+let previewCostMs = 0;
 
 const isPreviewOpen = () => !$("preview").classList.contains("hidden");
 
@@ -989,8 +994,11 @@ function renderPreview() {
   setAssetBase(currentDir());
   const { text, opts } = previewSource();
   opts.editable = true;  // プレビューの図だけ ✏️ 直接編集の対象（チャットは対象外）
-  renderInto($("preview"), text, opts);
+  const t0 = performance.now();
+  const done = renderInto($("preview"), text, opts);
   syncPreviewScroll();
+  // 図の描画は非同期。かかった時間を次回の待ち時間に反映する（schedulePreview）。
+  Promise.resolve(done).then(() => { previewCostMs = performance.now() - t0; });
 }
 
 // ---- mdflow: プレビュー内の条件プリセット操作（Note モード） ------------------
@@ -1027,7 +1035,9 @@ function bindMdflowUI() {
 function schedulePreview() {
   if (!isPreviewOpen()) return;
   clearTimeout(previewTimer);
-  previewTimer = setTimeout(renderPreview, PREVIEW_DEBOUNCE_MS);
+  const wait = Math.min(PREVIEW_DEBOUNCE_MAX_MS,
+    Math.max(PREVIEW_DEBOUNCE_MS, Math.round(previewCostMs)));
+  previewTimer = setTimeout(renderPreview, wait);
 }
 
 // エディタのスクロール位置に比率で追従させる。行単位の対応付けは重いので、まず比率で足りるかを見る。
@@ -1290,7 +1300,7 @@ function bindConfluenceUI() {
 }
 
 // ---- Mermaid 図の直接編集（プレビュー操作 → ソースの最小編集 → executeEdits） ----
-// state.diagramEditing = {src, index, restore, dispose} が編集中の図
+// state.diagramEditing = {src, index, box, restore, dispose} が編集中の図
 // （src = mermaid ブロックの内容、index = 文書内の何枚目か）。編集を適用すると
 // エディタ内容が変わってプレビューが再描画され、onDiagramRendered が同じ図
 // （src と index の両方が一致）を見つけて編集モードへ再入場する
@@ -1300,14 +1310,22 @@ function bindConfluenceUI() {
 
 function openDiagramEditor(box, meta) {
   state.diagramEditing?.dispose?.();  // 別の図を編集中ならそちらを畳む
-  const ed = { src: meta.src, index: meta.index, restore: null, dispose: null };
+  const ed = { src: meta.src, index: meta.index, box, restore: null, dispose: null };
   state.diagramEditing = ed;
   ed.dispose = mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), null);
 }
 
-function onDiagramRendered(box, meta) {
+function onDiagramRendered(box, meta, reused = false) {
   const ed = state.diagramEditing;
-  if (!ed || ed.index !== meta.index) return;
+  if (!ed) return;
+  if (reused) {
+    // 図の DOM をそのまま使い回した通知。編集モードは生きたままなので入り直さない
+    // （入り直すと listener の付け外しが毎打鍵で走るし、選択も失われる）。
+    // 上の図が増減して通し番号だけずれることがあるので、そこだけ追従する。
+    if (ed.box === box) ed.index = meta.index;
+    return;
+  }
+  if (ed.index !== meta.index) return;
   if (ed.src !== meta.src) {
     // undo / エディタでの手編集で内容が変わった。同じ位置の図なら編集モードを
     // 維持して新しい内容に追従する（選択は意味を失うので捨てる）。図が
@@ -1317,6 +1335,7 @@ function onDiagramRendered(box, meta) {
   }
   // 再描画で捨てられた前の box の後始末（document のキー listener を外す）
   ed.dispose?.();
+  ed.box = box;
   ed.dispose = mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), ed.restore);
   // 選択の復帰は再描画のたびに効かせたいが、ラベル編集の自動オープンは1回だけ
   if (ed.restore) ed.restore = { ...ed.restore, editNodeId: null };
@@ -1328,11 +1347,12 @@ function mermaidEditApi() {
       const editor = state.editor;
       const model = editor.getModel();
       const ed = state.diagramEditing;
-      const block = findMermaidBlock(model.getValue(), src, ed?.index ?? 0);
+      const block = mermaidEdit.findMermaidBlock(model.getValue(), src, ed?.index ?? 0);
       if (!block) {
         state.diagramEditing?.dispose?.();
         state.diagramEditing = null;
-        alert("⚠️ 対応する図が見つかりません（内容が外部で変わった可能性）。編集モードを終了します。");
+        alert("⚠️ 図の位置を特定できませんでした（プレビューとエディタの内容が食い違っています）。"
+          + "編集モードを終了します。ファイルを開き直すと直ります。");
         return false;
       }
       const newSrc = mermaidEdit.applyEditsToText(src, edits);
@@ -1342,13 +1362,19 @@ function mermaidEditApi() {
         range: state.monaco.Range.fromPositions(
           model.getPositionAt(block.start + block.toRaw(e.start)),
           model.getPositionAt(block.start + block.toRaw(e.end))),
-        text: e.text,
+        // 字下げされたフェンス（リストの中の図など）は markdown-it が字下げを削って
+        // 図に渡すので、書き戻す行にはその分を足し直す。newSrc は字下げ前のまま
+        // 計算する（次の描画で来る meta.src と比べるのはそちら）。
+        text: block.indent ? e.text.split("\n").join("\n" + block.indent) : e.text,
       }));
       editor.pushUndoStop();  // 直前までの編集と合体させない（1操作 = 1 undo）
       editor.executeEdits("mermaid-edit", ranges);
       editor.pushUndoStop();
       // dispose は今の box のもの。再描画時に onDiagramRendered が呼んで畳む。
-      state.diagramEditing = { src: newSrc, index: ed?.index ?? 0, restore, dispose: ed?.dispose ?? null };
+      state.diagramEditing = {
+        src: newSrc, index: ed?.index ?? 0, box: ed?.box ?? null,
+        restore, dispose: ed?.dispose ?? null,
+      };
       // エディタへフォーカスは移さない。移すと図の上での Esc / Delete が
       // 「エディタへの入力」になってしまい、GUI 操作が続けられなくなる。
       // undo だけは下の undo/redo で肩代わりする。
@@ -1357,67 +1383,50 @@ function mermaidEditApi() {
     // 図の上での Ctrl+Z / Ctrl+Y。エディタにフォーカスが無くても効かせる。
     undo() { state.editor?.trigger("mermaid-edit", "undo", null); },
     redo() { state.editor?.trigger("mermaid-edit", "redo", null); },
+    // 図で選択した要素に対応する Markdown を、エディタ側で反転表示してそこまでスクロールする
+    // （「この図形はソースのどこ？」を探させない）。null で消す。
+    reveal(at) { revealDiagramSource(at); },
     onExit() {
+      revealDiagramSource(null);
       state.diagramEditing = null;
     },
   };
 }
 
-/** ドキュメント内の ```mermaid ブロックを走査する（markdown-it の fence と同じ取り方:
-    内容はフェンス行の間の改行込み、閉じフェンスは同じ文字で開きと同じ長さ以上）。 */
-function scanMermaidBlocks(doc) {
-  const lines = doc.split("\n");
-  const lineStarts = [];
-  let off = 0;
-  for (const line of lines) { lineStarts.push(off); off += line.length + 1; }
-  const blocks = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^\s*(`{3,}|~{3,})\s*mermaid\b/i.exec(lines[i]);
-    if (!m) continue;
-    const fence = m[1];
-    const contentStart = lineStarts[i] + lines[i].length + 1;
-    for (let j = i + 1; j < lines.length; j++) {
-      const cm = /^\s*(`{3,}|~{3,})\s*$/.exec(lines[j]);
-      if (!cm || cm[1][0] !== fence[0] || cm[1].length < fence.length) continue;
-      const contentEnd = lineStarts[j];  // 末尾 \n を含む（markdown-it の token.content と一致）
-      blocks.push({ start: contentStart, end: contentEnd, content: doc.slice(contentStart, contentEnd) });
-      i = j;
-      break;
-    }
-  }
-  return blocks;
-}
-
-/** ブロックの内容が src と一致するか見て、一致すればオフセット変換付きで返す。
-    markdown-it は入力を \n に正規化するがエディタは \r\n を保持しうるので、その分だけずらす。 */
-function matchMermaidBlock(b, src) {
-  if (b.content === src) return { ...b, toRaw: (i) => i };
-  if (!b.content.includes("\r")) return null;
-  let norm = "";
-  const map = [];
-  for (let i = 0; i < b.content.length; i++) {
-    if (b.content[i] === "\r" && b.content[i + 1] === "\n") continue;
-    map.push(i);
-    norm += b.content[i];
-  }
-  map.push(b.content.length);
-  return norm === src ? { ...b, toRaw: (i) => map[i] } : null;
-}
-
-/** src（描画に使われた mermaid ソース）に一致するブロックを探す。
-    index（プレビュー内で何枚目の図か）と一致するブロックを最優先する — 同じ内容の
-    図が複数あるとき、先頭のブロックを黙って書き換えてしまわないため。
-    戻り値の toRaw(i) は src 内オフセットをドキュメントオフセットへ変換する。 */
-function findMermaidBlock(doc, src, index = 0) {
-  const blocks = scanMermaidBlocks(doc);
-  const at = blocks[index] ? matchMermaidBlock(blocks[index], src) : null;
-  if (at) return at;
-  // フェンスの数え方が markdown-it と食い違った場合の保険（内容一致で最初の1つ）
-  for (const b of blocks) {
-    const m = matchMermaidBlock(b, src);
-    if (m) return m;
-  }
-  return null;
+/**
+ * 編集中の図の選択（at = {line, focus}。どちらも図のソース内オフセットの {start,end}）を
+ * エディタ上の反転表示に変える。at が null なら消すだけ。
+ * フォーカスもカーソルも動かさない —— 移すと図の上での Esc / Delete が
+ * 「エディタへの入力」になり、GUI 操作が続けられなくなる（applyEdits と同じ理由）。
+ */
+function revealDiagramSource(at) {
+  const editor = state.editor;
+  const model = editor?.getModel();
+  if (!editor || !model) return;
+  const clear = () => {
+    state.diagramHl?.clear?.();
+    state.diagramHl = null;
+  };
+  if (!at) { clear(); return; }
+  const ed = state.diagramEditing;
+  const block = ed ? mermaidEdit.findMermaidBlock(model.getValue(), ed.src, ed.index ?? 0) : null;
+  if (!block) { clear(); return; }
+  const toRange = (span) => (span
+    ? state.monaco.Range.fromPositions(
+      model.getPositionAt(block.start + block.toRaw(span.start)),
+      model.getPositionAt(block.start + block.toRaw(span.end)))
+    : null);
+  const lineRange = toRange(at.line);
+  const focusRange = toRange(at.focus);
+  const decos = [];
+  if (lineRange) decos.push({ range: lineRange, options: { className: "mermaid-src-hl-line", isWholeLine: true } });
+  if (focusRange) decos.push({ range: focusRange, options: { className: "mermaid-src-hl" } });
+  if (!decos.length) { clear(); return; }
+  if (state.diagramHl) state.diagramHl.set(decos);
+  else state.diagramHl = editor.createDecorationsCollection(decos);
+  // 画面外のときだけ動かす。見えている図をクリックするたびに縦スクロールが
+  // 跳ねると、かえってどこを見ていたか分からなくなる。
+  editor.revealRangeInCenterIfOutsideViewport(focusRange || lineRange, 0 /* Smooth */);
 }
 
 // ---- 全文検索 ----
@@ -3002,9 +3011,24 @@ async function importCopilotChat() {
 }
 
 // ---- 設定（モデル/サーバ） ----
+// ダイアログは**先に開く**。中身の取得は並行で走らせ、届いたところから埋める。
+// 待ってから開くと、/api/models（LM Studio への問い合わせ・最大5秒）に引きずられて
+// 「⚙️ を押しても数秒なにも起きない」状態になる。
 async function openSettings() {
-  const data = await getJSON("/api/servers").catch(() => ({ servers: [], active: 0 }));
+  $("settings-modal").classList.remove("hidden");
+  await Promise.all([
+    loadServerOptions(),
+    loadModelOptions(),
+    loadNumericSettings(),
+    refreshCopilot(),
+  ]);
+}
+
+/** 接続先サーバのドロップダウン（config.json の servers[]）。 */
+async function loadServerOptions() {
   const sel = $("settings-model");
+  if (!sel) return;
+  const data = await getJSON("/api/servers").catch(() => ({ servers: [], active: 0 }));
   sel.innerHTML = "";
   (data.servers || []).forEach((s, i) => {
     const opt = document.createElement("option");
@@ -3019,27 +3043,30 @@ async function openSettings() {
     } catch (e) {
       alert("⚠️ 設定を保存できません: " + e.message);
     }
-    await loadModelOptions();  // サーバが変わればモデル一覧も切り替わる
-    await loadContextLength();  // コンテキスト長はサーバ単位なので切替先の値を出す
-    await loadStatus();
+    // サーバが変わればモデル一覧も、サーバ単位のコンテキスト長も切り替わる
+    await Promise.all([loadModelOptions(), loadNumericSettings(), loadStatus()]);
   };
-  await loadModelOptions();
-  await loadThinkBudget();
-  await loadContextLength();
-  await refreshCopilot();
-  $("settings-modal").classList.remove("hidden");
 }
 
-// 思考許容時間（deep 思考の <think> 上限秒）。保存すると実行中のセッションにも即反映される
-// （セッションは作り直さないので会話文脈は保たれる）。
-async function loadThinkBudget() {
-  const inp = $("settings-think-budget");
-  if (!inp) return;
+// 数値系の設定（思考許容時間・コンテキスト長）。どちらも /api/settings の同じ応答に
+// 入っているので1回の取得でまとめて埋める（別々に叩くと往復が2回になる）。
+// 思考許容時間は保存すると実行中のセッションにも即反映される（会話文脈は保たれる）。
+async function loadNumericSettings() {
   const s = await getJSON("/api/settings").catch(() => ({}));
-  if (s.think_budget_min != null) inp.min = s.think_budget_min;
-  if (s.think_budget_max != null) inp.max = s.think_budget_max;
-  if (s.think_budget_sec != null) inp.value = s.think_budget_sec;
-  $("settings-think-budget-status").textContent = "";
+  const think = $("settings-think-budget");
+  if (think) {
+    if (s.think_budget_min != null) think.min = s.think_budget_min;
+    if (s.think_budget_max != null) think.max = s.think_budget_max;
+    if (s.think_budget_sec != null) think.value = s.think_budget_sec;
+    $("settings-think-budget-status").textContent = "";
+  }
+  const ctx = $("settings-context-length");
+  if (ctx) {
+    if (s.context_length_min != null) ctx.min = s.context_length_min;
+    if (s.context_length_max != null) ctx.max = s.context_length_max;
+    if (s.context_length != null) ctx.value = s.context_length || 0;
+    $("settings-context-length-status").textContent = "";
+  }
 }
 
 async function saveThinkBudget() {
@@ -3057,16 +3084,6 @@ async function saveThinkBudget() {
 
 // コンテキスト長（トークン）。アクティブサーバに紐づく。0=自動（バックエンドの取得値）。
 // 変更するとそのサーバのセッションは作り直され、新しい n_ctx で切り詰め判定が動く。
-async function loadContextLength() {
-  const inp = $("settings-context-length");
-  if (!inp) return;
-  const s = await getJSON("/api/settings").catch(() => ({}));
-  if (s.context_length_min != null) inp.min = s.context_length_min;
-  if (s.context_length_max != null) inp.max = s.context_length_max;
-  if (s.context_length != null) inp.value = s.context_length || 0;
-  $("settings-context-length-status").textContent = "";
-}
-
 async function saveContextLength() {
   const inp = $("settings-context-length");
   const st = $("settings-context-length-status");
@@ -3087,6 +3104,13 @@ async function saveContextLength() {
 async function loadModelOptions() {
   const sel = $("settings-llm-model");
   if (!sel) return;
+  // LM Studio への問い合わせは数秒かかりうる。空の選択肢を出したままにせず、
+  // 取得中であることを先に見せる（ダイアログ自体は既に開いている）。
+  sel.innerHTML = "";
+  sel.disabled = true;
+  const loading = document.createElement("option");
+  loading.textContent = "(取得中…)";
+  sel.appendChild(loading);
   const r = await getJSON("/api/models").catch(() => ({ models: [] }));
   const models = r.models || [];
   sel.innerHTML = "";

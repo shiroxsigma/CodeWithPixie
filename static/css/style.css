@@ -461,9 +461,14 @@ button:active { transform: translateY(1px); }
 .mermaid-box {
   margin: 8px 0; padding: 8px; background: var(--bg);
   border: 1px solid var(--border); border-radius: 6px;
-  overflow-x: auto; text-align: center;
-  position: relative;  /* ノードラベル編集の absolute 入力欄の基準 */
+  text-align: center;
 }
+/* 横スクロールは内側の枠が持つ。box 側に overflow を置くと box がスクロールの親に
+   なり、中のバーの position:sticky が #preview ではなく box を基準にしてしまう
+   （= 効かない）。縦に長い図でバーを画面に貼り付けるにはこの分離が要る。
+   position:relative はラベル編集の absolute 入力欄の基準（内容と一緒に横スクロール
+   させるため、入力欄はこの枠の中に入れる）。 */
+.mermaid-canvas { overflow-x: auto; position: relative; }
 /* 幅は markdown.js の toBox が自然幅で固定する（枠に合わせて縮小させないため）。
    ここで width/max-width を指定すると、それを打ち消してしまう。 */
 .mermaid-box svg { height: auto; }
@@ -476,10 +481,15 @@ button:active { transform: translateY(1px); }
 .mermaid-src.mermaid-error { border-color: var(--danger); cursor: help; }
 
 /* 図の書き出しバー（🖼 保存 / 📋 コピー）。図ごとに常時見えていると読むのを邪魔するので
-   hover で出す。visibility ではなく opacity なのは、場所を先に確保して図が動かないため。 */
+   hover で出す。visibility ではなく opacity なのは、場所を先に確保して図が動かないため。
+   sticky: 画面より縦に長い図でも、バーが #preview の上端に貼り付いて届き続ける
+   （図の途中を見ているときに上端まで戻らないと ✏️ 編集 が押せない、を無くす）。
+   背景を敷くのは、貼り付いている間そこに図が透けて字が読めなくなるため。 */
 .mermaid-tools {
   display: flex; align-items: center; justify-content: flex-end; gap: 6px;
   margin-bottom: 4px; opacity: 0; transition: opacity .12s;
+  position: sticky; top: 0; z-index: 6;
+  padding: 2px 0; background: var(--bg);
 }
 .mermaid-box:hover .mermaid-tools,
 .mermaid-tools:focus-within { opacity: 1; }
@@ -495,6 +505,9 @@ button:active { transform: translateY(1px); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .mermaid-tools-status.error { color: var(--danger); }
+/* 拡大縮小（➖ 100% ➕）。倍率は桁が変わっても幅が動かないよう等幅数字＋最小幅。 */
+.mermaid-zoom { display: inline-flex; align-items: center; gap: 4px; }
+.mermaid-zoom-label { min-width: 46px; font-variant-numeric: tabular-nums; }
 /* 結果が出ている間はバーを出したままにする（hover を外した瞬間に消えると読めない）。 */
 .mermaid-tools:has(.mermaid-tools-status:not(:empty)) { opacity: 1; }
 
@@ -513,10 +526,13 @@ button:active { transform: translateY(1px); }
   stroke: #ffb454 !important; stroke-width: 3px;
 }
 path.flowchart-link.selected { stroke: #ffb454 !important; stroke-width: 3px; }
-/* 編集ツールバー（図の下・通常フロー。横スクロールしてもついてくる） */
+/* 編集ツールバー（図の下）。横スクロール枠の外に置いてあるので左右には流れない。
+   sticky bottom で、画面より縦に長い図でも下端に貼り付いて届き続ける。 */
 .mermaid-editbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   margin-top: 6px; text-align: left;
+  position: sticky; bottom: 0; z-index: 6;
+  padding: 4px 0; background: var(--bg);
 }
 .mermaid-editbar button {
   padding: 1px 8px; font-size: 11px; line-height: 1.6;
@@ -528,21 +544,34 @@ path.flowchart-link.selected { stroke: #ffb454 !important; stroke-width: 3px; }
 /* 矢印追加の待ち状態（始点/終点のクリック待ち）を押しっぱなしに見せる */
 .mermaid-editbar button.active { color: var(--fg); border-color: var(--accent); background: var(--bg); }
 .mermaid-edit-hint { flex: 1; min-width: 120px; font-size: 11px; color: var(--muted); }
-/* 矢印の線種セレクタ（矢印を選択している間だけ出る） */
-.mermaid-arrow-kind {
+/* 矢印の線種セレクタ（矢印を選択している間だけ出る）と
+   ノードの形状セレクタ（ノードを選択している間だけ出る）。見た目は共通。 */
+.mermaid-arrow-kind,
+.mermaid-node-shape {
   padding: 1px 4px; font-size: 11px;
   background: var(--bg2); color: var(--muted);
   border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
 }
-.mermaid-arrow-kind:focus { outline: none; border-color: var(--accent); color: var(--fg); }
-/* ラベルのインライン編集（.mermaid-box 基準の absolute。内容と一緒にスクロールする）。
-   ノードラベルと矢印ラベルで同じものを使う。 */
+.mermaid-arrow-kind:focus,
+.mermaid-node-shape:focus { outline: none; border-color: var(--accent); color: var(--fg); }
+/* ラベルのインライン編集（.mermaid-canvas 基準の absolute。内容と一緒にスクロールする）。
+   ノードラベルと矢印ラベルで同じものを使う。textarea なのは <br/> 入りの複数行
+   ラベルを改行のまま編集させるため（Enter=確定 / Shift+Enter=改行）。 */
 .mermaid-inline-input {
   position: absolute; z-index: 30;
   background: var(--bg); color: var(--fg);
   border: 1px solid var(--accent); border-radius: 6px;
   padding: 4px 8px; font-size: 13px;
+  font-family: inherit; line-height: 1.5; resize: none; overflow: hidden;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+/* 編集中に選択した要素に対応する Markdown ソースの位置（app.js の reveal）。
+   行全体を薄く、対応する字面だけを濃く塗り、エディタ側で「どこを直せばよいか」を示す。 */
+.mermaid-src-hl-line { background: rgba(139, 124, 255, 0.16); }
+.mermaid-src-hl {
+  background: rgba(139, 124, 255, 0.42);
+  border-radius: 3px;
 }
 
 /* --- mdflow: 条件別フロー可視化 ---------------------------------------------
