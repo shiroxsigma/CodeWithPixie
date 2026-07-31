@@ -34,6 +34,14 @@ const state = {
   saving: false,
   savePromise: null,        // 進行中の保存。切替前の待ち合わせに使う
   saveError: null,          // 直近の保存失敗（ApiError）。成功でクリア
+  baseMtime: null,          // 開いた/最後に保存した時点のディスク mtime。保存時に送り返して
+                            // 「その間に外部で書き換わっていないか」を照合させる（409 で衝突）
+  conflictDeclined: false,  // 衝突ダイアログで「上書きしない」を選んだ。自動保存を止める印
+                            // （止めないと2秒ごとに同じダイアログが出続ける）
+  // --- ファイル移動履歴（Alt+←/→ と 🕘 最近開いたファイル）---
+  navBack: [],              // 戻れるパス（新しいものが末尾）
+  navFwd: [],               // 進めるパス（戻ったときだけ積まれる）
+  navRecent: [],            // 最近開いた順（MRU・重複なし）。ワークスペースを跨がない
   fsMap: new Map(),         // ツリー遅延読み込み: path → {path, type, size?, text?, loaded?}
                             // （loaded は dir のみ: 子を取得済みか。未展开の dir は子が無い）
   treeTruncated: false,     // いずれかのディレクトリ一覧が上限で打ち切られた
@@ -127,9 +135,13 @@ window.__monacoReady.then((monaco) => {
   state.editor.onDidScrollChange(() => syncPreviewScroll());
   state.editor.onDidChangeCursorSelection(updateSelectionChip);
   // エディタ内は Monaco がキーを握るので addCommand が要る（エディタ外は window 側で拾う）。
-  state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveFile());
+  state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => manualSave());
   state.editor.addCommand(
     monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, () => togglePreview());
+  // ファイルの戻る/進む・最近開いたファイル（エディタにフォーカスがある間も効かせる）
+  state.editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.LeftArrow, () => navBackward());
+  state.editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.RightArrow, () => navForward());
+  state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyE, () => openRecentMenu());
   // グリフ（付箋）クリックで編集（Note モードのみ。Code モードは glyphMargin 自体が無い）
   state.editor.onMouseDown((e) => {
     if (isNote() && e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
@@ -649,8 +661,39 @@ function setupRootDrop() {
   });
 }
 
-// --- 右クリックメニュー ---
+// --- ポップアップメニュー（右クリックメニュー・トップバーのドロップダウン共用）---
 function closeFsMenu() { $("fs-menu")?.remove(); }
+
+/** (x, y) にメニューを出す。items は [{label, title?, onClick}]（onClick 無しは見出し）。
+    画面外にはみ出さないよう、右端・下端で内側に寄せる。 */
+function openMenu(x, y, items) {
+  closeFsMenu();
+  const menu = document.createElement("div");
+  menu.id = "fs-menu";
+  for (const item of items) {
+    const it = document.createElement("div");
+    it.className = item.onClick ? "fs-menu-item" : "fs-menu-head";
+    it.textContent = item.label;
+    if (item.title) it.title = item.title;
+    if (item.onClick) {
+      it.addEventListener("click", () => { closeFsMenu(); item.onClick(); });
+    }
+    menu.appendChild(it);
+  }
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  document.body.appendChild(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 4)) + "px";
+  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) + "px";
+  return menu;
+}
+
+/** ボタンの真下にメニューを出す（トップバーのドロップダウン用）。 */
+function openMenuUnder(btn, items) {
+  const r = btn.getBoundingClientRect();
+  return openMenu(r.left, r.bottom + 4, items);
+}
 
 function openFsMenu(e, entry) {
   closeFsMenu();
@@ -723,7 +766,25 @@ async function moveEntry(entry, dst) {
     if (np !== state.currentFile) { state.currentFile = np; $("current-file").textContent = np; }
   }
   state.checkedFiles = new Set([...state.checkedFiles].map(remap));  // Note のチェックを追従
+  remapNavHistory(remap);  // ◀▶ と 🕘 の行き先も新しいパスへ
   await loadFileList();
+}
+
+/** 移動/改名/削除にファイル移動履歴を追従させる。fn が null を返したパスは履歴から消す
+    （消えたファイルが ◀ や 🕘 に残っていると、押すたびに読み込み失敗になる）。 */
+function remapNavHistory(fn) {
+  const fix = (list) => {
+    const out = [];
+    for (const p of list) {
+      const np = fn(p);
+      if (np && np !== out[out.length - 1]) out.push(np);  // 連続重複も畳む
+    }
+    return out;
+  };
+  state.navBack = fix(state.navBack);
+  state.navFwd = fix(state.navFwd);
+  state.navRecent = [...new Set(fix(state.navRecent))];
+  renderNavState();
 }
 
 // ドロップ先フォルダ（空文字＝ルート）へ entry を移動する。
@@ -741,13 +802,17 @@ async function deleteEntry(entry) {
   if (!confirm(`「${entry.path}」を削除しますか？`)) return;
   if (!(await fsPost("/api/fs/delete", { path: entry.path }))) return;
   state.checkedFiles.delete(entry.path);
+  // 消えたパスは履歴からも落とす（dir 削除は空のときだけ通るので自身だけで足りる）
+  remapNavHistory((p) => (p === entry.path ? null : p));
   if (state.currentFile === entry.path) {
     state.currentFile = null;
+    state.baseMtime = null;
     state.editor.setValue("");
     markClean();
     renderSaveState();
     $("current-file").textContent = "（ファイル未選択）";
     updatePreviewAvailability();
+    renderNavState();  // 🕰 履歴ボタンは開いているファイルが前提
     if (isNote()) { await loadNotes(); await loadRefs(); }  // 前ファイルの付箋・参照を消す
   }
   await loadFileList();
@@ -762,7 +827,10 @@ async function openWithOS(path) {
   }
 }
 
-async function openFile(path, force) {
+/** ファイルを開く。
+    @param force  未保存の破棄確認と自動保存 flush を飛ばす（エージェント変更の再読込など）
+    @param nav    履歴の積み方: "push"（既定）/ "none"（◀▶ 自身の移動・同じファイルの再読込） */
+async function openFile(path, force, nav = "push") {
   // force はエージェント変更の再読込など「捨てると決めた」経路なので flush しない。
   if (!force) await flushAutosave();
   // Note モードで flush してもまだ dirty なら、それは保存に失敗している。
@@ -771,7 +839,15 @@ async function openFile(path, force) {
   }
   const r = await tryJSON("/api/file?path=" + encodeURIComponent(path));
   if (!r) return;  // 読めなかったら現在の内容を壊さずに留まる
+  // 履歴は「実際に開けた」後に積む。読めなかったファイルを ◀ の行き先にしない。
+  if (nav === "push" && state.currentFile && state.currentFile !== path) {
+    state.navBack.push(state.currentFile);
+    state.navFwd.length = 0;  // 新しい場所へ動いたら「進む」は無効になる
+  }
+  pushRecentFile(path);
   state.currentFile = path;
+  state.baseMtime = r.mtime ?? null;
+  state.conflictDeclined = false;  // 読み直したので手元と衝突していた版はもう無い
   state.mdflowConditions.clear();  // 条件JSONは図IDに紐づくのでノートをまたがない
   // 図の編集モードと拡大縮小はどちらも「プレビューの何枚目の図か」で覚えている。
   // プレビューの要素はファイルをまたいで同じなので、ここで捨てないと**別ファイルの
@@ -785,6 +861,7 @@ async function openFile(path, force) {
   renderSaveState();
   $("current-file").textContent = path;
   updatePreviewAvailability();
+  renderNavState();
   renderPreview();  // setValue でも更新はされるが、150ms 待たずに新ファイルを映す
   await revealInTree(path);  // 既定は閉じた木なので、開いたファイルの祖先だけ開いて見せる
   renderFileTree();
@@ -862,16 +939,37 @@ async function doSave() {
   clearTimeout(autosaveTimer);  // 今保存するので、予約済みの自動保存は用済み
   state.saving = true;
   renderSaveState("saving");
+  // 読み込んだ時点の mtime を添える。その間にディスクが変わっていたらサーバが 409 を
+  // 返して**書かない** — 別エディタやエージェントの変更を、古いバッファで黙って
+  // 踏み潰さないため。上書きするかどうかは下のダイアログで人が決める。
+  const baseMtime = state.currentFile === path ? state.baseMtime : null;
+  let saved;
   try {
-    await postJSON("/api/file", { path, content });
+    saved = await postJSON("/api/file", { path, content, base_mtime: baseMtime });
   } catch (e) {
-    // 保存できていない。ダーティのまま残す（clean にすると変更が消えたことに気付けない）。
-    state.saveError = e instanceof ApiError ? e : new ApiError(String(e), 0);
-    renderSaveState();
-    return false;
+    const err = e instanceof ApiError ? e : new ApiError(String(e), 0);
+    if (err.status === 409) {
+      const resolved = await resolveSaveConflict(path, content);
+      if (resolved) saved = resolved;
+      else {
+        // 上書きしないと決めた。手元の内容はエディタに残す（dirty のまま）。
+        // 自動保存に任せると2秒ごとに同じダイアログが出るので、ここで止める。
+        state.conflictDeclined = true;
+        state.saveError = new ApiError(
+          "外部の変更があるため保存を見送りました（保存ボタン／Ctrl+S でもう一度判断できます）。", 409);
+        renderSaveState();
+        return false;
+      }
+    } else {
+      // 保存できていない。ダーティのまま残す（clean にすると変更が消えたことに気付けない）。
+      state.saveError = err;
+      renderSaveState();
+      return false;
+    }
   } finally {
     state.saving = false;
   }
+  if (state.currentFile === path) state.baseMtime = saved?.mtime ?? state.baseMtime;
 
   // 保存中にファイルが切り替わっていたら、今バッファに載っている別ファイルの基準を書き換えない。
   if (state.currentFile === path) {
@@ -892,8 +990,16 @@ async function doSave() {
     }
   }
   state.saveError = null;
+  state.conflictDeclined = false;  // 書けたので自動保存を再開してよい
   renderSaveState("saved");
   return true;
+}
+
+/** 保存ボタン / Ctrl+S。見送った衝突をもう一度判断できるよう、印を落としてから保存する
+    （自動保存は印が立っている間は動かない — doSave の 409 分岐を参照）。 */
+function manualSave() {
+  state.conflictDeclined = false;
+  return saveFile();
 }
 
 // ---- 自動保存（NWP 移植・Note モード限定） -----------------------------------
@@ -912,6 +1018,7 @@ let autosaveTimer = null;
 function scheduleAutosave() {
   clearTimeout(autosaveTimer);
   if (!isNote()) return;
+  if (state.conflictDeclined) return;  // 上書きしないと決めた。勝手に書きに行かない
   if (!state.currentFile || !state.dirty) return;
   autosaveTimer = setTimeout(() => {
     if (!state.dirty) return;                          // 2秒の間に Ctrl+S で保存済みかもしれない
@@ -925,7 +1032,279 @@ function scheduleAutosave() {
 async function flushAutosave() {
   clearTimeout(autosaveTimer);
   if (!isNote()) return;
+  if (state.conflictDeclined) return;  // 見送った衝突を、切替やフォーカス移動で蒸し返さない
   if (state.currentFile && state.dirty) await saveFile();
+}
+
+// ---- 保存の衝突（外部でファイルが変わっていた） -------------------------------
+/** 409 を受けたときの処理。上書きするなら再送した結果を、しないなら null を返す。
+
+    「上書きしない」を安全側の既定にしていない（キャンセル＝上書きしない）のは、
+    どちらを選んでも失うものが無いから: 上書きしても相手の内容はローカル履歴に
+    積まれているし、上書きしなければ手元の内容はエディタに残る。 */
+async function resolveSaveConflict(path, content) {
+  const ok = confirm(
+    `⚠️ ${path} は、開いた後に別の場所（他のエディタ・エージェント）で変更されています。\n\n` +
+    `［OK］ この内容で上書きする\n` +
+    `　　　相手の変更は 🕰 履歴 から元に戻せます。\n\n` +
+    `［キャンセル］ 上書きしない\n` +
+    `　　　手元の内容はエディタに残ります。相手の変更を見てから決められます。`);
+  if (!ok) return null;
+  try {
+    return await postJSON("/api/file", { path, content, base_mtime: null, force: true });
+  } catch (e) {
+    state.saveError = e instanceof ApiError ? e : new ApiError(String(e), 0);
+    renderSaveState();
+    return null;
+  }
+}
+
+// ---- ファイル移動履歴（◀ ▶ と 🕘 最近開いたファイル）-------------------------
+// タブが無いので、仕様書とコードを往復するだけでもツリーを辿り直しになっていた。
+// 履歴はワークスペース内のパスなので、フォルダを切り替えたら捨てる（別の木のパスを
+// 「戻る」先に持っていると、開けないファイルばかりが並ぶ）。
+const RECENT_FILES_MAX = 15;
+
+function pushRecentFile(path) {
+  state.navRecent = [path, ...state.navRecent.filter((p) => p !== path)]
+    .slice(0, RECENT_FILES_MAX);
+}
+
+function resetNavHistory() {
+  state.navBack.length = 0;
+  state.navFwd.length = 0;
+  state.navRecent.length = 0;
+  renderNavState();
+}
+
+function renderNavState() {
+  $("nav-back").disabled = !state.navBack.length;
+  $("nav-fwd").disabled = !state.navFwd.length;
+  $("recent-btn").disabled = state.navRecent.length < 2;
+  $("history-btn").disabled = !state.currentFile;
+  const last = state.navBack[state.navBack.length - 1];
+  $("nav-back").title = last ? `戻る: ${last} (Alt+←)` : "戻る (Alt+←)";
+  const next = state.navFwd[state.navFwd.length - 1];
+  $("nav-fwd").title = next ? `進む: ${next} (Alt+→)` : "進む (Alt+→)";
+}
+
+/** 履歴を1つ辿る。openFile が実際に切り替わったときだけ履歴を動かす
+    （未保存の破棄確認でキャンセルされたら、履歴は元のまま残す）。 */
+async function navStep(from, to) {
+  if (!to.length) return;
+  const target = to[to.length - 1];
+  const prev = state.currentFile;
+  await openFile(target, false, "none");
+  if (state.currentFile !== target) return;
+  to.pop();
+  if (prev) from.push(prev);
+  renderNavState();
+}
+
+const navBackward = () => navStep(state.navFwd, state.navBack);
+const navForward = () => navStep(state.navBack, state.navFwd);
+
+function openRecentMenu() {
+  const items = state.navRecent
+    .filter((p) => p !== state.currentFile)
+    .map((p) => ({ label: "📄 " + p, title: p, onClick: () => openFile(p) }));
+  if (!items.length) return;
+  openMenuUnder($("recent-btn"), [{ label: "最近開いたファイル" }, ...items]);
+}
+
+// ---- 保存履歴（ローカル履歴 .pixie_history からの復元）------------------------
+let histSelected = null;  // 選択中の版ID（復元ボタンの対象）
+
+async function openHistoryModal() {
+  if (!state.currentFile) return;
+  histSelected = null;
+  $("hist-file").textContent = state.currentFile;
+  $("hist-preview").textContent = "";
+  $("hist-preview-head").textContent = "左の版を選ぶと内容が出ます。";
+  $("hist-restore").disabled = true;
+  $("hist-modal").classList.remove("hidden");
+  await loadHistoryList();
+}
+
+function closeHistoryModal() { $("hist-modal").classList.add("hidden"); }
+
+async function loadHistoryList() {
+  const path = state.currentFile;
+  const r = await tryJSON("/api/history?path=" + encodeURIComponent(path));
+  const list = $("hist-list");
+  list.innerHTML = "";
+  if (!r) return;
+  if (!r.enabled) {
+    list.innerHTML = "<li class='hint'>ローカル履歴は設定で無効になっています（history_enabled）。</li>";
+    return;
+  }
+  if (!r.versions.length) {
+    list.innerHTML = "<li class='hint'>まだ履歴がありません。次に保存したときから残ります。</li>";
+    return;
+  }
+  for (const v of r.versions) {
+    const li = document.createElement("li");
+    const when = document.createElement("span");
+    when.textContent = formatStamp(v.saved_at);
+    const size = document.createElement("span");
+    size.className = "hint";
+    size.textContent = `${v.size.toLocaleString()} B`;
+    li.append(when, size);
+    li.addEventListener("click", () => selectVersion(path, v, li));
+    list.appendChild(li);
+  }
+}
+
+/** ISO 文字列を「7/31 14:30:22」の形に。日付が無い版（壊れた名前）は生のまま出す。 */
+function formatStamp(iso) {
+  if (!iso) return "(不明)";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+async function selectVersion(path, v, li) {
+  for (const el of $("hist-list").children) el.classList.remove("active");
+  li.classList.add("active");
+  histSelected = v.id;
+  $("hist-restore").disabled = true;
+  $("hist-preview-head").textContent = "読み込み中…";
+  const r = await tryJSON(
+    `/api/history/file?path=${encodeURIComponent(path)}&version_id=${encodeURIComponent(v.id)}`);
+  if (!r || histSelected !== v.id) return;  // 待っている間に別の版を押されたら捨てる
+  $("hist-preview").textContent = r.content;
+  $("hist-preview-head").textContent = `${formatStamp(v.saved_at)} の内容`;
+  $("hist-restore").disabled = false;
+}
+
+async function restoreVersion() {
+  const path = state.currentFile;
+  if (!path || !histSelected) return;
+  if (!confirm(`${path} をこの版に戻します。\n今の内容も履歴に積まれるので、戻し間違えてもやり直せます。`)) return;
+  try {
+    await postJSON("/api/history/restore", { path, version_id: histSelected });
+  } catch (e) {
+    alert("⚠️ 復元に失敗: " + e.message);
+    return;
+  }
+  closeHistoryModal();
+  // ディスクは書き換わった。エディタの未保存分は復元を選んだ時点で捨てる意思表示。
+  await openFile(path, true, "none");
+  renderSaveState("saved");
+}
+
+// ---- 作業フォルダの行き先（⭐お気に入り / 🕘最近使った）------------------------
+let places = { favorites: [], recent: [], current: "" };
+
+async function loadPlaces() {
+  const r = await tryJSON("/api/workspace/places");
+  if (r) places = r;
+  return places;
+}
+
+const isFavorite = (path) =>
+  places.favorites.some((f) => samePath(f.path, path));
+
+/** Windows は大文字小文字を区別しないので畳んで比べる（サーバ側 config._norm と同じ判定）。 */
+const samePath = (a, b) =>
+  String(a || "").replace(/[\\/]+$/, "").toLowerCase() ===
+  String(b || "").replace(/[\\/]+$/, "").toLowerCase();
+
+/** トップバー ⭐: お気に入りと最近使ったフォルダへ1クリックで飛ぶ。 */
+async function openPlacesMenu() {
+  await loadPlaces();
+  const items = [];
+  const rows = (list, icon) => list.map((p) => ({
+    label: `${icon} ${p.name}${p.exists ? "" : "（見つかりません）"}`,
+    title: p.path,
+    onClick: p.exists ? () => switchWorkspace(p.path) : undefined,
+  }));
+  if (places.favorites.length) {
+    items.push({ label: "お気に入り" }, ...rows(places.favorites, "⭐"));
+  }
+  if (places.recent.length) {
+    items.push({ label: "最近使ったフォルダ" }, ...rows(places.recent, "🕘"));
+  }
+  items.push({ label: "📂 フォルダを選ぶ…", onClick: openRootModal });
+  if (!places.favorites.length && !places.recent.length) {
+    items.unshift({ label: "行き先はまだありません（📂 で移動すると溜まります）" });
+  }
+  openMenuUnder($("places-btn"), items);
+}
+
+/** 📂 ダイアログ上部の行き先一覧。クリックで即移動する（すぐ飛べることが目的なので、
+    パスを入力欄に入れるだけの一段階は挟まない）。★ で登録/解除、📂 で中を見るだけ。 */
+function renderPlaces() {
+  const box = $("root-places");
+  box.innerHTML = "";
+  const section = (title, list, icon, removable) => {
+    if (!list.length) return;
+    const head = document.createElement("div");
+    head.className = "places-head";
+    head.textContent = title;
+    box.appendChild(head);
+    for (const p of list) {
+      const row = document.createElement("div");
+      row.className = "place-row";
+      if (!p.exists) row.classList.add("missing");
+
+      const go = document.createElement("button");
+      go.className = "place-go";
+      go.textContent = `${icon} ${p.name}`;
+      go.title = p.exists ? `${p.path}（クリックでここへ移動）` : `${p.path}（見つかりません）`;
+      go.disabled = !p.exists;
+      go.addEventListener("click", () => switchWorkspace(p.path));
+
+      const browse = document.createElement("button");
+      browse.className = "place-mini";
+      browse.textContent = "📂";
+      browse.title = "移動せずに中を見る";
+      browse.disabled = !p.exists;
+      browse.addEventListener("click", () => browseDirs(p.path));
+
+      const star = document.createElement("button");
+      star.className = "place-mini";
+      star.textContent = removable ? "★" : "☆";
+      star.title = removable ? "お気に入りから外す" : "お気に入りに入れる";
+      star.addEventListener("click", () => toggleFavorite(p.path, p.name));
+
+      row.append(go, browse, star);
+      box.appendChild(row);
+    }
+  };
+  section("⭐ お気に入り", places.favorites, "⭐", true);
+  section("🕘 最近使ったフォルダ", places.recent, "🕘", false);
+  if (!places.favorites.length && !places.recent.length) {
+    box.innerHTML = "<div class='hint'>よく使うフォルダは ☆ ボタンでお気に入りに入れておくと、次からここに出ます。</div>";
+  }
+}
+
+async function toggleFavorite(path, name) {
+  if (!path) return;
+  try {
+    if (isFavorite(path)) {
+      places = await jsonFetch(
+        "/api/workspace/favorites?path=" + encodeURIComponent(path), { method: "DELETE" });
+    } else {
+      places = await postJSON("/api/workspace/favorites", { path, name: name || "" });
+    }
+  } catch (e) {
+    alert("⚠️ " + e.message);
+    return;
+  }
+  renderPlaces();
+  renderFavButton();
+}
+
+/** 📂 ダイアログの入力欄横の ☆／★（今表示しているフォルダの登録状態）。 */
+function renderFavButton() {
+  const cur = $("root-input").value.trim();
+  const btn = $("root-fav-btn");
+  const on = !!cur && isFavorite(cur);
+  btn.textContent = on ? "★" : "☆";
+  btn.title = on ? "お気に入りから外す" : "このフォルダをお気に入りに入れる";
+  btn.disabled = !cur;
 }
 
 // ---- Markdown プレビュー ----
@@ -1449,38 +1828,164 @@ function revealDiagramSource(at) {
   editor.revealRangeInCenterIfOutsideViewport(focusRange || lineRange, 0 /* Smooth */);
 }
 
-// ---- 全文検索 ----
+// ---- 全文検索 / 一括置換 ----
+// ヒット行だけでは「ここを直したいのか」が判断できないので前後2行を添える（サーバが付ける）。
+// 置換の対象は**この検索でヒットしたファイル**に限る。件数上限で一覧から溢れたファイルまで
+// 巻き込まないため（サーバ側も paths を明示的に受け取る契約にしてある）。
 let searchTimer = null;
+let searchHitPaths = [];  // 直近の検索でヒットしたファイル（重複なし・置換の対象）
+
 function onSearch() {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => runSearch($("file-search").value), 250);
 }
 
+/** 検索欄と結果・置換パネルを初期状態へ戻す（作業フォルダ切替時など）。 */
+function clearSearch() {
+  clearTimeout(searchTimer);
+  $("file-search").value = "";
+  searchHitPaths = [];
+  $("search-results").classList.add("hidden");
+  $("search-results").innerHTML = "";
+  $("search-opts").classList.add("hidden");
+  $("replace-bar").classList.add("hidden");
+  $("replace-preview").innerHTML = "";
+  $("replace-status").textContent = "";
+  $("file-list").classList.remove("hidden");
+}
+
 async function runSearch(q) {
   const box = $("search-results");
   const list = $("file-list");
-  if (!q.trim()) { box.classList.add("hidden"); list.classList.remove("hidden"); return; }
-  const r = await tryJSON("/api/search?q=" + encodeURIComponent(q));
-  if (!r) return;
-  box.innerHTML = "";
-  for (const hit of r.results) {
-    const div = document.createElement("div");
-    div.className = "search-hit";
-    const loc = document.createElement("span");
-    loc.className = "loc";
-    loc.textContent = `${hit.path}:${hit.line}`;
-    div.append(loc, " " + hit.text);
-    div.addEventListener("click", async () => {
-      await openFile(hit.path);
-      state.editor.revealLineInCenter(hit.line);
-      state.editor.setPosition({ lineNumber: hit.line, column: 1 });
-      state.editor.focus();
-    });
-    box.appendChild(div);
+  if (!q.trim()) {
+    searchHitPaths = [];
+    box.classList.add("hidden");
+    $("search-opts").classList.add("hidden");
+    $("replace-bar").classList.add("hidden");
+    list.classList.remove("hidden");
+    return;
   }
+  const params = new URLSearchParams({ q, case: $("search-case").checked ? "true" : "false" });
+  const r = await tryJSON("/api/search?" + params);
+  if (!r) return;
+  searchHitPaths = [...new Set(r.results.map((h) => h.path))];
+  box.innerHTML = "";
+  for (const hit of r.results) box.appendChild(buildSearchHit(hit));
   if (!r.results.length) box.innerHTML = "<div class='hint'>該当なし</div>";
+  $("search-opts").classList.remove("hidden");
+  updateReplaceStatus();
   list.classList.add("hidden");
   box.classList.remove("hidden");
+}
+
+function buildSearchHit(hit) {
+  const div = document.createElement("div");
+  div.className = "search-hit";
+  const loc = document.createElement("div");
+  loc.className = "loc";
+  loc.textContent = `${hit.path}:${hit.line}`;
+  div.appendChild(loc);
+
+  const body = document.createElement("pre");
+  body.className = "hit-body";
+  const addLine = (text, cls) => {
+    const span = document.createElement("span");
+    span.className = cls;
+    span.textContent = text === "" ? " " : text;  // 空行でも1行ぶんの高さを保つ
+    body.appendChild(span);
+  };
+  for (const ln of hit.before || []) addLine(ln, "ctx");
+  addLine(hit.text, "hit-line");
+  for (const ln of hit.after || []) addLine(ln, "ctx");
+  div.appendChild(body);
+
+  div.addEventListener("click", async () => {
+    await openFile(hit.path);
+    state.editor.revealLineInCenter(hit.line);
+    state.editor.setPosition({ lineNumber: hit.line, column: 1 });
+    state.editor.focus();
+  });
+  return div;
+}
+
+function toggleReplaceBar() {
+  const bar = $("replace-bar");
+  bar.classList.toggle("hidden");
+  if (!bar.classList.contains("hidden")) {
+    updateReplaceStatus();
+    $("replace-input").focus();
+  }
+}
+
+function updateReplaceStatus(text) {
+  $("replace-status").textContent = text !== undefined ? text
+    : `対象: ヒットした ${searchHitPaths.length} ファイル`;
+  const none = !searchHitPaths.length;
+  $("replace-preview-btn").disabled = none;
+  $("replace-run-btn").disabled = none;
+}
+
+/** 置換を実行（dry=true ならプレビューのみ・1バイトも書かない）。 */
+async function runReplace(dry) {
+  const query = $("file-search").value;
+  const replace = $("replace-input").value;
+  if (!query.trim() || !searchHitPaths.length) return;
+  if (!dry) {
+    const ok = confirm(
+      `${searchHitPaths.length} ファイルの「${query}」を「${replace}」に置き換えます。\n\n` +
+      `置換前の内容は 🕰 履歴 に残るので元に戻せます。実行しますか？`);
+    if (!ok) return;
+    await flushAutosave();  // 手元の未保存分を先に確定させる（置換結果と混ざらないように）
+  }
+  updateReplaceStatus(dry ? "確認中…" : "置換中…");
+  let r;
+  try {
+    r = await postJSON("/api/search/replace", {
+      query, replace, paths: searchHitPaths,
+      case: $("search-case").checked, dry_run: dry,
+    });
+  } catch (e) {
+    updateReplaceStatus("⚠️ " + e.message);
+    return;
+  }
+  renderReplacePreview(r);
+  const done = r.total === 0 ? "置き換わる箇所がありません"
+    : dry ? `${r.changed_files} ファイル / ${r.total} 箇所が置き換わります`
+      : `✓ ${r.changed_files} ファイル / ${r.total} 箇所を置換しました（🕰 履歴 から戻せます）`;
+  if (dry) { updateReplaceStatus(done); return; }
+  // 開いているファイルが書き換わったら、エディタの内容とディスクがずれる。
+  const changed = r.files.map((f) => f.path);
+  if (state.currentFile && changed.includes(state.currentFile)) {
+    await openFile(state.currentFile, true, "none");
+  }
+  await runSearch($("file-search").value);  // 置換後の状態で検索し直す
+  // 検索し直すと状態表示が「対象: N ファイル」に戻ってしまう。何をしたのかの
+  // 報告が一瞬で消えると実行できたのか分からないので、ここで出し直す
+  // （#replace-preview は runSearch では消えないのでそのまま残る）。
+  updateReplaceStatus(done);
+}
+
+function renderReplacePreview(r) {
+  const box = $("replace-preview");
+  box.innerHTML = "";
+  for (const f of r.files) {
+    const head = document.createElement("div");
+    head.className = "rp-file";
+    head.textContent = `${f.path}（${f.count} 箇所）`;
+    box.appendChild(head);
+    for (const s of f.samples) {
+      const row = document.createElement("div");
+      row.className = "rp-row";
+      const before = document.createElement("div");
+      before.className = "rp-before";
+      before.textContent = `- ${s.before}`;
+      const after = document.createElement("div");
+      after.className = "rp-after";
+      after.textContent = `+ ${s.after}`;
+      row.append(before, after);
+      box.appendChild(row);
+    }
+  }
 }
 
 // ---- 選択テキスト（Note モード: チップ表示 + 送信ペイロード） -----------------
@@ -2884,6 +3389,7 @@ async function browseDirs(path) {
   const r = await tryJSON("/api/workspace/dirs?path=" + encodeURIComponent(path || ""));
   if (!r) return;
   $("root-input").value = r.cwd || "";
+  renderFavButton();  // 表示中フォルダの ☆／★ を合わせる
 
   // ドライブボタン（Windows）
   const drives = $("root-drives");
@@ -2913,15 +3419,21 @@ async function browseDirs(path) {
   }
 }
 
-function openRootModal() {
+async function openRootModal() {
   $("root-modal").classList.remove("hidden");
-  browseDirs($("root-path").textContent || "");
+  await loadPlaces();
+  renderPlaces();
+  await browseDirs($("root-path").textContent || "");
 }
 
 function closeRootModal() { $("root-modal").classList.add("hidden"); }
 
-async function chooseWorkspace() {
-  const path = $("root-input").value.trim();
+/** [✓ このフォルダにする]: 入力欄のパスへ移動する。 */
+const chooseWorkspace = () => switchWorkspace($("root-input").value.trim());
+
+/** 作業フォルダを `path` に切り替える。⭐/🕘 の行き先クリックからも呼ぶので、
+    入力欄ではなく引数でパスを受ける。 */
+async function switchWorkspace(path) {
   if (!path) return;
   if (state.streaming) { alert("⚠️ 実行中は作業フォルダを切り替えられません。"); return; }
   await flushAutosave();  // 切替後は別ワークスペース。保留中の保存はここで確定させる
@@ -2936,6 +3448,9 @@ async function chooseWorkspace() {
   closeRootModal();
   // 前のワークスペースに紐づく状態をリセットする
   state.currentFile = null;
+  state.baseMtime = null;
+  resetNavHistory();  // 別の木のパスを ◀ の行き先に残さない
+  clearSearch();      // 検索結果と置換の対象も前のワークスペースのもの
   state.collapsedDirs.clear();
   state.knownDirs.clear();  // 別ワークスペースの木なので「既定で閉じる」判定もやり直す
   state.changedPaths.clear();
@@ -3208,13 +3723,32 @@ function bindUI() {
   });
   updateSessionInfo();
   updatePreviewAvailability();
-  $("save-btn").addEventListener("click", () => saveFile());  // MouseEvent を引数に渡さない
+  $("save-btn").addEventListener("click", () => manualSave());  // MouseEvent を引数に渡さない
   $("preview-btn").addEventListener("click", togglePreview);
   $("richcopy-btn").addEventListener("click", copyRichPreview);
   bindMdflowUI();
   bindConfluenceUI();
   $("refresh-btn").addEventListener("click", () => loadFileList());
   $("file-search").addEventListener("input", onSearch);
+  // 全文検索の大小区別トグルと一括置換
+  $("search-case").addEventListener("change", () => runSearch($("file-search").value));
+  $("replace-toggle").addEventListener("click", toggleReplaceBar);
+  $("replace-preview-btn").addEventListener("click", () => runReplace(true));
+  $("replace-run-btn").addEventListener("click", () => runReplace(false));
+  $("replace-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); runReplace(true); }  // Enter は必ず確認だけ
+  });
+  // ファイル移動履歴（◀ ▶ 🕘）と保存履歴（🕰）
+  $("nav-back").addEventListener("click", navBackward);
+  $("nav-fwd").addEventListener("click", navForward);
+  $("recent-btn").addEventListener("click", (e) => { e.stopPropagation(); openRecentMenu(); });
+  $("history-btn").addEventListener("click", openHistoryModal);
+  $("hist-close").addEventListener("click", closeHistoryModal);
+  $("hist-restore").addEventListener("click", restoreVersion);
+  $("hist-modal").addEventListener("click", (e) => {
+    if (e.target === $("hist-modal")) closeHistoryModal();  // 背景クリックで閉じる
+  });
+  renderNavState();
   // モードバッジ（🛠 Code → 📋 Plan → 📝 Note の循環）
   $("mode-btn").addEventListener("click", cycleMode);
   // Code モードの進め方（📋 計画を先に / ⚡ 通常）トグル
@@ -3259,6 +3793,14 @@ function bindUI() {
   $("folder-btn").addEventListener("click", openRootModal);
   $("root-cancel").addEventListener("click", closeRootModal);
   $("root-ok").addEventListener("click", chooseWorkspace);
+  // ⭐ お気に入り／最近使ったフォルダへ即ジャンプ（stopPropagation: 直後の
+  // document click ハンドラに、今開いたメニューを閉じられないように）
+  $("places-btn").addEventListener("click", (e) => { e.stopPropagation(); openPlacesMenu(); });
+  $("root-fav-btn").addEventListener("click", () => {
+    const p = $("root-input").value.trim();
+    if (p) toggleFavorite(p);
+  });
+  $("root-input").addEventListener("input", renderFavButton);
   $("root-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); browseDirs($("root-input").value.trim()); }
   });
@@ -3287,7 +3829,7 @@ function bindUI() {
     // エディタ内は Monaco の addCommand が先に拾うのでここには来ない。
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
       e.preventDefault();  // ブラウザの「ページを保存」を止める
-      saveFile();
+      manualSave();
       return;
     }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "p") {
@@ -3295,7 +3837,20 @@ function bindUI() {
       togglePreview();
       return;
     }
-    if (e.key === "Escape" && !$("root-modal").classList.contains("hidden")) closeRootModal();
+    // ファイルの戻る/進む。Ctrl+Tab は Chrome がタブ切替に予約していてページ側では
+    // 拾えないので、最近開いたファイルは Ctrl+E に割り当てている。
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      if (e.key === "ArrowLeft") navBackward(); else navForward();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "e") {
+      e.preventDefault();
+      openRecentMenu();
+      return;
+    }
+    if (e.key === "Escape" && !$("hist-modal").classList.contains("hidden")) closeHistoryModal();
+    else if (e.key === "Escape" && !$("root-modal").classList.contains("hidden")) closeRootModal();
     else if (e.key === "Escape" && !$("pick-modal").classList.contains("hidden")) closePickModal();
     else if (e.key === "Escape" && !$("cf-modal").classList.contains("hidden")) $("cf-modal").classList.add("hidden");
     else if (e.key === "Escape" && !$("sessions-modal").classList.contains("hidden")) $("sessions-modal").classList.add("hidden");

@@ -14,10 +14,15 @@
     <button id="root-project-btn" title="ルートプロジェクト（作業対象フォルダ）を変更">
       📁 <span id="root-project-name">…</span>
     </button>
+    <button id="places-btn" title="お気に入り・最近使ったフォルダへ移動">⭐</button>
     <div class="file-info">
+      <button id="nav-back" class="nav-btn" title="前に開いていたファイルへ戻る (Alt+←)">◀</button>
+      <button id="nav-fwd" class="nav-btn" title="進む (Alt+→)">▶</button>
+      <button id="recent-btn" class="nav-btn" title="最近開いたファイル (Ctrl+E)">🕘</button>
       <span id="current-file">（ファイル未選択）</span>
       <button id="save-btn" title="保存 (Ctrl+S)">保存</button>
       <span id="save-state"></span>
+      <button id="history-btn" title="このファイルの保存履歴から元に戻す">🕰 履歴</button>
     </div>
     <div class="model-info">model: <span id="model-name">…</span><span id="agent-status"></span></div>
     <button id="settings-btn" title="設定（モデル）">⚙️</button>
@@ -84,7 +89,28 @@
             <button id="web2md-btn" class="note-only" title="URLのページをMarkdown化して web/ に保存する">🌐+</button>
             <button id="cf-btn" title="Confluence 等のページ（コピーしたHTML）をMarkdownに変換して挿入する">📥 貼付</button>
           </span>
-          <input id="file-search" type="search" placeholder="🔍 全文検索…" />
+          <!-- 検索欄はヘッダの2行目に回す。右ペインは狭いので、見出し・操作ボタンと
+               同じ行に並べると幅が足りずボタンの文字が折り返す。 -->
+          <span class="search-row">
+            <input id="file-search" type="search" placeholder="🔍 全文検索…" />
+            <span id="search-opts" class="hidden">
+              <label title="大文字小文字を区別する（検索と置換で共通）">
+                <input id="search-case" type="checkbox" /> Aa
+              </label>
+              <button id="replace-toggle" title="ヒットしたファイルをまとめて置換する">🔁 置換</button>
+            </span>
+          </span>
+        </div>
+        <!-- 一括置換。検索でヒットしたファイルだけが対象（一覧に出ていないファイルは
+             巻き込まない）。まずプレビューで件数を確かめてから実行する。 -->
+        <div id="replace-bar" class="hidden">
+          <input id="replace-input" type="text" spellcheck="false" placeholder="置換後の文字列（そのまま入ります）" />
+          <div class="replace-actions">
+            <button id="replace-preview-btn">👁 プレビュー</button>
+            <button id="replace-run-btn" class="apply-btn">✓ すべて置換</button>
+            <span id="replace-status" class="hint"></span>
+          </div>
+          <div id="replace-preview"></div>
         </div>
         <div id="root-bar">
           <span id="root-path" title="現在の作業フォルダ"></span>
@@ -148,14 +174,40 @@
   <div id="root-modal" class="hidden">
     <div id="root-dialog">
       <div class="root-head">📂 ルートプロジェクト（作業対象フォルダ）を選ぶ</div>
+      <!-- 行き先（⭐お気に入り / 🕘最近使った）。クリックで即移動する。 -->
+      <div id="root-places"></div>
       <div id="root-drives"></div>
-      <input id="root-input" type="text" spellcheck="false"
-        placeholder="例: D:\projects\myapp（Enter で移動）" />
+      <div class="root-inputrow">
+        <input id="root-input" type="text" spellcheck="false"
+          placeholder="例: D:\projects\myapp（Enter で移動）" />
+        <button id="root-fav-btn" title="今表示しているフォルダをお気に入りに入れる／外す">☆</button>
+      </div>
       <ul id="root-dirlist"></ul>
       <div class="root-hint hint">フォルダをクリックで移動 ／ パス直接入力＋Enter でも移動。決定するとファイルブラウザが切替わり、新しい会話がそのフォルダで始まります。</div>
       <div class="root-actions">
         <button id="root-cancel">キャンセル</button>
         <button id="root-ok" class="apply-btn">✓ このフォルダにする</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 保存履歴ダイアログ（ローカル履歴 .pixie_history から元に戻す）。
+       UI 経由の保存・自動保存はエージェントのターン単位バックアップを通らないので、
+       ここが「うっかり上書き」からの唯一の復路になる。 -->
+  <div id="hist-modal" class="hidden">
+    <div id="hist-dialog">
+      <div class="root-head">🕰 保存履歴 — <span id="hist-file"></span></div>
+      <div id="hist-body">
+        <ul id="hist-list"></ul>
+        <div id="hist-preview-wrap">
+          <div id="hist-preview-head" class="hint">左の版を選ぶと内容が出ます。</div>
+          <pre id="hist-preview"></pre>
+        </div>
+      </div>
+      <div class="root-hint hint">保存の直前の内容を残しています。戻すときは「今の内容」も履歴に積むので、戻し間違えてもやり直せます。</div>
+      <div class="root-actions">
+        <button id="hist-close">閉じる</button>
+        <button id="hist-restore" class="apply-btn" disabled>↩ この版に戻す</button>
       </div>
     </div>
   </div>

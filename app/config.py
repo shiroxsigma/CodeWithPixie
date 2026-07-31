@@ -7,6 +7,8 @@ Web(FastAPI) から自律コード修正エージェントとして駆動する�
 LMStudioBackend が担うため、本アプリは接続先(servers)とワークスペースだけを持つ。
 """
 import json
+import os
+
 from pathlib import Path
 
 from pydantic_settings import (
@@ -67,6 +69,11 @@ class Settings(BaseSettings):
 
     # ripgrep のパス（PATH にあれば "rg" のまま）。ファイル検索 API 用。
     rg_path: str = "rg"
+
+    # --- ローカル履歴（保存の直前に旧内容を .pixie_history/ へ退避）---
+    # UI 経由の保存・自動保存はエージェントのターン単位バックアップを通らないため、
+    # ここが唯一の「取り返しがつく」経路になる。切りたい人向けに False を用意する。
+    history_enabled: bool = True
 
     # 承認待ちのタイムアウト秒。0 以下で無期限（推奨: 離席でターンが死なない）。
     approval_timeout: float = 0.0
@@ -257,6 +264,105 @@ def set_think_budget_sec(seconds) -> int:
     return v
 
 
+# --- 作業フォルダの「行き先」（お気に入り / 最近使った）-----------------------
+# どちらも config.json（アプリ設定）に置く。ワークスペース随伴のサイドカーに置くと
+# 「今そこに居ないと一覧が読めない」＝行き先リストとして役に立たないため。
+
+#: お気に入りの上限。手動登録なので緩めでよいが、UI が縦に伸び切らない程度に抑える。
+FAVORITES_MAX = 30
+
+#: 最近使ったフォルダの保持数。
+RECENT_MAX = 12
+
+
+def _norm(path: str) -> str:
+    """パス比較用の正規化キー。Windows は大文字小文字を区別しないので畳む。"""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _place(path: str, name: str = "") -> dict:
+    """UI に返す1件。name 未指定なら末尾フォルダ名（ドライブ直下なら生パス）。"""
+    p = str(path)
+    label = (name or "").strip() or Path(p).name or p
+    return {"name": label, "path": p, "exists": Path(p).is_dir()}
+
+
+def list_favorites() -> list[dict]:
+    """お気に入りフォルダ。壊れた要素は黙って捨てる（設定を手で書く人がいる前提）。"""
+    raw = _read_config_json().get("favorites") or []
+    out: list[dict] = []
+    for item in raw:
+        if isinstance(item, str):
+            out.append(_place(item))
+        elif isinstance(item, dict) and item.get("path"):
+            out.append(_place(item["path"], item.get("name", "")))
+    return out[:FAVORITES_MAX]
+
+
+def _save_favorites(items: list[dict]) -> None:
+    data = _read_config_json()
+    data["favorites"] = [{"name": i["name"], "path": i["path"]} for i in items[:FAVORITES_MAX]]
+    _write_config_json(data)
+
+
+def add_favorite(path: str, name: str = "") -> list[dict]:
+    """お気に入りに追加（既にあれば名前だけ更新）。追加後の一覧を返す。"""
+    raw = (path or "").strip()
+    if not raw:
+        raise ValueError("パスを指定してください。")
+    p = _resolve(raw)
+    if p.is_file():
+        raise ValueError(f"ファイルが指定されました。フォルダを指定してください: {p}")
+    items = list_favorites()
+    key = _norm(p)
+    for i in items:
+        if _norm(i["path"]) == key:
+            if name.strip():
+                i["name"] = name.strip()
+            _save_favorites(items)
+            return list_favorites()
+    if len(items) >= FAVORITES_MAX:
+        raise ValueError(f"お気に入りは {FAVORITES_MAX} 件までです。不要なものを外してください。")
+    items.append(_place(str(p), name))
+    _save_favorites(items)
+    return list_favorites()
+
+
+def remove_favorite(path: str) -> list[dict]:
+    key = _norm(path)
+    items = [i for i in list_favorites() if _norm(i["path"]) != key]
+    _save_favorites(items)
+    return list_favorites()
+
+
+def list_recent() -> list[dict]:
+    """最近使った作業フォルダ（新しい順）。現在のフォルダは含めない — 「今ここ」を
+    行き先として並べても押す意味が無く、1枠を無駄にするだけなので。"""
+    raw = _read_config_json().get("recent_workspaces") or []
+    cur = _norm(WORKSPACE)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        key = _norm(item)
+        if key == cur or key in seen:
+            continue
+        seen.add(key)
+        out.append(_place(item))
+    return out[:RECENT_MAX]
+
+
+def _push_recent(data: dict, path: Path) -> None:
+    """`data`（config.json の中身）の recent_workspaces に path を先頭詰めする。
+
+    呼び出し側が同じ `data` をまとめて書き戻す前提（読み書きを二重にしない）。"""
+    prev = [i for i in (data.get("recent_workspaces") or []) if isinstance(i, str)]
+    key = _norm(path)
+    kept = [i for i in prev if _norm(i) != key]
+    data["recent_workspaces"] = [str(path), *kept][:RECENT_MAX]
+
+
 def set_workspace(raw: str) -> Path:
     """作業対象フォルダ（ファイルブラウザ＋新規セッションの workspace）を切り替え、config.json に永続化する。"""
     global WORKSPACE
@@ -268,6 +374,9 @@ def set_workspace(raw: str) -> Path:
         raise ValueError(f"ファイルが指定されました。フォルダを指定してください: {p}")
     p.mkdir(parents=True, exist_ok=True)
     data = _read_config_json()
+    # 切替**元**を履歴へ積む。切替先は「今のフォルダ」になるので、次に別の場所へ
+    # 移ったときに初めて行き先として意味を持つ（list_recent は現在地を除外する）。
+    _push_recent(data, WORKSPACE)
     data["workspace_root"] = str(p)
     _write_config_json(data)
     settings.workspace_root = str(p)

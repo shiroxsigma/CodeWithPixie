@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from . import config  # WORKSPACE を動的に参照する
+from . import history  # 保存前のローカル履歴（write_file が呼ぶ）
 
 # コードエディタとして扱う拡張子（NWP のマークダウン中心から大幅に拡張）。
 TEXT_EXTS = {
@@ -25,7 +26,8 @@ TEXT_EXTS = {
     ".sql", ".xml", ".vue", ".svelte", ".gradle", ".dockerfile", ".makefile",
 }
 IGNORE_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", ".idea",
-               ".vscode", "dist", "build", ".pixie_notes", ".mypy_cache", ".pytest_cache"}
+               ".vscode", "dist", "build", ".pixie_notes", ".pixie_history",
+               ".mypy_cache", ".pytest_cache"}
 # プレビューで <img> 表示してよい拡張子（/api/asset の配信対象。NWP から移植）
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MAX_BYTES = 2_000_000  # 2MB を超えるファイルは丸ごと読まない
@@ -209,8 +211,28 @@ def read_file(rel: str) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
-def write_file(rel: str, content: str) -> None:
+def mtime_of(rel: str) -> float:
+    """ファイルの更新時刻（秒）。存在しなければ 0.0。
+
+    「開いてから外部で書き換わっていないか」の照合に使う（`main.api_write`）。
+    ディレクトリを指しても 0.0 にはせず素直に返す — 呼び出し側はファイルにしか使わない。
+    """
     p = safe_path(rel)
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def write_file(rel: str, content: str) -> None:
+    """テキストを書き込む。**書き込む前に旧内容をローカル履歴へ退避する。**
+
+    退避をここに置くのは、UI 経由の書き込み（保存・自動保存・web2md）が全部この
+    関数を通るため。エージェントの書き込みは AWP のツール側（ターン単位バックアップ
+    あり）なのでここには来ない。履歴が取れなくても保存は通る（history.snapshot 内で
+    握り潰す）。"""
+    p = safe_path(rel)
+    history.snapshot(rel)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
 

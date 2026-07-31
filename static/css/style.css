@@ -55,6 +55,24 @@ button:active { transform: translateY(1px); }
 #save-state.save-error { color: var(--danger); cursor: help; }
 #settings-btn { padding: 4px 8px; font-size: 15px; line-height: 1; }
 
+/* --- ファイル移動履歴（◀ ▶ 🕘）と保存履歴（🕰）・行き先（⭐）--- */
+/* 行き先が無いときにボタンごと消さないのは、「押せないが在る」ことが分かった方が
+   機能の存在に気付けるため（消えると毎回探すことになる）。 */
+.nav-btn { padding: 3px 7px; font-size: 12px; line-height: 1.2; }
+.nav-btn:disabled, #history-btn:disabled, #places-btn:disabled {
+  opacity: .35; cursor: default; border-color: var(--border);
+}
+#history-btn { padding: 3px 8px; font-size: 12px; }
+#places-btn { padding: 4px 8px; font-size: 14px; line-height: 1; margin-left: -2px; }
+/* ドロップダウンの見出し行（クリックできない区切り） */
+.fs-menu-head {
+  padding: 6px 12px 2px; color: var(--muted); font-size: 11px;
+  cursor: default; pointer-events: none;
+}
+#fs-menu .fs-menu-item {
+  max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* --- 設定ダイアログ --- */
 #settings-modal {
   position: fixed; inset: 0; z-index: 200;
@@ -173,12 +191,16 @@ button:active { transform: translateY(1px); }
 #v-divider { height: 5px; flex: 0 0 auto; cursor: row-resize; background: var(--border); }
 #v-divider:hover { background: var(--accent); }
 .section-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px;
   padding: 8px 12px; font-size: 12px; color: var(--muted); font-weight: 600;
 }
+/* 検索欄は幅いっぱいの2行目に回す（flex: 1 1 100% で必ず折り返す）。 */
+.search-row { display: flex; align-items: center; gap: 8px; flex: 1 1 100%; min-width: 0; }
 #file-search {
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-  color: var(--fg); padding: 4px 8px; font-size: 12px; width: 150px;
+  color: var(--fg); padding: 4px 8px; font-size: 12px;
+  flex: 1 1 auto; min-width: 90px;
 }
 #file-list, #search-results { overflow-y: auto; flex: 1 1 auto; min-height: 0; margin: 0; padding: 0 6px 8px; list-style: none; }
 #file-list li {
@@ -235,6 +257,60 @@ button:active { transform: translateY(1px); }
 #root-dirlist li { padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 #root-dirlist li:hover { background: var(--bg3); }
 .root-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* --- 行き先（⭐お気に入り / 🕘最近使ったフォルダ）--- */
+/* 一覧が伸びてもダイアログ全体を押し出さないよう、ここだけスクロールさせる。 */
+#root-places { max-height: 30vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.places-head { color: var(--muted); font-size: 11px; margin: 4px 0 2px; }
+.place-row { display: flex; align-items: center; gap: 4px; }
+.place-go {
+  flex: 1; min-width: 0; text-align: left; padding: 4px 10px; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.place-mini { padding: 4px 7px; font-size: 12px; line-height: 1.2; }
+.place-row.missing .place-go { color: var(--muted); text-decoration: line-through; }
+.place-go:disabled, .place-mini:disabled { opacity: .4; cursor: default; }
+.root-inputrow { display: flex; gap: 6px; align-items: center; }
+.root-inputrow #root-input { flex: 1; min-width: 0; }
+#root-fav-btn { padding: 7px 10px; font-size: 14px; line-height: 1; }
+
+/* --- 保存履歴ダイアログ（ローカル履歴からの復元）--- */
+#hist-modal {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+#hist-dialog {
+  width: min(860px, 94vw); max-height: 84vh;
+  display: flex; flex-direction: column; gap: 10px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5); padding: 16px;
+}
+#hist-file { font-weight: 400; color: var(--accent2); }
+/* 左＝版の一覧／右＝その版の中身。狭い窓では縦に積む。 */
+#hist-body { display: flex; gap: 10px; min-height: 0; flex: 1; }
+#hist-list {
+  width: 220px; flex: none; overflow-y: auto; margin: 0; padding: 4px; list-style: none;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+#hist-list li {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+#hist-list li:hover { background: var(--bg3); }
+#hist-list li.active { background: var(--accent); color: #17131f; }
+#hist-list li.active .hint { color: #17131f; opacity: .75; }
+#hist-preview-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+#hist-preview {
+  flex: 1; min-height: 200px; overflow: auto; margin: 0; padding: 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word;
+}
+@media (max-width: 720px) {
+  #hist-body { flex-direction: column; }
+  #hist-list { width: auto; max-height: 28vh; }
+}
 
 /* --- 関連ファイル参照 --- */
 /* #filemgr と同じ理由で min-height:0（参照が増えてもチャット欄を押し下げない）。 */
@@ -355,6 +431,41 @@ button:active { transform: translateY(1px); }
 .search-hit { padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .search-hit:hover { background: var(--bg3); }
 .search-hit .loc { color: var(--accent2); }
+/* ヒット行＋前後2行。前後は落として、ヒット行だけを普通の明るさで出す
+   （逆に前後を暗くしないと、どれがヒットか目で追えない）。 */
+.search-hit .hit-body {
+  margin: 2px 0 0; font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 11.5px; line-height: 1.5; white-space: pre; overflow-x: auto;
+}
+.search-hit .hit-body span { display: block; }
+.search-hit .ctx { color: var(--muted); opacity: .75; }
+.search-hit .hit-line { color: var(--fg); background: rgba(139, 124, 255, 0.16); border-radius: 3px; }
+
+/* --- 一括置換 --- */
+#search-opts { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+#search-opts label { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; }
+#replace-toggle { padding: 2px 8px; font-size: 12px; }
+#replace-bar {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--bg2);
+}
+#replace-input {
+  width: 100%; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 8px; font-size: 12px; font-family: ui-monospace, "Cascadia Code", monospace;
+}
+.replace-actions { display: flex; align-items: center; gap: 8px; }
+.replace-actions button { padding: 3px 10px; font-size: 12px; }
+#replace-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#replace-preview {
+  max-height: 26vh; overflow-y: auto;
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 11.5px; line-height: 1.5;
+}
+#replace-preview:empty { display: none; }
+.rp-file { color: var(--accent2); margin-top: 6px; }
+.rp-row { margin-left: 8px; }
+.rp-before { color: var(--danger); white-space: pre-wrap; word-break: break-all; }
+.rp-after { color: var(--accent2); white-space: pre-wrap; word-break: break-all; }
 .hidden { display: none !important; }
 
 /* --- chat --- */

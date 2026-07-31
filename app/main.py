@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import (code_chat, compact, config, copilot, copilot_flow, engine_adapter, extract,
-               files, mdflow, mode, note_api, note_prompts, patch, search)
+               files, history, mdflow, mode, note_api, note_prompts, patch, search)
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -136,6 +136,16 @@ async def verify_origin(request: Request, call_next):
 class SaveReq(BaseModel):
     path: str
     content: str
+    #: 開いた（または最後に保存した）時点の mtime。渡すと外部変更の照合が働く。
+    #: None は「照合しない」= 従来どおり無条件上書き（古いフロントとの互換）。
+    base_mtime: float | None = None
+    #: True で照合を飛ばして上書きする（フロントが衝突ダイアログで選ばせた後の再送）。
+    force: bool = False
+
+
+class HistoryRestoreReq(BaseModel):
+    path: str
+    version_id: str
 
 
 class FsCreateReq(BaseModel):
@@ -231,20 +241,82 @@ def api_read(path: str):
             # refs/read と同じ上限（画像入り Office ファイルは数十MBが普通）
             if p.stat().st_size > extract.MAX_OFFICE_BYTES:
                 raise HTTPException(400, "file too large")
-            return {"path": path, "content": extract.extract_text(p), "extracted": True}
-        return {"path": path, "content": files.read_file(path), "extracted": False}
+            return {"path": path, "content": extract.extract_text(p), "extracted": True,
+                    "mtime": 0.0}
+        # mtime は「開いた時点のディスクの版」。保存時に送り返してもらい、その間に
+        # 外部（他エディタ・エージェント）が書き換えていないかを照合する（api_write）。
+        return {"path": path, "content": files.read_file(path), "extracted": False,
+                "mtime": files.mtime_of(path)}
     except FileNotFoundError:
         raise HTTPException(404, "not found")
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
+#: mtime 比較の許容誤差（秒）。JSON を往復しても double は厳密に戻るが、
+#: ファイルシステム/OS 差で末尾がぶれる余地を残しておく。
+MTIME_EPSILON = 1e-6
+
+
 @app.post("/api/file")
 def api_write(req: SaveReq):
+    """ファイルを保存する。旧内容はローカル履歴へ退避される（files.write_file）。
+
+    `base_mtime` 付きで来た場合は「読み込んだ後にディスクが変わっていないか」を
+    照合し、変わっていたら **409 を返して書かない**。以前は無条件上書きだったので、
+    別エディタやエージェントの変更を、エディタに載ったままの古いバッファで黙って
+    踏み潰せた（踏み潰した側は履歴にも残らない — 履歴に積まれるのは踏み潰された
+    「新しい方」なので救出はできるが、まず気付けない）。"""
     try:
+        if req.base_mtime is not None and not req.force:
+            disk = files.mtime_of(req.path)
+            # disk == 0.0 は「まだ無い」。新規保存で base_mtime=0 と一致するので通る。
+            if abs(disk - req.base_mtime) > MTIME_EPSILON:
+                raise HTTPException(409, "このファイルは開いた後に別の場所で変更されています。")
+        if req.force:
+            # 衝突を承知で上書きする経路。ここで消えるのは**他人の変更**なので、
+            # 自動保存よけの間引き（MIN_INTERVAL_SEC）に巻き込ませない。フロントは
+            # 「相手の変更は履歴から戻せます」と言って上書きを選ばせているので、
+            # ここを取りこぼすとその案内が嘘になる。
+            history.snapshot(req.path, force=True)
         files.write_file(req.path, req.content)
-        return {"ok": True}
+        return {"ok": True, "mtime": files.mtime_of(req.path)}
     except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# --- ローカル履歴（保存前の旧内容。app/history.py）---------------------------
+@app.get("/api/history")
+def api_history_list(path: str):
+    """そのファイルの保存済み世代を新しい順で返す。"""
+    try:
+        return {"path": path, "versions": history.list_versions(path),
+                "enabled": settings.history_enabled}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/history/file")
+def api_history_read(path: str, version_id: str):
+    """指定した版の中身を返す（プレビュー・差分表示用。ファイルは変更しない）。"""
+    try:
+        return {"path": path, "version_id": version_id,
+                "content": history.read_version(path, version_id)}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/history/restore")
+def api_history_restore(req: HistoryRestoreReq):
+    """ファイルを指定の版へ戻す。戻す直前の内容も履歴に積むのでやり直せる。"""
+    try:
+        content = history.restore(req.path, req.version_id)
+        return {"ok": True, "content": content, "mtime": files.mtime_of(req.path)}
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
 
 
@@ -303,8 +375,30 @@ def api_fs_open(req: FsOpenReq):
 
 
 @app.get("/api/search")
-def api_search(q: str):
-    return {"results": search.search(q)}
+def api_search(q: str, case: bool = False):
+    """全文検索。`case=true` で大文字小文字を区別する（置換側と同じ判定を使う）。"""
+    return {"results": search.search(q, case_sensitive=case), "case": case}
+
+
+class ReplaceReq(BaseModel):
+    query: str
+    replace: str
+    paths: list[str]
+    case: bool = False
+    dry_run: bool = True
+
+
+@app.post("/api/search/replace")
+def api_search_replace(req: ReplaceReq):
+    """検索結果に出たファイル群への一括置換。まず dry_run で件数を確認させる想定。
+
+    書き込みは `files.write_file` 経由なので、各ファイルの旧内容はローカル履歴に
+    退避される（置換を丸ごと取り消せる）。"""
+    try:
+        return search.replace_in_files(req.query, req.replace, req.paths,
+                                       case_sensitive=req.case, dry_run=req.dry_run)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/patch")
@@ -355,6 +449,37 @@ def api_set_workspace(req: WorkspaceReq):
     # Note セッションは旧ワークスペースの内容を文脈に含むため作り直す（次ターンで再生成）
     engine_adapter.reset_note_session()
     return {"ok": True, "workspace": str(p)}
+
+
+class FavoriteReq(BaseModel):
+    path: str
+    name: str = ""
+
+
+def _places() -> dict:
+    return {"favorites": config.list_favorites(), "recent": config.list_recent(),
+            "current": str(config.WORKSPACE)}
+
+
+@app.get("/api/workspace/places")
+def api_workspace_places():
+    """作業フォルダの「行き先」一覧: ⭐お気に入り と 🕘最近使った。"""
+    return _places()
+
+
+@app.post("/api/workspace/favorites")
+def api_favorite_add(req: FavoriteReq):
+    try:
+        config.add_favorite(req.path, req.name)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+    return _places()
+
+
+@app.delete("/api/workspace/favorites")
+def api_favorite_remove(path: str):
+    config.remove_favorite(path)
+    return _places()
 
 
 @app.get("/api/workspace/dirs")
