@@ -607,4 +607,62 @@ t("statementSpanAt: 選択した要素を含む文の範囲を返す", () => {
   assert.equal(M.statementSpanAt(m, src.length + 10), null);
 });
 
+// ---- 辺ラベルのエスケープ往復 --------------------------------------------------
+// 入力欄には #quot; を `"` に開いて見せるので、書き戻すときに戻さないと編集の
+// たびに生の `"` へ落ちる（mermaid は辺テキスト中の `"` を文字列の始まりに読む）。
+
+t("辺ラベル: #quot; が編集の往復で保たれる（|ラベル| 形式）", () => {
+  const src = 'flowchart TD\n  A -->|say #quot;hi#quot;| B\n';
+  const m = parse(src);
+  const shown = M.labelToInput(m.edges[0].arrow.label);
+  assert.equal(shown, 'say "hi"');
+  const out = apply(src, M.editEdgeLabel(m, src, 0, M.inputToLabel(shown + "!")));
+  assert.equal(out, 'flowchart TD\n  A -->|say #quot;hi#quot;!| B\n');
+  assert.equal(M.labelToInput(parse(out).edges[0].arrow.label), 'say "hi"!');
+});
+
+t("辺ラベル: #quot; が編集の往復で保たれる（中置形式）", () => {
+  const src = "flowchart TD\n  A -- say #quot;hi#quot; --> B\n";
+  const m = parse(src);
+  const out = apply(src, M.editEdgeLabel(m, src, 0, M.inputToLabel('say "bye"')));
+  assert.equal(out, "flowchart TD\n  A -- say #quot;bye#quot; --> B\n");
+});
+
+t("辺ラベル: 矢印の追加でも `\"` と `|` を逃がす", () => {
+  const src = "flowchart TD\n  A[a]\n  B[b]\n";
+  const m = parse(src);
+  const out = apply(src, M.addEdge(m, src, "A", "B", 'x"y|z').edits);
+  assert.ok(out.includes("A[a] -->|x#quot;y#124;z| B[b]"), out);
+});
+
+// ---- 同じノードの定義が複数あるとき --------------------------------------------
+// mermaid は後の定義も読むので、1 つだけ直すと「変えたのに図が変わらない」。
+
+t("定義が複数行あるノード: 形状を全部そろえる", () => {
+  const src = "flowchart TD\n  A[x] --> B[b]\n  A[x] --> C[c]\n";
+  const m = parse(src);
+  const edits = M.setNodeShape(m, src, "A", "{", "}");
+  assertNoOverlap(edits);
+  assert.equal(apply(src, edits), "flowchart TD\n  A{x} --> B[b]\n  A{x} --> C[c]\n");
+});
+
+t("定義が複数行あるノード: ラベルも全部そろえる（形状はそれぞれ保つ）", () => {
+  const src = "flowchart TD\n  A[x] --> B[b]\n  A(x) --> C[c]\n";
+  const m = parse(src);
+  const out = apply(src, M.editNodeLabel(m, src, "A", "新ラベル"));
+  assert.equal(out, "flowchart TD\n  A[新ラベル] --> B[b]\n  A(新ラベル) --> C[c]\n");
+});
+
+t("定義が複数行あるノード: 全部が既に同じ形状なら編集なし", () => {
+  const src = "flowchart TD\n  A{x} --> B[b]\n  A{x} --> C[c]\n";
+  assert.deepEqual(M.setNodeShape(parse(src), src, "A", "{", "}"), []);
+});
+
+t("定義が複数行あるノード: 裸の参照は昇格させない（定義側だけ直す）", () => {
+  const src = "flowchart TD\n  A[x] --> B[b]\n  B --> A\n  A[x] --> C[c]\n";
+  const m = parse(src);
+  const out = apply(src, M.setNodeShape(m, src, "A", "((", "))"));
+  assert.equal(out, "flowchart TD\n  A((x)) --> B[b]\n  B --> A\n  A((x)) --> C[c]\n");
+});
+
 console.log(`\n${pass} passed`);

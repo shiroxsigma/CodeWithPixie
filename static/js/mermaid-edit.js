@@ -309,13 +309,21 @@ function parseEdgeOrNode(line, lineStart, lineEnd, model) {
   return { type: "edge", start: lineStart, end: lineEnd, indent, refs, arrows };
 }
 
+// 同じノードの定義は 1 図に何度でも書ける（`A[x] --> B` と `A[x] --> C` の両方）。
+// mermaid は後の定義も読むので、ラベルや形状を変えるときは**全部**直さないと
+// 「変えたのに図が変わらない」ことになる。def は最初のもの（表示用）、
+// defs は編集対象の全定義。
 function registerRef(model, ref) {
   const existing = model.nodes.get(ref.id);
   if (!existing) {
-    model.nodes.set(ref.id, { id: ref.id, def: ref.def, firstRef: ref });
-  } else if (ref.def && !existing.def) {
-    existing.def = ref.def;
+    model.nodes.set(ref.id, {
+      id: ref.id, def: ref.def, defs: ref.def ? [ref.def] : [], firstRef: ref,
+    });
+    return;
   }
+  if (!ref.def) return;
+  if (!existing.def) existing.def = ref.def;
+  existing.defs.push(ref.def);
 }
 
 // ---- 編集操作（どれも {start,end,text}[] を返す純粋関数） ----------------------
@@ -351,6 +359,16 @@ export function inputToLabel(text) {
   return String(text ?? "").replace(/\r\n?/g, "\n").split("\n").join("<br/>");
 }
 
+/**
+ * 辺ラベルをソースの表記へ戻す（decodeLabel の逆）。
+ * `|` はラベルの閉じ記号、`"` は mermaid の字句解析で文字列の始まりになるので、
+ * どちらも実体参照風の表記に逃がす。ノードラベルは serLabel が同じ役目を負う。
+ * これが無いと、入力欄に開いた `#quot;` が確定のたびに生の `"` へ落ちて戻らない。
+ */
+function escEdgeLabel(text) {
+  return String(text ?? "").replace(/"/g, "#quot;").replace(/\|/g, "#124;");
+}
+
 function serArrow(arrow) {
   // 中置ラベル記法は元の字面をそのまま返す（`A-- No -->B` を |No| 形式に
   // 化けさせない。辺の削除・反転はこの関数で行を組み直すため）。
@@ -383,15 +401,23 @@ function appendInfo(model, src) {
 export function editNodeLabel(model, src, nodeId, newLabel) {
   const node = model.nodes.get(nodeId);
   if (!node) return [];
-  if (node.def) {
-    const close = node.def.shape[1];
-    const text = node.def.quoted
-      ? newLabel.replace(/"/g, "#quot;")
-      : serLabel(newLabel, close);
-    return [{ start: node.def.labelSpan.start, end: node.def.labelSpan.end, text }];
+  const defs = nodeDefs(node);
+  if (defs.length) {
+    // 定義が複数あるときは全部そろえる（1つだけ直すとソースが食い違い、
+    // mermaid は後の定義を採るので見た目が変わらない）。
+    return normalizeEdits(defs.map((d) => ({
+      start: d.labelSpan.start, end: d.labelSpan.end,
+      text: d.quoted ? newLabel.replace(/"/g, "#quot;") : serLabel(newLabel, d.shape[1]),
+    })));
   }
   const r = node.firstRef;
   return [{ start: r.span.start, end: r.span.end, text: `${r.id}[${serLabel(newLabel, "]")}]` }];
+}
+
+/** そのノードの全定義（古い形の model でも壊れないよう def からも拾う）。 */
+function nodeDefs(node) {
+  if (node.defs?.length) return node.defs;
+  return node.def ? [node.def] : [];
 }
 
 /**
@@ -402,23 +428,23 @@ export function editNodeLabel(model, src, nodeId, newLabel) {
 export function setNodeShape(model, src, nodeId, open, close) {
   const node = model.nodes.get(nodeId);
   if (!node) return [];
-  if (!node.def) {
+  const defs = nodeDefs(node);
+  if (!defs.length) {
     const r = node.firstRef;
     return [{
       start: r.span.start, end: r.span.end,
       text: `${r.id}${open}${serLabel(r.id, close)}${close}`,
     }];
   }
-  const d = node.def;
-  if (d.shape[0] === open && d.shape[1] === close) return [];
+  if (defs.every((d) => d.shape[0] === open && d.shape[1] === close)) return [];
   // ラベルはソース上の字面のまま持ち回る（#quot; 等のエスケープを二重にかけない）。
   // 元が引用符付きならそのまま囲み直し、素のままなら新しい閉じ記号に対して
   // 囲む必要があるかを serLabel に判定させる（`[/ /]` は / が閉じ記号の一部）。
-  const body = d.quoted ? `"${d.label}"` : serLabel(d.label, close);
-  return [{
+  // 定義が複数あるときは全部そろえる（editNodeLabel と同じ理由）。
+  return normalizeEdits(defs.map((d) => ({
     start: d.span.start, end: d.span.end,
-    text: `${nodeId}${open}${body}${close}${d.cls || ""}`,
-  }];
+    text: `${nodeId}${open}${d.quoted ? `"${d.label}"` : serLabel(d.label, close)}${close}${d.cls || ""}`,
+  })));
 }
 
 /** 辺ラベルの設定（空文字はラベル削除）。 */
@@ -426,7 +452,7 @@ export function editEdgeLabel(model, src, edgeIdx, newLabel) {
   const edge = model.edges[edgeIdx];
   if (!edge) return [];
   const arrow = edge.arrow;
-  const esc = newLabel.replace(/\|/g, "#124;");
+  const esc = escEdgeLabel(newLabel);
   if (arrow.mid) {
     // 中置ラベルを空にするときは矢印ごと素の記法へ戻す（`-- -->` は構文エラー）。
     if (!newLabel.trim()) {
@@ -436,7 +462,7 @@ export function editEdgeLabel(model, src, edgeIdx, newLabel) {
     const breaks = newLabel.includes("|")
       || MID_CLOSERS.some((c) => newLabel.includes(c))
       || newLabel !== newLabel.trim();
-    if (!breaks) return [{ start: arrow.labelSpan.start, end: arrow.labelSpan.end, text: newLabel }];
+    if (!breaks) return [{ start: arrow.labelSpan.start, end: arrow.labelSpan.end, text: esc }];
     return [{ start: arrow.span.start, end: arrow.span.end, text: `${arrow.text}|${esc}|` }];
   }
   if (!newLabel.trim()) {
@@ -590,7 +616,7 @@ export function addEdge(model, src, from, to, label = "") {
     if (n) return n.def ? n : { id, def: null };
     return { id, def: { raw: `${id}[新規ノード]` } };
   };
-  const lbl = label ? `|${label.replace(/\|/g, "#124;")}|` : "";
+  const lbl = label ? `|${escEdgeLabel(label)}|` : "";
   const info = appendInfo(model, src);
   return {
     edits: [{

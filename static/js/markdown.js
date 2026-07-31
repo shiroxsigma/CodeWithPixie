@@ -147,15 +147,28 @@ const lastBoxes = new WeakMap();
 const ZOOM_STEPS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3];
 const zoomStore = new WeakMap();   // el -> Map<図の通し番号, 倍率>
 
-function zoomApiFor(el, index) {
+// 通し番号は meta から**その都度**読む。バーは生成時のクロージャを持ち続ける一方、
+// 上の図が増減すると使い回しの box の通し番号だけずれる（renderMermaid の reuse 路が
+// meta.index を直す）。生成時の番号を握り込むと、後から同じ番号に来た別の図と
+// 倍率のスロットを共有してしまう。
+function zoomApiFor(el, meta) {
   return {
-    get() { return zoomStore.get(el)?.get(index) || 1; },
+    get() { return zoomStore.get(el)?.get(meta.index) || 1; },
     set(z) {
       let m = zoomStore.get(el);
       if (!m) { m = new Map(); zoomStore.set(el, m); }
-      m.set(index, z);
+      m.set(meta.index, z);
     },
   };
+}
+
+/**
+ * 覚えている倍率を捨てる。別のファイルを開くときに呼ぶ —— 倍率は「描画先の要素 ×
+ * 通し番号」で覚えており、プレビューの要素はファイルをまたいで同じなので、
+ * 呼ばないと前のファイルの図0の倍率を次のファイルの図0が引き継ぐ。
+ */
+export function resetDiagramZoom(el) {
+  zoomStore.delete(el);
 }
 
 function stepZoom(cur, dir) {
@@ -397,7 +410,7 @@ async function renderMermaid(el, gen, opts) {
       continue;
     }
     const remember = (box) => { kept.set(index, { src, renderSrc, box, meta }); return box; };
-    const zoom = zoomApiFor(el, index);   // 倍率は図の位置ごとに覚えている
+    const zoom = zoomApiFor(el, meta);   // 倍率は図の位置ごとに覚えている
 
     const cached = svgCache.get(renderSrc);
     if (cached) { finish(remember(toBox(cached, meta, zoom))); continue; }

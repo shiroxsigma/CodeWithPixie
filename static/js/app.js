@@ -9,8 +9,8 @@
 //   mode-plan で出し分け。
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
 import {
-  available as mdAvailable, pngBackground, renderInto, renderPlain, setAssetBase,
-  setDiagramEditor, setDiagramSaver, setOnDiagramRendered,
+  available as mdAvailable, pngBackground, renderInto, renderPlain, resetDiagramZoom,
+  setAssetBase, setDiagramEditor, setDiagramSaver, setOnDiagramRendered,
 } from "./markdown.js";
 import { blobToBase64, sanitizeName, svgToPngBlob } from "./mermaid-export.js";
 import { available as cfAvailable, htmlToMarkdown } from "./confluence.js";
@@ -773,6 +773,11 @@ async function openFile(path, force) {
   if (!r) return;  // 読めなかったら現在の内容を壊さずに留まる
   state.currentFile = path;
   state.mdflowConditions.clear();  // 条件JSONは図IDに紐づくのでノートをまたがない
+  // 図の編集モードと拡大縮小はどちらも「プレビューの何枚目の図か」で覚えている。
+  // プレビューの要素はファイルをまたいで同じなので、ここで捨てないと**別ファイルの
+  // 同じ位置の図**が編集モードを引き継ぎ、倍率も持ち越される。
+  exitDiagramEditing();
+  resetDiagramZoom($("preview"));
   state.monaco.editor.setModelLanguage(state.editor.getModel(), langFor(path));
   state.editor.setValue(r.content);
   state.saveError = null;
@@ -1315,6 +1320,12 @@ function openDiagramEditor(box, meta) {
   ed.dispose = mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), null);
 }
 
+/** 編集モードを畳んで状態も捨てる（ファイル切替など「もうその図は無い」経路用）。 */
+function exitDiagramEditing() {
+  state.diagramEditing?.dispose?.();  // 反転表示の消去もこの中（teardown → reveal(null)）
+  state.diagramEditing = null;
+}
+
 function onDiagramRendered(box, meta, reused = false) {
   const ed = state.diagramEditing;
   if (!ed) return;
@@ -1322,7 +1333,16 @@ function onDiagramRendered(box, meta, reused = false) {
     // 図の DOM をそのまま使い回した通知。編集モードは生きたままなので入り直さない
     // （入り直すと listener の付け外しが毎打鍵で走るし、選択も失われる）。
     // 上の図が増減して通し番号だけずれることがあるので、そこだけ追従する。
-    if (ed.box === box) ed.index = meta.index;
+    if (ed.box !== box) return;
+    ed.index = meta.index;
+    // ただし「生きたまま」とは限らない。上の図の描画を待っている間にこの box が
+    // 一時的に DOM から外れ、その隙にキーが押されると mermaid-edit 側の保険
+    // （isConnected ガード）が編集モードを自分で畳む。バーが消えていたら入り直す
+    // ——そのままだと編集バーの無い box を編集中として抱えたままになる。
+    if (!box.querySelector(":scope > .mermaid-editbar")) {
+      ed.dispose?.();
+      ed.dispose = mermaidEdit.enterEditMode(box, meta, mermaidEditApi(), ed.restore);
+    }
     return;
   }
   if (ed.index !== meta.index) return;

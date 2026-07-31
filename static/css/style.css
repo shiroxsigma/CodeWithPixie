@@ -484,15 +484,18 @@ button:active { transform: translateY(1px); }
    hover で出す。visibility ではなく opacity なのは、場所を先に確保して図が動かないため。
    sticky: 画面より縦に長い図でも、バーが #preview の上端に貼り付いて届き続ける
    （図の途中を見ているときに上端まで戻らないと ✏️ 編集 が押せない、を無くす）。
-   背景を敷くのは、貼り付いている間そこに図が透けて字が読めなくなるため。 */
+   背景を敷くのは、貼り付いている間そこに図が透けて字が読めなくなるため。
+   pointer-events は見えていない間は素通りさせる。sticky にしたことで貼り付いた
+   バーが図の上端を覆うので、透明なまま当たり判定が残ると、hover の無いタッチ操作で
+   「見えないボタン」を踏んでしまう。 */
 .mermaid-tools {
   display: flex; align-items: center; justify-content: flex-end; gap: 6px;
   margin-bottom: 4px; opacity: 0; transition: opacity .12s;
   position: sticky; top: 0; z-index: 6;
-  padding: 2px 0; background: var(--bg);
+  padding: 2px 0; background: var(--bg); pointer-events: none;
 }
 .mermaid-box:hover .mermaid-tools,
-.mermaid-tools:focus-within { opacity: 1; }
+.mermaid-tools:focus-within { opacity: 1; pointer-events: auto; }
 .mermaid-tools button {
   padding: 1px 8px; font-size: 11px; line-height: 1.6;
   background: var(--bg2); color: var(--muted);
@@ -509,7 +512,7 @@ button:active { transform: translateY(1px); }
 .mermaid-zoom { display: inline-flex; align-items: center; gap: 4px; }
 .mermaid-zoom-label { min-width: 46px; font-variant-numeric: tabular-nums; }
 /* 結果が出ている間はバーを出したままにする（hover を外した瞬間に消えると読めない）。 */
-.mermaid-tools:has(.mermaid-tools-status:not(:empty)) { opacity: 1; }
+.mermaid-tools:has(.mermaid-tools-status:not(:empty)) { opacity: 1; pointer-events: auto; }
 
 /* --- mermaid: 直接編集モード（mermaid-edit.js の enterEditMode） ---------------
    プレビュー上のノード/矢印クリック → ソースの最小編集 → executeEdits で反映。 */
