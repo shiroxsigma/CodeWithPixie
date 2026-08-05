@@ -33,6 +33,85 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 MAX_BYTES = 2_000_000  # 2MB を超えるファイルは丸ごと読まない
 
 
+def locked_message(p: Path) -> str:
+    """読み取りが OS に拒否されたときの案内文（共有読みでも駄目だった場合）。
+
+    read_bytes_shared が Office のロックは回避するので、ここまで来るのは権限その
+    ものが無いケース（ACL・DLP・OneDrive のオンライン専用ファイル等）。
+    """
+    return (f"ファイルを読み取れません: {p.name}\n"
+            "アクセス権が無いか、OneDrive の「オンラインのみ」でローカルに実体が"
+            "無い可能性があります。エクスプローラで開けるか確認してください。")
+
+
+# Windows で他アプリが開いているファイルを読むための共有フラグ（READ|WRITE|DELETE）。
+#
+# Python の open() は FILE_SHARE_READ|FILE_SHARE_WRITE で CreateFileW を呼ぶ。一方
+# PowerPoint / Excel は保存を「別ファイルへ書いて差し替える」ために **DELETE アクセス
+# 付き**でファイルを掴む。こちらの共有指定に FILE_SHARE_DELETE が無いと、その既存
+# handle と両立しないと判定されて ERROR_SHARING_VIOLATION(32) になる — 読むだけなのに
+# 開けないのはこれが理由で、権限の問題ではない。DELETE を足せば開いたままでも読める
+# （実測: pptx を PowerPoint で開いた状態で share=READ|WRITE は失敗、+DELETE は成功）。
+_FILE_SHARE_ALL = 0x1 | 0x2 | 0x4
+_GENERIC_READ = 0x80000000
+_OPEN_EXISTING = 3
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
+def read_bytes_shared(p: Path, limit: int | None = None) -> bytes:
+    """ファイルを bytes で読む。他アプリが開いていても読めるようにする。
+
+    まず通常の読み取りを試し、PermissionError のときだけ Windows API へ落ちる
+    （非 Windows、または本当に権限が無い場合は例外をそのまま伝播させる）。
+    limit を渡すとその先頭バイト数だけ読む（マジックバイト判定用）。
+    """
+    try:
+        with p.open("rb") as f:
+            return f.read() if limit is None else f.read(limit)
+    except PermissionError:
+        if os.name != "nt":
+            raise
+        return _read_bytes_win_shared(p, limit)
+
+
+def _read_bytes_win_shared(p: Path, limit: int | None = None) -> bytes:
+    """CreateFileW を FILE_SHARE_DELETE 込みで直接呼んで読む（Windows 専用）。"""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                wintypes.HANDLE)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.ReadFile.argtypes = (wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                             ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID)
+    k32.ReadFile.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    k32.CloseHandle.restype = wintypes.BOOL
+
+    handle = k32.CreateFileW(str(p), _GENERIC_READ, _FILE_SHARE_ALL, None,
+                             _OPEN_EXISTING, _FILE_ATTRIBUTE_NORMAL, None)
+    if handle == ctypes.c_void_p(-1).value:  # INVALID_HANDLE_VALUE
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        chunks: list[bytes] = []
+        got = 0
+        buf = ctypes.create_string_buffer(1 << 20)
+        read = wintypes.DWORD()
+        while limit is None or got < limit:
+            want = len(buf) if limit is None else min(len(buf), limit - got)
+            if not k32.ReadFile(handle, buf, want, ctypes.byref(read), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if read.value == 0:
+                break  # EOF
+            chunks.append(buf.raw[:read.value])
+            got += read.value
+        return b"".join(chunks)
+    finally:
+        k32.CloseHandle(handle)
+
+
 def safe_path(rel: str) -> Path:
     """相対パスを WORKSPACE 内の絶対パスに解決。外に出ようとしたら ValueError。"""
     root = config.WORKSPACE

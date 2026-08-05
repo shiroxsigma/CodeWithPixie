@@ -17,7 +17,8 @@
 フェーズ1と3は同一セッション・同一 busy ロックの中で走るので、Copilot の回答は
 会話履歴に残り、以降のターンの文脈としても効く。
 
-`/copilot!` は従来の直行経路（main._copilot_direct）として残してある。
+`/copilot_simple`（別名 `/copilot!`）は、ローカル LLM を一切通さない直行経路
+（main._copilot_direct）として残してある。
 """
 from __future__ import annotations
 
@@ -208,7 +209,7 @@ def run(sess, *, compose_text: str, user_ask: str, attach_files: list[str],
             emit({"type": "error",
                   "text": f"Copilot への質問文を組み立てられませんでした"
                           f"（````{QUESTION_FENCE} フェンスが応答に含まれていません）。"
-                          "もう一度試すか、`/copilot!` で直接質問してください。"})
+                          "もう一度試すか、`/copilot_simple` で直接質問してください。"})
             return
         if len(question) > QUESTION_MAX_CHARS:
             question = question[:QUESTION_MAX_CHARS] + "\n…（長いため以降を省略）"
@@ -220,7 +221,10 @@ def run(sess, *, compose_text: str, user_ask: str, attach_files: list[str],
         # --- フェーズ2: Copilot へ質問 ---
         files_note = f"・添付 {len(attach_files)} 件" if attach_files else ""
         status(f"🕊️ Copilot に送信しました。回答を待っています（数十秒{files_note}）…")
-        answer = copilot.ask(question, attach_files)
+        # PrayLight の進捗（アップロード中／完了など）をそのまま status に流す。
+        # 添付付きは数分かかることがあり、無通知だと固まったように見えるため。
+        answer = copilot.ask(question, attach_files,
+                             on_progress=lambda line: status(f"🕊️ {line}"))
         if cancelled():
             status("⏹ 中断しました（Copilot の回答は破棄されました）。")
             return

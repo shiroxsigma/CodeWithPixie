@@ -75,8 +75,10 @@ def build_user_text(user_msg: str, selection: str, context_files: list[dict],
     """フロントから来た素材を1本のユーザーテキストに組み立てる（コンテキスト予算管理込み）。
 
     pixie_core 経路では動的文脈をユーザーメッセージに載せる設計（静的指示は
-    system_suffix）。attach_files はユーザーが明示添付した関連ファイルの絶対パス
-    （.pptx 等、ローカル LLM は読めない形式）で、ask_copilot への添付案内に使う。"""
+    system_suffix）。attach_files はユーザーがチェックした関連ファイルの原本パス
+    （.pptx 等。ワークスペース相対または絶対）で、ask_copilot への添付案内に使う。
+    抽出できた分の本文は context_files 側にも入っている（重複は意図的 — ローカル LLM は
+    抽出テキストしか読めず、外部 Copilot には原本を渡したいため）。"""
     budget = settings.context_char_budget  # ファイル素材の総量上限（超過分は参考ファイルを省略）
     parts: list[str] = []
     if current_file:
@@ -117,9 +119,10 @@ def build_user_text(user_msg: str, selection: str, context_files: list[dict],
     if attach_files:
         listing = "\n".join(f"- {p}" for p in attach_files)
         parts.append(
-            "# ユーザーが添付した関連ファイル\n"
-            "（.pptx など、あなた自身は読めない形式を含む。内容の参照が必要なときは "
-            "ask_copilot の files に下記の絶対パスをそのまま渡すこと）\n" + listing
+            "# ユーザーが添付した関連ファイル（原本）\n"
+            "（テキストを抽出できた分は上の参考ファイルに入っている。図表やレイアウトは"
+            "抽出で落ちるので、原本そのものを見てもらう必要があるときは ask_copilot の "
+            "files に下記のパスをそのまま渡すこと）\n" + listing
         )
     parts.append("# 指示\n" + user_msg)
     return "\n\n".join(parts)

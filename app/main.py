@@ -249,6 +249,10 @@ def api_read(path: str):
                 "mtime": files.mtime_of(path)}
     except FileNotFoundError:
         raise HTTPException(404, "not found")
+    except PermissionError:
+        # Office で開きっぱなしのファイルはロックされて読めない（files.locked_message 参照）。
+        # 423 Locked にするのは、フロントが「壊れた/消えた」と混同しないようにするため。
+        raise HTTPException(423, files.locked_message(files.safe_path(path)))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -795,20 +799,41 @@ def _build_copilot_question(user_msg: str, selection: str, context_files: list[d
     return q
 
 
-def _copilot_direct(question_text: str, req: ChatReq) -> StreamingResponse:
-    """「/copilot! 質問…」: エージェント（LLM）を介さず Copilot に1回だけ聞いて返す。
+#: 直行経路（ローカル LLM を経由しない）を起動するコマンド名。同じ挙動の別名を2つ持つ:
+#: `/copilot!` は従来からの名前、`/copilot_simple` は「素で聞く」ことが名前から分かる方。
+#: 判定は必ず `/copilot` より先に行うこと — startswith("/copilot") は "/copilot_simple"
+#: にも一致するので、順序が逆だと直行のつもりがオーケストレーションへ流れる。
+COPILOT_DIRECT_COMMANDS = ("/copilot_simple", "/copilot!")
+
+#: 進捗キューの終端マーカー（_copilot_direct）。進捗の文字列と衝突しない番兵。
+_PROGRESS_END = object()
+
+
+def _copilot_direct(question_text: str, req: ChatReq,
+                    command: str = "/copilot!") -> StreamingResponse:
+    """「/copilot_simple 質問…」: エージェント（LLM）を介さず Copilot に1回だけ聞いて返す。
 
     質問の組み立ても回答の反映もしない素の経路（それが要るときは /copilot →
     _copilot_orchestrated）。単に外部知識を聞きたいだけのときに、組み立ての待ち時間と
     ローカル LLM の解釈を挟まずに済ませるために残してある。
+
+    command は起動に使われたコマンド名（COPILOT_DIRECT_COMMANDS のどれか）。案内文と
+    ステータス行に出す — 打ったのと違う名前を返すと、別コマンドの説明に見えるため。
 
     エージェントもセッションも使わない直行経路なので、Code/Note どちらのモードでも通す
     （モードで変わるのはエージェントの振る舞いであって、この経路には関係がない）。
     セッションを取らないぶん sess.busy も踏まないので _turn_stream は使わず、ここで
     SSE を組む。イベントは通常ターンと同じ契約（status/token/error → 最後に done）。
     """
+    # 原本を添付するファイルは、本文への抽出テキスト掲載から外す。
+    # 「抽出テキストと原本の両方を送る」のはローカル LLM が原本を読めないからで、
+    # この直行経路にローカル LLM はいない。Copilot は添付原本を直接読めるので、
+    # 切り詰められた抽出テキストを重ねるのは質問文の文字数を食うだけの純損になる
+    # （実測: 上限 15,000 字に当たって末尾が落ちていた）。
+    attached = set(req.attach_files)
     context = [{"path": c.path, "content": c.content}
-               for c in req.context_files + req.ref_texts]
+               for c in req.context_files + req.ref_texts
+               if c.path not in attached]
 
     async def gen():
         if not settings.copilot_enabled:
@@ -818,8 +843,8 @@ def _copilot_direct(question_text: str, req: ChatReq) -> StreamingResponse:
             return
         if not question_text and not req.selection.strip():
             yield _sse({"type": "error",
-                        "text": "`/copilot!` の後に質問を書いてください"
-                                "（例: `/copilot! RAG の最新動向は？`）。テキスト選択だけでも送れます。"})
+                        "text": f"`{command}` の後に質問を書いてください"
+                                f"（例: `{command} RAG の最新動向は？`）。テキスト選択だけでも送れます。"})
             yield _sse({"type": "done"})
             return
 
@@ -827,11 +852,29 @@ def _copilot_direct(question_text: str, req: ChatReq) -> StreamingResponse:
             question_text or "以下のテキストについて意見をください。", req.selection, context)
         files_note = f"・添付 {len(req.attach_files)} 件" if req.attach_files else ""
         yield _sse({"type": "status",
-                    "text": f"🕊️ /copilot: Copilot に直接質問します"
+                    "text": f"🕊️ {command}: ローカル LLM を経由せず Copilot に直接質問します"
                             f"（{len(question)} 文字{files_note}・数十秒かかります）"})
         # copilot.ask は同期の subprocess（uvicorn reload 下の Windows では asyncio の
         # subprocess API が動かないため、このプロジェクトは同期実装を thread へ逃がす）。
-        answer = await asyncio.to_thread(copilot.ask, question, list(req.attach_files))
+        # PrayLight の進捗は worker スレッドから来るので、キュー経由でこの async
+        # ジェネレータへ渡して status として流す（添付付きは数分かかるため、
+        # 無通知にすると「送った後まったく進まない」ようにしか見えない）。
+        loop = asyncio.get_running_loop()
+        progress: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(asyncio.to_thread(
+            copilot.ask, question, list(req.attach_files),
+            lambda line: loop.call_soon_threadsafe(progress.put_nowait, line)))
+        # 完了も同じキューに番兵として流す。done() をポーリングする形だと
+        # 「進捗を put した直後に完了」の順序を毎回考える羽目になる。
+        task.add_done_callback(lambda _: progress.put_nowait(_PROGRESS_END))
+        while (line := await progress.get()) is not _PROGRESS_END:
+            yield _sse({"type": "status", "text": f"🕊️ {line}"})
+        try:
+            answer = await task
+        except Exception as e:  # noqa: BLE001 - SSE を無言で切らない
+            yield _sse({"type": "error", "text": f"エラー: Copilot の呼び出しに失敗しました: {e}"})
+            yield _sse({"type": "done"})
+            return
         if answer.startswith("エラー"):
             # 1行目だけをステータス行に出し、全文は error として渡す（原因が長いことがある）
             yield _sse({"type": "status", "text": f"⚠️ {answer.splitlines()[0][:160]}"})
@@ -1058,11 +1101,14 @@ def _mode_session(session_id: str, create: bool = False):
 async def api_chat(req: ChatReq):
     if not req.message.strip():
         raise HTTPException(400, "空のメッセージです。")
-    # /copilot 系。"!" 付きはエージェントを介さない直行（速いが文脈も反映も無い）、
-    # 付かない方はエージェントが質問を組み立てて回答を反映するオーケストレーション。
+    # /copilot 系。/copilot_simple と /copilot! はエージェントを介さない直行
+    # （速いが文脈も反映も無い）、素の /copilot はエージェントが質問を組み立てて
+    # 回答を反映するオーケストレーション。
+    # 直行の判定を先に回すのは必須（COPILOT_DIRECT_COMMANDS のコメント参照）。
     msg = req.message.strip()
-    if msg.lower().startswith("/copilot!"):
-        return _copilot_direct(msg[len("/copilot!"):].strip(), req)
+    for name in COPILOT_DIRECT_COMMANDS:
+        if msg.lower().startswith(name):
+            return _copilot_direct(msg[len(name):].strip(), req, command=name)
     if msg.lower().startswith("/copilot"):
         return _copilot_orchestrated(msg[len("/copilot"):].strip(), req)
     # /compact はモードに依らず同じ処理（畳む対象は現在モードのセッションの会話）。

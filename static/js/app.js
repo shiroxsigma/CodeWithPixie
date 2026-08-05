@@ -152,6 +152,9 @@ window.__monacoReady.then((monaco) => {
   // 画像の貼り付け（Ctrl+V）とドロップ（Note モードのみ）。capture で Monaco 内部の
   // リスナより先に拾い、画像のときだけ横取りする（テキストは従来どおり Monaco に任せる）。
   const editorNode = state.editor.getContainerDomNode();
+  // ホイールで動かした間はプレビューを連動させない（noteWheel の説明を参照）。
+  // Monaco はホイールを内部で処理するので capture で先に見るだけにする。
+  editorNode.addEventListener("wheel", noteWheel, { passive: true, capture: true });
   editorNode.addEventListener("paste", (e) => {
     if (!isNote()) return;
     const file = imageFileFrom(e.clipboardData);
@@ -268,7 +271,7 @@ function applyCopilotVisibility() {
   // モードとトグルの両方で文言が変わるため、applyModeUI からもここを通す。
   const hint = on
     ? "\n（先頭に /copilot と書くと、これまでの調査をまとめて Copilot に質問し、回答を反映します。"
-      + "/copilot! なら組み立てずにそのまま直接質問）"
+      + "/copilot_simple ならローカル LLM を経由せず、そのまま直接質問）"
     : "";
   const PLACEHOLDER = {
     note: "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。",
@@ -569,7 +572,8 @@ function renderFileTree() {
           cb.type = "checkbox";
           cb.title = f.text
             ? "チャットのコンテキストに含める"
-            : "チャットのコンテキストに含める（テキスト抽出して同梱）";
+            : "チャットのコンテキストに含める（テキスト抽出して同梱。"
+              + "/copilot では原本を Copilot に添付）";
           cb.checked = state.checkedFiles.has(f.path);
           cb.addEventListener("click", (ev) => ev.stopPropagation());
           cb.addEventListener("change", () => {
@@ -1347,6 +1351,7 @@ function updatePreviewAvailability() {
 function previewSource() {
   const value = state.editor.getValue();
   let text = value;
+  let lineOffset = 0;  // 描画したテキストの1行目が、エディタ本文の何行目に当たるか（0始まりの差分）
   const opts = {};
   // mdflow は Note モードのみ（features.mdflow）。js-yaml 未取得なら available()=false。
   if (isNote() && state.features.mdflow && mdflow.available()) {
@@ -1355,6 +1360,7 @@ function previewSource() {
       // frontmatter はプレビューに出さない（markdown-it は --- を hr や
       // setext 見出しとして誤描画する）。mdflow の有無に関わらず剥がす。
       text = doc.body;
+      lineOffset = (value.slice(0, doc.bodyOffset).match(/\n/g) || []).length;
       if (doc.mappings.length) {
         opts.mdflow = { doc, conditions: state.mdflowConditions };
         // 条件JSON入力へ打鍵中なら、再構築後にフォーカスを戻すための位置を記録
@@ -1369,15 +1375,18 @@ function previewSource() {
       }
     } catch { /* mdflow のパースに失敗しても従来のプレビューは出す */ }
   }
-  return { text, opts };
+  return { text, opts, lineOffset };
 }
 
 function renderPreview() {
   if (!isPreviewOpen()) return;
   // 画像の相対パス（images/foo.png）は現在ファイルのディレクトリ基準で解決させる
   setAssetBase(currentDir());
-  const { text, opts } = previewSource();
+  const { text, opts, lineOffset } = previewSource();
   opts.editable = true;  // プレビューの図だけ ✏️ 直接編集の対象（チャットは対象外）
+  opts.sourceMap = true;  // 選択した文字 → ソース位置の逆引き用（highlightPreviewSelection）
+  // frontmatter を剥がして描くぶん、data-src-line はエディタの行番号とずれる
+  previewLineOffset = lineOffset;
   const t0 = performance.now();
   const done = renderInto($("preview"), text, opts);
   syncPreviewScroll();
@@ -1424,14 +1433,246 @@ function schedulePreview() {
   previewTimer = setTimeout(renderPreview, wait);
 }
 
-// エディタのスクロール位置に比率で追従させる。行単位の対応付けは重いので、まず比率で足りるかを見る。
+// エディタ⇔プレビューのスクロールを比率で連動させる。行単位の対応付けは重いので、まず比率で足りるかを見る。
+// 片方を動かすと相手側の scroll イベントも発火して押し戻し合うため、プログラムで動かした直後の
+// 短い間だけ「動かした側が主」として相手からの追従を無視する。
+const SCROLL_SYNC_LOCK_MS = 120;
+let scrollSyncOwner = "";  // "" | "editor" | "preview"
+let scrollSyncTimer = null;
+function lockScrollSync(owner) {
+  scrollSyncOwner = owner;
+  clearTimeout(scrollSyncTimer);
+  scrollSyncTimer = setTimeout(() => { scrollSyncOwner = ""; }, SCROLL_SYNC_LOCK_MS);
+}
+
+// ホイールで動かしている間は連動しない。図（mermaid）はソースの行数とプレビューの高さが
+// 全く釣り合わないので、比率で追従させると読んでいる側が勝手に飛ぶ。ホイールは
+// 「片側だけを細かく見たい」操作なので、そのときは相手を動かさず、位置を揃えたいときは
+// スクロールバーを掴んでもらう（バーのドラッグやキー操作は wheel を出さないので従来どおり）。
+// 慣性スクロール中も wheel は出続けるため、止まってから WHEEL_QUIET_MS で解除する。
+const WHEEL_QUIET_MS = 200;
+let wheeling = false;
+let wheelTimer = null;
+function noteWheel() {
+  wheeling = true;
+  clearTimeout(wheelTimer);
+  wheelTimer = setTimeout(() => { wheeling = false; }, WHEEL_QUIET_MS);
+}
+
+/** エディタ → プレビュー。 */
 function syncPreviewScroll() {
-  if (!isPreviewOpen()) return;
+  if (wheeling) return;
+  if (!isPreviewOpen() || scrollSyncOwner === "preview") return;
   const ed = state.editor;
   const max = ed.getScrollHeight() - ed.getLayoutInfo().height;
   const ratio = max > 0 ? ed.getScrollTop() / max : 0;
   const pv = $("preview");
+  lockScrollSync("editor");
   pv.scrollTop = ratio * (pv.scrollHeight - pv.clientHeight);
+}
+
+/** プレビュー → エディタ。 */
+function syncEditorScroll() {
+  if (wheeling) return;
+  if (!isPreviewOpen() || scrollSyncOwner === "editor" || !state.editor) return;
+  const pv = $("preview");
+  const pvMax = pv.scrollHeight - pv.clientHeight;
+  const ratio = pvMax > 0 ? pv.scrollTop / pvMax : 0;
+  const ed = state.editor;
+  lockScrollSync("preview");
+  ed.setScrollTop(ratio * Math.max(0, ed.getScrollHeight() - ed.getLayoutInfo().height));
+}
+
+// ---- プレビューで選んだ文字 → Markdown ソースの対応位置 -----------------------
+// markdown.js が付けた data-src-line / data-src-end（そのブロックの対応行）でまず行まで絞り、
+// 選択した字面をその範囲から探して文字単位に詰める。字面が見つからないとき
+// （**強調** をまたいだ、リンクのラベルだけ選んだ等）は行の反転表示だけにする —— 「だいたい
+// ここ」でも、行すら示さないよりは目当ての場所に辿り着ける。
+
+const PREVIEW_SEL_DEBOUNCE_MS = 80;
+const LOOSE_MATCH_MAX = 300;  // これより長い選択は緩い正規表現を作らない（作っても遅いだけ）
+let previewLineOffset = 0;    // renderPreview が描いたテキストとエディタ本文の行番号の差
+let previewSelTimer = null;
+
+/** プレビュー内の選択に対応するソース位置を反転表示する（選択が無ければ消すだけ）。 */
+function highlightPreviewSelection() {
+  const editor = state.editor;
+  const model = editor?.getModel();
+  if (!editor || !model) return;
+  const hit = isPreviewOpen() ? previewSelectionSource(model) : null;
+  if (!hit) { clearPreviewHighlight(); return; }
+  const decos = [{ range: hit.lineRange, options: { className: "preview-src-hl-line", isWholeLine: true } }];
+  if (hit.textRange) decos.push({ range: hit.textRange, options: { className: "preview-src-hl" } });
+  if (state.previewHl) state.previewHl.set(decos);
+  else state.previewHl = editor.createDecorationsCollection(decos);
+  updateMarkButton(model, hit.textRange);
+  // 対応箇所が画面外のときだけエディタを動かす。このスクロールでプレビュー側まで
+  // 引きずられると読んでいた場所を見失うので、連動は「プレビューが主」で止めておく。
+  // ScrollType.Immediate。滑らかスクロールだとアニメーションの尻尾が上の抑止時間を
+  // 越えて scroll を発火し、プレビュー側が引きずられる。
+  lockScrollSync("preview");
+  editor.revealRangeInCenterIfOutsideViewport(hit.textRange || hit.lineRange, 1);
+}
+
+function clearPreviewHighlight() {
+  state.previewHl?.clear?.();
+  state.previewHl = null;
+  markTarget = null;
+  document.getElementById("mark-btn")?.classList.add("hidden");
+}
+
+/** 現在の選択（プレビュー内のもののみ）→ {lineRange, textRange}。対象外なら null。 */
+function previewSelectionSource(model) {
+  const sel = window.getSelection?.();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  const pv = $("preview");
+  if (!pv.contains(range.commonAncestorContainer)) return null;
+  // 全選択などで選択の端がブロックの外（#preview 自身）に出ることがあるので、
+  // その場合は先頭/末尾のブロックで代用する。
+  const blocks = pv.querySelectorAll("[data-src-line]");
+  const start = srcBlockOf(range.startContainer) || blocks[0];
+  const end = srcBlockOf(range.endContainer) || blocks[blocks.length - 1] || start;
+  if (!start || !end) return null;
+  const first = clampLine(model, Number(start.dataset.srcLine) + previewLineOffset);
+  const last = Math.max(first, clampLine(model, Number(end.dataset.srcEnd) + previewLineOffset));
+  if (!first) return null;
+  const lineRange = new state.monaco.Range(first, 1, last, model.getLineMaxColumn(last));
+  // 既に塗ってあるところの一部だけを選んだ場合は、その <mark> 全体を対象にする。
+  // 選択ぶんだけを囲うと ==気に==なると==ころ== のように入れ子が壊れるため。
+  const mark = enclosingMark(range);
+  const found = findInSource(model.getValueInRange(lineRange), mark ? mark.textContent : sel.toString());
+  let textRange = null;
+  if (found) {
+    const base = model.getOffsetAt({ lineNumber: first, column: 1 });
+    textRange = state.monaco.Range.fromPositions(
+      model.getPositionAt(base + found.start), model.getPositionAt(base + found.end));
+  }
+  return { lineRange, textRange };
+}
+
+function closestOf(node, selector) {
+  const el = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  return el?.closest(selector) || null;
+}
+
+const srcBlockOf = (node) => closestOf(node, "[data-src-line]");
+
+/** 選択が丸ごと1つの <mark> の中に収まっていれば、その要素。 */
+function enclosingMark(range) {
+  const start = closestOf(range.startContainer, "mark");
+  return start && start === closestOf(range.endContainer, "mark") ? start : null;
+}
+
+function clampLine(model, line) {
+  if (!Number.isFinite(line)) return 0;
+  return Math.min(Math.max(1, line), model.getLineCount());
+}
+
+/**
+ * ソース断片 src の中から、プレビュー上で選ばれた字面 needle の位置を探す。
+ * まず素直な部分一致。外れたら、字の間に Markdown の記号（** _ ` ~ \ と改行）が
+ * 挟まっていても拾える緩い一致を試す。見つからなければ null。
+ */
+function findInSource(src, needle) {
+  const text = needle.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  const i = src.indexOf(text);
+  if (i >= 0) return { start: i, end: i + text.length };
+  if (text.length > LOOSE_MATCH_MAX) return null;
+  const noise = "[*_`~\\\\]*";          // 字の間に挟まりうる Markdown の記号
+  const gap = noise + "\\s+" + noise;   // 選択側の空白1つは、記号を挟んだ空白/改行に対応する
+  // 先頭には noise を置かない（貪欲に食って一致の開始位置が記号側へずれるため）。
+  // gap の直後も同様に置かない —— [x]*[x]* が並ぶと不一致時の後戻りが跳ね上がる。
+  let pat = "";
+  let skipNoise = true;
+  for (const ch of text) {
+    if (ch === " ") { pat += gap; skipNoise = true; continue; }
+    pat += (skipNoise ? "" : noise) + ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    skipNoise = false;
+  }
+  try {
+    const m = new RegExp(pat).exec(src);
+    return m ? { start: m.index, end: m.index + m[0].length } : null;
+  } catch { return null; }  // 不正な正規表現になったら「行だけ」に落とす
+}
+
+// ---- ==マーカー==（プレビューで気になるところを塗る） -------------------------
+// 塗った結果は Markdown ソースへ ==…== として入る（ファイルに保存され、Ctrl+Z で戻せる）。
+// 対象は**字面まで特定できた選択だけ** —— 「行はここ」までしか分からない状態で == を
+// 挿すと、狙っていない範囲まで囲ってしまう。特定できないときはボタンを出さない。
+
+let markTarget = null;  // {range, marked} 直近の選択に対応するソース位置と、既に塗ってあるか
+
+function markButton() {
+  let btn = document.getElementById("mark-btn");
+  if (btn) return btn;
+  btn = document.createElement("button");
+  btn.id = "mark-btn";
+  btn.className = "hidden";
+  btn.title = "選択したところを Markdown の ==マーカー== で塗る (Ctrl+Shift+H)";
+  // mousedown を止めないと、押した瞬間に選択が外れて塗る対象を見失う
+  btn.addEventListener("mousedown", (e) => e.preventDefault());
+  btn.addEventListener("click", toggleMark);
+  document.body.appendChild(btn);
+  return btn;
+}
+
+/** 選択に対応するソース位置が分かっていれば、その脇にマーカーのボタンを出す。 */
+function updateMarkButton(model, range) {
+  const btn = markButton();
+  const rect = range ? selectionRect() : null;
+  if (!rect) { markTarget = null; btn.classList.add("hidden"); return; }
+  markTarget = { range, marked: isMarkedRange(model, range) };
+  btn.textContent = markTarget.marked ? "🖍 マーカーを消す" : "🖍 マーカー";
+  btn.classList.remove("hidden");  // 幅と高さを測るために先に出す
+  placeMarkButton(btn, rect);
+}
+
+/** プレビュー内の選択の位置（画面座標）。プレビューの外へ出ていれば null。 */
+function selectionRect() {
+  const sel = window.getSelection?.();
+  if (!sel?.rangeCount) return null;
+  const rect = sel.getRangeAt(0).getBoundingClientRect();
+  if (!rect.width && !rect.height) return null;
+  const box = $("preview").getBoundingClientRect();
+  if (rect.bottom < box.top || rect.top > box.bottom) return null;  // スクロールで見えなくなった
+  return rect;
+}
+
+function placeMarkButton(btn, rect) {
+  // 既定は選択の上。画面の上端に寄って収まらないときだけ下へ回す。
+  const above = rect.top - btn.offsetHeight - 6;
+  btn.style.top = `${above < 4 ? rect.bottom + 6 : above}px`;
+  btn.style.left = `${Math.max(4, Math.min(rect.left, window.innerWidth - btn.offsetWidth - 4))}px`;
+}
+
+/** ソースの range が、ちょうど ==…== で囲まれているか。 */
+function isMarkedRange(model, range) {
+  const R = state.monaco.Range;
+  const before = model.getValueInRange(new R(
+    range.startLineNumber, Math.max(1, range.startColumn - 2), range.startLineNumber, range.startColumn));
+  const after = model.getValueInRange(new R(
+    range.endLineNumber, range.endColumn, range.endLineNumber, range.endColumn + 2));
+  return before === "==" && after === "==";
+}
+
+/** 直近の選択に対応するソースを ==…== で囲む／囲みを外す。 */
+function toggleMark() {
+  const editor = state.editor;
+  const model = editor?.getModel();
+  if (!markTarget || !model) return;
+  const R = state.monaco.Range;
+  const { range, marked } = markTarget;
+  const edits = marked
+    // 外す: 前後の == を消す。2つ同時に渡すので、先に消したぶんで位置がずれることはない。
+    ? [{ range: new R(range.startLineNumber, range.startColumn - 2, range.startLineNumber, range.startColumn), text: "" },
+      { range: new R(range.endLineNumber, range.endColumn, range.endLineNumber, range.endColumn + 2), text: "" }]
+    // 塗る: 字面には触れず、前後に == を差し込むだけ
+    : [{ range: R.fromPositions(range.getStartPosition()), text: "==" },
+      { range: R.fromPositions(range.getEndPosition()), text: "==" }];
+  editor.executeEdits("mark", edits);  // 2つで1回ぶんの undo になる
+  clearPreviewHighlight();             // この後の再描画で選択自体も消える
 }
 
 /** プレビューの表示/非表示（仕切りも道連れ・幅の記憶を復元/解除する）。 */
@@ -1441,7 +1682,7 @@ function setPreviewVisible(on) {
   $("preview-btn").classList.toggle("active", on);
   // 閉じるときはエディタの固定幅を外す。付けたままだと、プレビューが消えた分の
   // 幅がどこにも配分されず編集エリアの右側が空白のまま残る。
-  if (on) restorePreviewSplit(); else $("editor").style.flex = "";
+  if (on) restorePreviewSplit(); else { $("editor").style.flex = ""; clearPreviewHighlight(); }
   state.editor?.layout();
   updatePreviewAvailability();  // リッチコピーボタンの有効状態がプレビュー開閉に連動する
 }
@@ -2164,7 +2405,8 @@ function renderRefList() {
     cb.title = isTextRef(r)
       ? "AIコンテキストに含める"
       : isExtractableRef(r)
-        ? "AIコンテキストに含める（サーバでテキスト抽出して同梱）"
+        ? "AIコンテキストに含める（サーバでテキスト抽出して同梱。"
+          + "/copilot では原本を Copilot に添付）"
         : "AIコンテキストに含める（この形式は Copilot 添付経路のみ有効）";
     cb.checked = state.checkedRefs.has(refKey(r));
     cb.addEventListener("click", (e) => e.stopPropagation());
@@ -2451,34 +2693,62 @@ function phaseOf(text) {
 /** Note モードの送信ペイロード（選択・チェック済みコンテキスト・関連ファイル・履歴）。 */
 async function buildNotePayload(msg) {
   const selection = getSelection();
+  // Copilot へ「原本のファイルとして」渡すもの。抽出テキストは図表・レイアウト・
+  // スライド構造が落ちるので、資料そのものを見てほしいときは原本を添付する必要がある
+  // （ローカル LLM は原本を読めないので抽出テキストも要る ＝ 両方送るのが正しく、
+  // どちらか一方ではない）。素のテキスト（.md/.txt 等）は本文がそのまま文脈に載るため
+  // 添付しない — アップロードの待ち時間が増えるだけで得るものがない。
+  const attach_files = [];
   const context_files = [];
   for (const p of [...state.checkedFiles]) {
-    // 抽出失敗（壊れた pptx 等）は tryJSON が理由を alert してそのファイルだけ抜く。
+    // 抽出失敗（壊れた pptx 等）は理由を alert してそのファイルだけ抜く。
     // content: undefined のまま送ると /api/chat 側のバリデーションで丸ごと 422 になる。
-    const r = await tryJSON("/api/file?path=" + encodeURIComponent(p));
+    let r = null;
+    try {
+      r = await jsonFetch("/api/file?path=" + encodeURIComponent(p));
+    } catch (e) {
+      alert("⚠️ " + e.message);
+      // 423 = OS がロックしている（Office で開いたまま）。この後の Copilot 添付も
+      // 同じ理由で必ず失敗するので、添付候補からも外す — 外さないと「1ファイルが
+      // 読めない」だけで /copilot のターンが丸ごとエラーで止まる。
+      if (e.status === 423) continue;
+    }
     if (r && r.content != null) context_files.push({ path: p, content: r.content });
+    // ファイルツリーでチェックした資料も添付対象にする。ワークスペース直下に資料を
+    // 置いて使うのが実際の運用で、そこでのチェックが 📎 関連ファイルと違う扱いに
+    // なると「チェックしたのに添付されない」になる（ツリーで抽出対象＝Office/PDF）。
+    // 抽出に失敗しても添付は続ける（大きすぎて抽出を諦めた資料ほど、原本を
+    // Copilot に読ませる価値がある）。
+    if (isExtractPath(p)) attach_files.push(p);
   }
   // チェック済みの関連ファイル: テキストと抽出可能な形式（pptx/docx 等）は内容を文脈へ、
-  // それ以外のバイナリは絶対パスを Copilot 添付へ
+  // 素のテキスト以外は原本のパスを添付へ（上の attach_files と同じ考え方）。
   const ref_texts = [];
-  const attach_files = [];
   if (state.currentFile) {
     for (let i = 0; i < state.refs.length; i++) {
       const r = state.refs[i];
       if (!state.checkedRefs.has(refKey(r))) continue;
       if (isTextRef(r) || isExtractableRef(r)) {
-        const rr = await tryJSON(
-          `/api/refs/read?note=${encodeURIComponent(state.currentFile)}&idx=${i}`);
+        let rr = null;
+        try {
+          rr = await jsonFetch(
+            `/api/refs/read?note=${encodeURIComponent(state.currentFile)}&idx=${i}`);
+        } catch (e) {
+          alert("⚠️ " + e.message);
+          if (e.status === 423) continue;  // ロック中は添付も失敗する（上のループと同じ）
+        }
         if (rr && rr.content != null) ref_texts.push({ path: r.path, content: rr.content });
-      } else {
-        attach_files.push(r.path);
       }
+      if (!isTextRef(r)) attach_files.push(r.path);
     }
   }
   return {
     message: msg,
     session_id: state.sessionId,   // Note は単一セッション（サーバは無視するが契約上送る）
-    selection, context_files, ref_texts, attach_files,
+    selection, context_files, ref_texts,
+    // ツリーでチェックしたファイルが 📎 関連ファイルにも登録されていると、同じパスが
+    // 2回入って Copilot に二重アップロードされる。送る直前に一意化する。
+    attach_files: [...new Set(attach_files)],
     history: state.history,
     // 「このファイル」が指せるよう、開いているファイルを常に添える。
     // 未保存の編集も含めたいのでディスクではなくエディタの内容を送る。
@@ -2496,7 +2766,10 @@ async function buildNotePayload(msg) {
 const SERVER_COMMANDS = {
   "/compact": "会話を要約して文脈を畳む。`/compact 認証まわり` のように残したい焦点を足せる",
   "/copilot": "エージェントが質問文を組み立てて Copilot に聞き、回答を精査して反映する",
-  "/copilot!": "エージェントを介さず Copilot へ直接1回質問する（速いが文脈も反映も無い）",
+  "/copilot_simple": "ローカル LLM を経由せず、打った文をそのまま Copilot へ1回質問する"
+    + "（選択範囲・チェック済みファイルは同梱、関連ファイルは添付される）",
+  // 従来名。/copilot_simple と完全に同じ処理へ入る（サーバの COPILOT_DIRECT_COMMANDS）。
+  "/copilot!": "`/copilot_simple` の別名（同じ動作）",
 };
 
 //: ブラウザ側で完結するコマンド。run(引数) を呼んで終わり（サーバへは送らない）。
@@ -3726,6 +3999,19 @@ function bindUI() {
   $("save-btn").addEventListener("click", () => manualSave());  // MouseEvent を引数に渡さない
   $("preview-btn").addEventListener("click", togglePreview);
   $("richcopy-btn").addEventListener("click", copyRichPreview);
+  // プレビューを上下に動かしたらエディタ側も同じ位置へ（逆向きは onDidScrollChange 側）
+  $("preview").addEventListener("wheel", noteWheel, { passive: true });
+  $("preview").addEventListener("scroll", () => {
+    syncEditorScroll();
+    // マーカーのボタンは画面固定なので、中身が動いたら選択に付け直す（見えなくなったら消える）
+    if (markTarget) updateMarkButton(state.editor.getModel(), markTarget.range);
+  }, { passive: true });
+  // プレビューで文字を選ぶ → 対応するソース位置を反転表示。selectionchange は
+  // ドラッグ中も連続で飛ぶので少し待つ。エディタ側での選択なら「対象外」として消える。
+  document.addEventListener("selectionchange", () => {
+    clearTimeout(previewSelTimer);
+    previewSelTimer = setTimeout(highlightPreviewSelection, PREVIEW_SEL_DEBOUNCE_MS);
+  });
   bindMdflowUI();
   bindConfluenceUI();
   $("refresh-btn").addEventListener("click", () => loadFileList());
@@ -3847,6 +4133,12 @@ function bindUI() {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "e") {
       e.preventDefault();
       openRecentMenu();
+      return;
+    }
+    // プレビューで選んだところを ==マーカー== で塗る（塗る対象が無ければ何もしない）
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "h" && markTarget) {
+      e.preventDefault();
+      toggleMark();
       return;
     }
     if (e.key === "Escape" && !$("hist-modal").classList.contains("hidden")) closeHistoryModal();

@@ -11,7 +11,11 @@ NoteWithPixie/app/extract.py からの移植（Stage C）。二重実装。
 """
 from __future__ import annotations
 
+import io
+
 from pathlib import Path
+
+from . import files
 
 # フロントがハードコードせずに済むよう /api/settings 経由で公開される
 SUPPORTED_EXTS: set[str] = {".pptx", ".docx", ".xlsx", ".pdf"}
@@ -50,11 +54,26 @@ def _require(module: str, package: str, what: str):
         )
 
 
+def _source(path: Path):
+    """抽出ライブラリに渡す読み取り元。
+
+    通常はパス文字列を返し、ライブラリ自身に開かせる（read_only の openpyxl のように
+    ディスクからストリーミングする実装をそのまま活かせる）。他アプリがロックしていて
+    普通には開けないときだけ、共有読みでメモリに載せた BytesIO を返す
+    （理由は files._FILE_SHARE_ALL のコメント）。pptx/docx/xlsx/pdf の各ライブラリは
+    いずれもファイルライクオブジェクトを受け付けるので、呼び出し側は同じで済む。
+    """
+    try:
+        with path.open("rb"):
+            return str(path)
+    except PermissionError:
+        return io.BytesIO(files.read_bytes_shared(path))
+
+
 def _check_not_ole2(path: Path, old_ext: str) -> None:
     """旧形式（OLE2）の検出。zip ベースの新形式と間違えて渡された場合に、
     ライブラリの分かりにくい例外ではなく変換手順を案内するため先頭で調べる。"""
-    with path.open("rb") as f:
-        head = f.read(8)
+    head = files.read_bytes_shared(path, 8)
     if head == _OLE2_MAGIC:
         raise ValueError(
             f"旧形式（{old_ext}）のファイルです。Office で開いて {path.suffix} 形式"
@@ -97,7 +116,7 @@ def extract_pptx(path: Path) -> str:
     pptx = _require("pptx", "python-pptx", "PowerPoint ファイル")
     _check_not_ole2(path, ".ppt")
     try:
-        prs = pptx.Presentation(str(path))
+        prs = pptx.Presentation(_source(path))
     except Exception as e:
         raise ValueError(f"PowerPoint ファイルを読み込めませんでした（破損の可能性）: {e}")
     out: list[str] = []
@@ -124,7 +143,7 @@ def extract_docx(path: Path) -> str:
     from docx.text.paragraph import Paragraph
 
     try:
-        doc = docx.Document(str(path))
+        doc = docx.Document(_source(path))
     except Exception as e:
         raise ValueError(f"Word ファイルを読み込めませんでした（破損の可能性）: {e}")
     out: list[str] = []
@@ -155,7 +174,7 @@ def extract_xlsx(path: Path) -> str:
     _check_not_ole2(path, ".xls")
     try:
         # read_only: シート全体をメモリに展開しない。data_only: 数式でなく計算値を取る
-        wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(_source(path), read_only=True, data_only=True)
     except Exception as e:
         raise ValueError(f"Excel ファイルを読み込めませんでした（破損の可能性）: {e}")
     try:
@@ -191,7 +210,7 @@ def extract_xlsx(path: Path) -> str:
 def extract_pdf(path: Path) -> str:
     pypdf = _require("pypdf", "pypdf", "PDF ファイル")
     try:
-        reader = pypdf.PdfReader(str(path))
+        reader = pypdf.PdfReader(_source(path))
         out: list[str] = []
         for i, page in enumerate(reader.pages, 1):
             out.append(f"## ページ {i}\n\n{(page.extract_text() or '').strip()}")

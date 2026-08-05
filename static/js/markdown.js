@@ -87,12 +87,84 @@ if (md) {
     }
     return defaultFence(tokens, idx, opts, env, self);
   };
+
+  // ==マーカー== → <mark>。markdown-it 本体にも html:true にも頼らずに塗るための拡張で、
+  // 記法は markdown-it-mark（= 多くの Markdown ツールの慣習）に合わせてある。
+  // 強調と同じ「区切り記号」の仕組みに乗せているので、**強調**やリンクとの入れ子、
+  // `a == b` のような比較式（前後が空白なので開かない）の扱いは本体と揃う。
+  md.inline.ruler.before("emphasis", "mark", (state, silent) => {
+    if (silent || state.src.charCodeAt(state.pos) !== 0x3D /* = */) return false;
+    const scanned = state.scanDelims(state.pos, true);
+    let len = scanned.length;
+    if (len < 2) return false;               // 単独の = は普通の文字
+    if (len % 2) { state.push("text", "", 0).content = "="; len--; }  // 余った1つは文字に落とす
+    for (let i = 0; i < len; i += 2) {
+      state.push("text", "", 0).content = "==";
+      state.delimiters.push({
+        marker: 0x3D, length: 0, token: state.tokens.length - 1,
+        end: -1, open: scanned.can_open, close: scanned.can_close,
+      });
+    }
+    state.pos += scanned.length;
+    return true;
+  });
+  // 対になった区切りだけを <mark> に変える（相手のいない == は文字のまま残す）。
+  md.inline.ruler2.before("emphasis", "mark", (state) => {
+    markPairs(state, state.delimiters);
+    for (const meta of state.tokens_meta) {
+      if (meta?.delimiters) markPairs(state, meta.delimiters);
+    }
+    return true;
+  });
+
+  // ソース行の対応付け。ブロック要素に「Markdown の何行目から何行目か」を書き出しておくと、
+  // プレビュー上で選択した文字からエディタ側の位置を引ける（app.js の highlightPreviewSelection）。
+  // 属性が増える分だけ HTML は太るので、要求した描画（エディタのプレビュー）だけに付ける。
+  // markdown-it のブロックトークンは入れ子でなく平坦な列なので、これで li や blockquote の
+  // 中身まで一度に拾える（inline の子は対象外 —— 属性を出力する器がない）。
+  md.core.ruler.push("src_line", (state) => {
+    if (!sourceMap) return;
+    for (const token of state.tokens) {
+      if (!token.map || token.nesting < 0 || token.type === "inline") continue;
+      token.attrSet("data-src-line", String(token.map[0] + 1));  // 1始まり・その行を含む
+      token.attrSet("data-src-end", String(token.map[1]));       // 1始まり・その行を含む
+    }
+  });
+}
+
+/**
+ * 対になった == の区切りトークンを mark_open / mark_close に書き換える（上の inline ルール用）。
+ * 末尾に余った "=" は <mark> の外へ送る —— `===3つ===` を `=<mark>3つ</mark>=` と描くため。
+ */
+function markPairs(state, delimiters) {
+  const lone = [];
+  for (const start of delimiters) {
+    if (start.marker !== 0x3D || start.end === -1) continue;
+    const end = delimiters[start.end];
+    let token = state.tokens[start.token];
+    token.type = "mark_open"; token.tag = "mark"; token.nesting = 1; token.markup = "=="; token.content = "";
+    token = state.tokens[end.token];
+    token.type = "mark_close"; token.tag = "mark"; token.nesting = -1; token.markup = "=="; token.content = "";
+    const prev = state.tokens[end.token - 1];
+    if (prev?.type === "text" && prev.content === "=") lone.push(end.token - 1);
+  }
+  while (lone.length) {
+    const i = lone.pop();
+    let j = i + 1;
+    while (j < state.tokens.length && state.tokens[j].type === "mark_close") j++;
+    j--;
+    if (i !== j) { const t = state.tokens[j]; state.tokens[j] = state.tokens[i]; state.tokens[i] = t; }
+  }
 }
 
 // 相対画像パスの解決基準（現在ノートのディレクトリ、ワークスペース相対）。
 // レンダラ本体は markdown-it に組み込まれていて呼び出しごとに引数を足せないため、
 // モジュール状態として持ち、app.js が描画前に setAssetBase で更新する。
 let assetBase = "";
+
+// この描画でソース行の対応付け（data-src-line / data-src-end）を出すか。
+// renderInto が opts.sourceMap を見てこの呼び出しの間だけ立てる。
+let sourceMap = false;
 
 /** 相対画像パスの基準ディレクトリを設定する（"" ならワークスペースのルート）。 */
 export function setAssetBase(dir) {
@@ -612,6 +684,8 @@ function buildPresetList(flow, ctx) {
  * 相対画像の解決基準を上書きする。チャット描画用 — モジュール共通の基準
  * （setAssetBase）は「最後にプレビューしたディレクトリ」のままで止まるため、
  * チャットは呼び出し側が「今のノートのディレクトリ」を明示して渡す。
+ * opts.sourceMap を真にすると、ブロック要素に data-src-line / data-src-end
+ * （Markdown の対応行、1始まり・両端を含む）が付く（エディタのプレビュー専用）。
  */
 export function renderInto(el, text, opts = {}) {
   if (!md) {
@@ -623,11 +697,14 @@ export function renderInto(el, text, opts = {}) {
   // 画像URLの書き換えは md.render（同期）の中で起きる。assetBase の上書きは
   // この呼び出しの間だけ有効にし、終わったら必ず戻す（他描画に漏らさない）。
   const prevBase = assetBase;
+  const prevSourceMap = sourceMap;
   if (opts.assetBase != null) assetBase = opts.assetBase || "";
+  sourceMap = !!opts.sourceMap;
   try {
     el.innerHTML = md.render(text);
   } finally {
     if (opts.assetBase != null) assetBase = prevBase;
+    sourceMap = prevSourceMap;
   }
   const gen = (generation.get(el) || 0) + 1;
   generation.set(el, gen);

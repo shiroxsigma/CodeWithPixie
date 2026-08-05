@@ -214,9 +214,14 @@ def api_refs_read(note: str, idx: int):
             return {"path": r["path"], "content": extract.extract_text(p)}
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except PermissionError:
+            raise HTTPException(423, files.locked_message(p))
     if p.stat().st_size > files.MAX_BYTES:
         raise HTTPException(400, "file too large")
-    return {"path": r["path"], "content": p.read_text(encoding="utf-8", errors="replace")}
+    try:
+        return {"path": r["path"], "content": p.read_text(encoding="utf-8", errors="replace")}
+    except PermissionError:
+        raise HTTPException(423, files.locked_message(p))
 
 
 # --- 会話履歴（ワークスペース単位で1本。ノート単位ではない）---------------------

@@ -688,6 +688,34 @@ path.flowchart-link.selected { stroke: #ffb454 !important; stroke-width: 3px; }
   border-radius: 3px;
 }
 
+/* プレビューで文字を選択したときの、対応する Markdown ソースの位置
+   （app.js の highlightPreviewSelection）。同時に出ることはないが、図の反転表示と
+   取り違えないよう色を変えてある。字面を特定できなかったときは行だけが塗られる。 */
+.preview-src-hl-line { background: rgba(90, 200, 170, 0.13); }
+.preview-src-hl {
+  background: rgba(90, 200, 170, 0.38);
+  border-radius: 3px;
+}
+
+/* --- ==マーカー== --------------------------------------------------------------
+   ソースの ==…== を markdown.js が <mark> にする。暗い地の上なので、ブラウザ既定の
+   まま（黒文字＋黄）で十分読める —— 明示しておくのは既定色がブラウザ差で揺れるため。
+   プレビューとチャットの両方に効かせる（.md 配下）。 */
+.md mark {
+  background: #ffe066; color: #17131f;
+  padding: 0 2px; border-radius: 2px;
+}
+
+/* プレビューで文字を選ぶと選択の脇に出る「🖍 マーカー」。position:fixed なので
+   app.js が選択の矩形（画面座標）から位置を決める。 */
+#mark-btn {
+  position: fixed; z-index: 100;
+  padding: 4px 10px; font-size: 12px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+#mark-btn:hover { border-color: var(--accent); }
+
 /* --- mdflow: 条件別フロー可視化 ---------------------------------------------
    図の直下に出る条件プリセットのリスト。DOM は markdown.js の buildPresetList、
    クリック等は app.js の委譲リスナー（bindMdflowUI）。 */
