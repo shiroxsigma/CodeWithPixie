@@ -1,4 +1,4 @@
-# 🧚 CodeWithPixie
+# CodeWithPixie
 
 NoteWithPixie(NWP) の Web UI（FastAPI + Monaco）に、AnythingWithPixie(AWP) の
 **自律コード修正エンジン**を載せたローカル Web アプリ。ブラウザで自然言語の指示を出すと、
