@@ -8,17 +8,17 @@ fastapi = "*"
 "uvicorn" = {extras = ["standard"], version = "*"}
 pydantic-settings = "*"
 python-dotenv = "*"
-httpx = "*"         # /api/models（アクティブサーバのモデル一覧取得・実行時依存）
-# --- Note モード（Stage C: NWP から移植したモジュールの依存）---
-pyyaml = "*"        # mdflow（条件別フロー可視化）
-python-pptx = "*"   # extract: pptx テキスト抽出
-python-docx = "*"   # extract: docx テキスト抽出
-openpyxl = "*"      # extract: xlsx テキスト抽出
-pypdf = "*"         # extract: pdf テキスト抽出
+httpx = "*"         # /api/models (lists the active server's models; runtime dependency)
+# --- Note mode (Stage C: dependencies of the modules ported from NWP) ---
+pyyaml = "*"        # mdflow (conditional flow visualisation)
+python-pptx = "*"   # extract: pptx text extraction
+python-docx = "*"   # extract: docx text extraction
+openpyxl = "*"      # extract: xlsx text extraction
+pypdf = "*"         # extract: pdf text extraction
 
 [dev-packages]
 pytest = "*"
-httpx = "*"  # FastAPI TestClient 用
+httpx = "*"  # for FastAPI's TestClient
 
 [requires]
 python_version = "3.12"
