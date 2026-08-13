@@ -190,7 +190,7 @@ def run(sess, *, compose_text: str, user_ask: str, attach_files: list[str],
     sess.set_copilot(False)
     try:
         # --- フェーズ1: 質問文の組み立て ---
-        status("🕊️ /copilot: これまでの調査から Copilot への質問を組み立てています…")
+        status("/copilot: これまでの調査からCopilotへの質問を組み立てています…")
         body: list[str] = []
         def compose_sink(ev: dict) -> None:
             # 本文はチャットに出さず溜める（下書きと調査ログで会話が埋まるため）。
@@ -215,29 +215,29 @@ def run(sess, *, compose_text: str, user_ask: str, attach_files: list[str],
             question = question[:QUESTION_MAX_CHARS] + "\n…（長いため以降を省略）"
 
         emit({"type": "token",
-              "text": f"### 🕊️ Copilot への質問（{len(question):,} 文字）\n\n"
+              "text": f"### Copilot への質問（{len(question):,} 文字）\n\n"
                       f"{_neutralize(question)}\n\n"})
 
         # --- フェーズ2: Copilot へ質問 ---
         files_note = f"・添付 {len(attach_files)} 件" if attach_files else ""
-        status(f"🕊️ Copilot に送信しました。回答を待っています（数十秒{files_note}）…")
+        status(f"Copilotに送信しました。回答を待っています（数十秒{files_note}）…")
         # PrayLight の進捗（アップロード中／完了など）をそのまま status に流す。
         # 添付付きは数分かかることがあり、無通知だと固まったように見えるため。
         answer = copilot.ask_with_progress(
-            question, attach_files, on_progress=lambda line: status(f"🕊️ {line}"))
+            question, attach_files, on_progress=status)
         if cancelled():
-            status("⏹ 中断しました（Copilot の回答は破棄されました）。")
+            status("中断しました（Copilotの回答は破棄されました）。")
             return
         if answer.startswith("エラー"):
-            status(f"⚠️ {answer.splitlines()[0][:160]}")
+            status(answer.splitlines()[0][:160])
             emit({"type": "error", "text": answer})
             return
 
         emit({"type": "token",
-              "text": f"### 🕊️ Copilot の回答\n\n{_neutralize(answer)}\n\n---\n\n"})
+              "text": f"### Copilot の回答\n\n{_neutralize(answer)}\n\n---\n\n"})
 
         # --- フェーズ3: 回答を精査して反映 ---
-        status("🕊️ 回答を精査して反映します…")
+        status("Copilotの回答を精査して反映します…")
         turn(build_apply_prompt(user_ask, answer), emit)
     finally:
         # 次のターンでは通常どおりエージェントの判断で ask_copilot を使えるように戻す。

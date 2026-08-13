@@ -106,9 +106,7 @@ const langFor = (path) => LANG[extOf(path)] || "plaintext";
 const isMarkdown = (path) => !!path && ["md", "markdown"].includes(extOf(path));
 
 // エディタでは開けないファイル（画像・PDF 等）のアイコン
-const FILE_ICONS = { png: "🖼", jpg: "🖼", jpeg: "🖼", gif: "🖼", svg: "🖼", webp: "🖼", ico: "🖼",
-                     pdf: "📕", pptx: "📊", docx: "📝", xlsx: "📈", zip: "🗜", exe: "⚙" };
-const fileIcon = (path) => FILE_ICONS[extOf(path)] || "📎";
+const fileIcon = () => "";
 
 /** サーバがテキスト抽出できる拡張子（pptx/docx 等）。/api/mode の features.extract_exts で
     上書きされる。ハードコードのフォールバックを持つのは、取得が失敗してもチェックボックスの
@@ -210,7 +208,7 @@ async function loadMode() {
 }
 
 const MODES = ["code", "plan", "note"];  // モードバッジのクリックで循環する順
-const MODE_LABEL = { code: "🛠 Code", plan: "📋 Plan", note: "📝 Note" };
+const MODE_LABEL = { code: "Code", plan: "Plan", note: "Note" };
 
 function setModeState(m) {
   state.mode = MODES.includes(m.mode) ? m.mode : "code";  // 未知の値は Code に倒す
@@ -243,10 +241,10 @@ function applyModeUI() {
 function updateCodeStyleBtn() {
   const btn = $("code-style-btn");
   const planFirst = state.codeStyle === "plan";
-  btn.textContent = planFirst ? "📋 計画を先に" : "⚡ 通常";
+  btn.textContent = planFirst ? "計画を先に" : "通常";
   btn.title = planFirst
-    ? "Code モードの進め方: 📋 計画を先に — まず実行計画を提示し、承認してから実装する（クリックで「⚡ 通常」へ切替）"
-    : "Code モードの進め方: ⚡ 通常 — エージェントが自律的に実装（破壊操作は承認制）。クリックで「📋 計画を先に」へ切替";
+    ? "Codeモードの進め方: 計画を先に — まず実行計画を提示し、承認してから実装する（クリックで通常へ切替）"
+    : "Codeモードの進め方: 通常 — エージェントが自律的に実装（破壊操作は承認制）。クリックで計画優先へ切替";
 }
 
 function toggleCodeStyle() {
@@ -254,8 +252,8 @@ function toggleCodeStyle() {
   localStorage.setItem("pixie.codeStyle", state.codeStyle);
   updateCodeStyleBtn();
   addMessage("system", state.codeStyle === "plan"
-    ? "📋 計画を先に: エージェントはまず実行計画を提示し、承認してから実装します。"
-    : "⚡ 通常: エージェントが自律的に実装します（破壊操作は従来どおり承認制）。");
+    ? "計画を先に: エージェントはまず実行計画を提示し、承認してから実装します。"
+    : "通常: エージェントが自律的に実装します（破壊操作は従来どおり承認制）。");
 }
 
 // Copilot 関連 UI の出し分け（NWP と同じ規則）。バーは .note-only だけでは足りない:
@@ -342,12 +340,12 @@ async function switchMode(next, opts = {}) {
   if (isNote()) {
     await loadHistory();  // Note の履歴はワークスペースのサイドカーから復元
     if (state.currentFile) { await loadNotes(); await loadRefs(); }
-    addMessage("system", "📝 Note モードに切り替えました（読み取り専用エージェント・クリック反映）。");
+    addMessage("system", "Noteモードに切り替えました（読み取り専用エージェント・クリック反映）。");
   } else if (isPlan()) {
-    addMessage("system", "📋 Plan モードに切り替えました"
+    addMessage("system", "Planモードに切り替えました"
       + "（調べて実行計画を立てるだけ。承認するまでファイルは変更されません）。");
   } else {
-    addMessage("system", "🛠 Code モードに切り替えました（自律エージェント・破壊操作は承認制）。");
+    addMessage("system", "Codeモードに切り替えました（自律エージェント・破壊操作は承認制）。");
   }
   return true;
 }
@@ -548,7 +546,7 @@ function renderFileTree() {
 
     if (f.type === "dir") {
       li.classList.add("dir");
-      icon.textContent = state.collapsedDirs.has(f.path) ? "📁" : "📂";
+      icon.textContent = state.collapsedDirs.has(f.path) ? "▸" : "▾";
       li.append(icon, name);
       li.addEventListener("click", async () => {
         if (state.collapsedDirs.has(f.path)) {
@@ -588,7 +586,7 @@ function renderFileTree() {
         }
       }
       // エディタは テキスト/コード 専用。それ以外（画像・PDF 等）は OS の既定アプリに任せる。
-      icon.textContent = f.text ? "📄" : fileIcon(f.path);
+      icon.textContent = f.text ? "" : fileIcon(f.path);
       name.title = f.text ? f.path : `${f.path}（クリックで既定アプリで開く）`;
       li.append(icon, name);
       li.classList.toggle("active", f.path === state.currentFile);
@@ -711,13 +709,13 @@ function openFsMenu(e, entry) {
     menu.appendChild(it);
   };
   if (entry.type === "dir") {
-    add("📄 中に新規ファイル", () => createEntry("file", entry.path + "/"));
-    add("📁 中に新規フォルダ", () => createEntry("dir", entry.path + "/"));
+    add("中に新規ファイル", () => createEntry("file", entry.path + "/"));
+    add("中に新規フォルダ", () => createEntry("dir", entry.path + "/"));
   } else if (!entry.text) {
     add("↗ 既定のアプリで開く", () => openWithOS(entry.path));
   }
-  add("✏️ 名前変更・移動", () => renameEntry(entry));
-  add("🗑️ 削除", () => deleteEntry(entry));
+  add("名前変更・移動", () => renameEntry(entry));
+  add("削除", () => deleteEntry(entry));
   menu.style.left = e.pageX + "px";
   menu.style.top = e.pageY + "px";
   document.body.appendChild(menu);
@@ -1111,7 +1109,7 @@ const navForward = () => navStep(state.navBack, state.navFwd);
 function openRecentMenu() {
   const items = state.navRecent
     .filter((p) => p !== state.currentFile)
-    .map((p) => ({ label: "📄 " + p, title: p, onClick: () => openFile(p) }));
+    .map((p) => ({ label: p, title: p, onClick: () => openFile(p) }));
   if (!items.length) return;
   openMenuUnder($("recent-btn"), [{ label: "最近開いたファイル" }, ...items]);
 }
@@ -1230,9 +1228,9 @@ async function openPlacesMenu() {
   if (places.recent.length) {
     items.push({ label: "最近使ったフォルダ" }, ...rows(places.recent, "🕘"));
   }
-  items.push({ label: "📂 フォルダを選ぶ…", onClick: openRootModal });
+  items.push({ label: "フォルダを選ぶ…", onClick: openRootModal });
   if (!places.favorites.length && !places.recent.length) {
-    items.unshift({ label: "行き先はまだありません（📂 で移動すると溜まります）" });
+    items.unshift({ label: "行き先はまだありません（フォルダを移動すると溜まります）" });
   }
   openMenuUnder($("places-btn"), items);
 }
@@ -1262,7 +1260,7 @@ function renderPlaces() {
 
       const browse = document.createElement("button");
       browse.className = "place-mini";
-      browse.textContent = "📂";
+      browse.textContent = "開く";
       browse.title = "移動せずに中を見る";
       browse.disabled = !p.exists;
       browse.addEventListener("click", () => browseDirs(p.path));
@@ -2380,7 +2378,7 @@ function renderNotes() {
       isWholeLine: true,
       glyphMarginClassName: "pixie-note-glyph",
       className: "pixie-note-line",
-      glyphMarginHoverMessage: { value: "📌 " + n.text },
+      glyphMarginHoverMessage: { value: n.text },
     },
   }));
   state.noteDecorations.set(decos);
@@ -2495,7 +2493,7 @@ function renderRefList() {
       else state.checkedRefs.delete(refKey(r));
     });
     const icon = document.createElement("span");
-    icon.textContent = r.external ? "🔗" : "📄";  // 外部=🔗 / ワークスペース内=📄
+    icon.textContent = r.external ? "外部" : "";
     const name = document.createElement("span");
     name.className = "fname";
     name.textContent = r.name || baseName(r.path);
@@ -2586,14 +2584,14 @@ async function browsePick(path) {
   }
   for (const d of r.dirs || []) {
     const li = document.createElement("li");
-    li.textContent = "📁 " + d.name;
+    li.textContent = d.name;
     li.addEventListener("click", () => browsePick(d.path));
     ul.appendChild(li);
   }
   for (const f of (r.files || [])) {
     const li = document.createElement("li");
     li.className = "pick-file";
-    li.textContent = "📄 " + f.name;
+    li.textContent = f.name;
     li.addEventListener("click", async () => {
       await addRef({ path: f.path.replace(/\\/g, "/"), external: true, name: f.name });
       closePickModal();
@@ -3140,7 +3138,7 @@ function collapseToSummary(assistantEl, info) {
     if (el !== assistantEl) el.remove();
   }
   const head = addMessage("system",
-    `🗜 ここまでの会話（${info.before} 件）を要約に畳みました（約 ${info.saved_chars.toLocaleString()} 文字ぶんの文脈を解放）。`);
+    `ここまでの会話（${info.before}件）を要約に畳みました（約${info.saved_chars.toLocaleString()}文字ぶんの文脈を解放）。`);
   box.insertBefore(head, assistantEl);
   if (isNote()) {
     // Note は保存履歴が表示の正。次に開いたときも要約だけが残るようにする。
@@ -3264,7 +3262,7 @@ function setStreaming(on) {
   state.streaming = on;
   const btn = $("send-btn");
   if (on) {
-    btn.textContent = "⏹ 停止";
+    btn.textContent = "停止";
     btn.classList.add("stop");
     btn.title = "エージェントの実行を中断する";
   } else {
@@ -3367,7 +3365,7 @@ async function resolveApproval(id, approve, override) {
 
 // ---- 変更ファイル反映 ----
 async function onFilesChanged(paths) {
-  addToolStatus(state.assistantEl, "📝 変更されたファイル: " + paths.join(", "));
+  addToolStatus(state.assistantEl, "変更されたファイル: " + paths.join(", "));
   state.changedPaths = new Set(paths);
   await loadFileList();
   // 開いているファイルが変更された場合はライブ再読込（未保存なら確認）。
@@ -3401,8 +3399,8 @@ async function rollbackTurn(turnId) {
       return;
     }
     addMessage("system", r.restored.length
-      ? `⏪ ${r.restored.length} 件を巻き戻しました: ${r.restored.join(", ")}`
-      : "⏪ 戻す変更はありませんでした（既にターン前の内容と同じです）。");
+      ? `${r.restored.length}件を巻き戻しました: ${r.restored.join(", ")}`
+      : "戻す変更はありませんでした（既にターン前の内容と同じです）。");
     if (r.restored.length) await onFilesChanged(r.restored);  // ツリー更新＋開いていれば再読込
   } catch (e) {
     alert("⚠️ 巻き戻しに失敗しました: " + e.message);
@@ -3473,7 +3471,7 @@ async function openSessionsModal() {
     info.append(title, sub);
     const del = document.createElement("button");
     del.type = "button";
-    del.textContent = "🗑";
+    del.textContent = "削除";
     del.title = "この会話を削除";
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -3521,7 +3519,7 @@ function renderPatchAction(el, text, edits) {
   let folded = "";
   let pos = 0;
   for (const b of scanEditBlocks(text)) {
-    folded += text.slice(pos, b.start) + "📝 修正案（差分で確認）";
+    folded += text.slice(pos, b.start) + "修正案（差分で確認）";
     pos = b.end;
   }
   folded += text.slice(pos);
@@ -3604,7 +3602,7 @@ function renderApplyBlock(el, text, target) {
 
   // 本文中の apply フェンスは重複表示になるので置き換える
   el.querySelector(".body").textContent =
-    text.replace(/```apply\s*\n[\s\S]*?```/g, "📝 修正案（下のボックス参照）");
+    text.replace(/```apply\s*\n[\s\S]*?```/g, "修正案（下のボックス参照）");
 
   const box = document.createElement("div");
   box.className = "apply-box";
@@ -3722,7 +3720,7 @@ function showApprovalPreview(i) {
   if (!p) return;
   [...$("diff-tabs").children].forEach((b, j) => b.classList.toggle("active", j === i));
   openDiffPreview(p.before, p.after, null,
-    `📄 承認確認: ${p.path}（左＝現在 ／ 右＝書き込まれる内容${approvalEditInfo ? "・右を編集して修正して承認できます" : ""}）`,
+    `承認確認: ${p.path}（左＝現在 ／ 右＝書き込まれる内容${approvalEditInfo ? "・右を編集して修正して承認できます" : ""}）`,
     { approval: true, editable: !!approvalEditInfo, lang: langFor(p.path || "") });
 }
 
@@ -3775,7 +3773,7 @@ async function approvePlan() {
   // 確認ダイアログは出さない（このボタン自体が確認であり、二段確認は承認の意味を薄める）。
   const ok = await switchMode("code", { keepMessages: true });
   if (!ok) { openPlanView(planText); return; }  // 切替に失敗したら計画は消さずに戻す
-  addMessage("system", "✓ 計画を承認しました。🛠 Code モードで実行します。");
+  addMessage("system", "計画を承認しました。Codeモードで実行します。");
   // 送信は通常のチャット経路に乗せる（ユーザー発言として履歴にも残り、中断もできる）。
   $("chat-input").value =
     "以下の実行計画を承認しました。この計画のとおりに実装してください。"
@@ -3819,7 +3817,7 @@ async function browseDirs(path) {
   }
   for (const d of r.dirs || []) {
     const li = document.createElement("li");
-    li.textContent = "📁 " + d.name;
+    li.textContent = d.name;
     li.addEventListener("click", () => browseDirs(d.path));
     list.appendChild(li);
   }

@@ -834,7 +834,7 @@ export function enterEditMode(box, meta, api, restore = null) {
     bar.appendChild(b);
     return b;
   };
-  const labelBtn = mkBtn("✏️ ラベル", "選択中のノード/矢印のラベルを編集", onLabelBtn);
+  const labelBtn = mkBtn("ラベル編集", "選択中のノード/矢印のラベルを編集", onLabelBtn);
   mkBtn("➕ ノード", "ノードを追加（追加後にラベルを編集できます）", onAddNode);
   const addEdgeBtn = mkBtn("➕ 矢印", "矢印を追加（始点→終点の順にノードをクリック）", onAddEdge);
   const revBtn = mkBtn("⇄ 反転", "選択中の矢印の向きを入れ替える", onReverse);
@@ -860,7 +860,7 @@ export function enterEditMode(box, meta, api, restore = null) {
   }
   shapeSel.addEventListener("change", onShapeKind);
   bar.appendChild(shapeSel);
-  const delBtn = mkBtn("🗑 削除", "選択中のノード/矢印を削除（Delete キーでも可。Ctrl+Z で戻せます）", onDelete);
+  const delBtn = mkBtn("削除", "選択中のノード/矢印を削除（Delete キーでも可。Ctrl+Z で戻せます）", onDelete);
   const hint = document.createElement("span");
   hint.className = "mermaid-edit-hint";
   bar.appendChild(hint);
@@ -917,7 +917,7 @@ export function enterEditMode(box, meta, api, restore = null) {
     const isNode = s?.kind === "node";
     labelBtn.disabled = !s;
     delBtn.disabled = !s;
-    labelBtn.textContent = isEdge ? "✏️ ラベル(矢印)" : "✏️ ラベル";
+    labelBtn.textContent = isEdge ? "ラベル編集（矢印）" : "ラベル編集";
     revBtn.classList.toggle("hidden", !isEdge);
     arrowSel.classList.toggle("hidden", !isEdge);
     shapeSel.classList.toggle("hidden", !isNode);

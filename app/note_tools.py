@@ -178,7 +178,7 @@ def execute_sync(name: str, args: dict) -> str:
             return _truncate(mdflow.describe(_read_note(_require(args, "path"))))
         if name == "ask_copilot":
             if not settings.copilot_enabled:
-                return "エラー: Copilot モードがオフです。設定（⚙️）でオンにしてください。"
+                return "エラー: Copilot モードがオフです。設定でオンにしてください。"
             # 実体は CWP 既存の copilot.ask()（PrayLight 同期 subprocess・エラーは文字列契約）
             return _truncate(copilot.ask(_require(args, "question"), args.get("files") or []))
         return f"エラー: 不明なツール '{name}'"

@@ -254,7 +254,7 @@ def ask(question: str, files: list | None = None, on_progress=None) -> str:
     質問は数分かかることがあり、無通知だと固まったようにしか見えないため。
     """
     if not config.settings.copilot_enabled:
-        return "エラー: Copilot 連携は無効です。⚙️ 設定でオンにしてください。"
+        return "エラー: Copilot 連携は無効です。設定でオンにしてください。"
     script, py = _praylight_paths()
     if not script.exists():
         return f"エラー: PrayLight が見つかりません（{script}）。設定の PrayLight フォルダを確認してください。"

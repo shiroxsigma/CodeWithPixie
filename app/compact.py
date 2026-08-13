@@ -103,11 +103,11 @@ def run(sess, *, focus: str, emit, approval_timeout: float = 0.0) -> None:
 
     before = sess.history_stats()
     if before["messages"] < 2:
-        emit({"type": "status", "text": "🗜 まだ畳むほどの会話がありません。"})
+        emit({"type": "status", "text": "まだ畳むほどの会話がありません。"})
         return
 
     emit({"type": "status",
-          "text": f"🗜 /compact: これまでの会話（{before['messages']} 件・"
+          "text": f"/compact: これまでの会話（{before['messages']}件・"
                   f"約 {before['chars']:,} 文字）を要約しています…"})
 
     body: list[str] = []
@@ -140,9 +140,9 @@ def run(sess, *, focus: str, emit, approval_timeout: float = 0.0) -> None:
     after = sess.history_stats()
     saved = before["chars"] - after["chars"]
 
-    emit({"type": "token", "text": f"### 🗜 会話を要約しました\n\n{summary}\n"})
+    emit({"type": "token", "text": f"### 会話を要約しました\n\n{summary}\n"})
     emit({"type": "status",
-          "text": f"🗜 文脈を {before['messages']} 件 → {after['messages']} 件"
+          "text": f"文脈を {before['messages']}件 → {after['messages']}件"
                   f"（約 {saved:,} 文字ぶん節約）に畳みました。"})
     # フロントはこれを見てチャット欄と保存履歴を要約1件に差し替える（表示と文脈の一致点）。
     emit({"type": "compacted", "summary": summary,

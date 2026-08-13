@@ -135,7 +135,7 @@ def test_guard_passes_allowed_and_rejects_others():
     assert [c["function"]["name"] for c in approved] == ["read_note"]
     assert override is None
     assert len(h.events) == 2  # 却下2件がステータス通知される（CWP イベント形式）
-    assert all(e["type"] == "status" and e["text"].startswith("⚠️") for e in h.events)
+    assert all(e["type"] == "status" and e["text"].startswith("警告:") for e in h.events)
 
 
 def test_guard_all_rejected_returns_empty():

@@ -378,7 +378,7 @@ function buildExportBar(box, meta, zoom = null) {
     edit.title = ok
       ? "この図を直接編集する（ノード/矢印の操作がMermaidソースへ反映される）"
       : `この図は直接編集できません（${reason}）`;
-    edit.textContent = "✏️ 編集";
+    edit.textContent = "編集";
     edit.disabled = !ok;
     if (ok) edit.addEventListener("click", () => diagramEditor(box, meta));
     bar.appendChild(edit);
@@ -387,7 +387,7 @@ function buildExportBar(box, meta, zoom = null) {
     const save = document.createElement("button");
     save.type = "button";
     save.title = "PNG にしてワークスペースへ保存する（同じ図は同じ名前へ書き直す）";
-    save.textContent = "🖼 保存";
+    save.textContent = "保存";
     save.addEventListener("click", () =>
       run(save, "保存しました", async () => `✓ ${await saveDiagram(await png(), id)}`));
     bar.appendChild(save);
@@ -396,7 +396,7 @@ function buildExportBar(box, meta, zoom = null) {
   const copy = document.createElement("button");
   copy.type = "button";
   copy.title = "PNG をクリップボードへコピーする";
-  copy.textContent = "📋 コピー";
+  copy.textContent = "コピー";
   copy.addEventListener("click", () =>
     run(copy, "コピーしました", async () => {
       await copyPngToClipboard(await png());

@@ -676,7 +676,7 @@ async def api_copilot_read():
 
     PrayLight の subprocess が数十秒かかるので to_thread に逃がす（イベントループを塞がない）。"""
     if not config.settings.copilot_enabled:
-        return {"ok": False, "error": "Copilot 連携が無効です。⚙️ 設定でオンにしてください。", "transcript": ""}
+        return {"ok": False, "error": "Copilot連携が無効です。設定でオンにしてください。", "transcript": ""}
     text = await asyncio.to_thread(copilot.read_conversation)
     if text.startswith("エラー"):
         return {"ok": False, "error": text, "transcript": ""}
@@ -849,7 +849,7 @@ def _copilot_direct(question_text: str, req: ChatReq,
     async def gen():
         if not settings.copilot_enabled:
             yield _sse({"type": "error",
-                        "text": "Copilot 連携が無効です。⚙️ 設定でオンにしてください。"})
+                        "text": "Copilot連携が無効です。設定でオンにしてください。"})
             yield _sse({"type": "done"})
             return
         if not question_text and not req.selection.strip():
@@ -863,7 +863,7 @@ def _copilot_direct(question_text: str, req: ChatReq,
             question_text or "以下のテキストについて意見をください。", req.selection, context)
         files_note = f"・添付 {len(req.attach_files)} 件" if req.attach_files else ""
         yield _sse({"type": "status",
-                    "text": f"🕊️ {command}: ローカル LLM を経由せず Copilot に直接質問します"
+                    "text": f"{command}: ローカルLLMを経由せずCopilotに直接質問します"
                             f"（{len(question)} 文字{files_note}・数十秒かかります）"})
         # copilot.ask は同期の subprocess（uvicorn reload 下の Windows では asyncio の
         # subprocess API が動かないため、このプロジェクトは同期実装を thread へ逃がす）。
@@ -879,7 +879,7 @@ def _copilot_direct(question_text: str, req: ChatReq,
         # 「進捗を put した直後に完了」の順序を毎回考える羽目になる。
         task.add_done_callback(lambda _: progress.put_nowait(_PROGRESS_END))
         while (line := await progress.get()) is not _PROGRESS_END:
-            yield _sse({"type": "status", "text": f"🕊️ {line}"})
+            yield _sse({"type": "status", "text": line})
         try:
             answer = await task
         except Exception as e:  # noqa: BLE001 - SSE を無言で切らない
@@ -888,10 +888,10 @@ def _copilot_direct(question_text: str, req: ChatReq,
             return
         if answer.startswith("エラー"):
             # 1行目だけをステータス行に出し、全文は error として渡す（原因が長いことがある）
-            yield _sse({"type": "status", "text": f"⚠️ {answer.splitlines()[0][:160]}"})
+            yield _sse({"type": "status", "text": answer.splitlines()[0][:160]})
             yield _sse({"type": "error", "text": answer})
         else:
-            yield _sse({"type": "status", "text": "✅ Copilot の回答を受信しました"})
+            yield _sse({"type": "status", "text": "Copilotの回答を受信しました"})
             yield _sse({"type": "token", "text": answer})
         yield _sse({"type": "done"})
 
@@ -911,7 +911,7 @@ def _copilot_orchestrated(user_ask: str, req: ChatReq) -> StreamingResponse:
     各モードのツールプロファイルと system_suffix が既に決めているため。
     """
     if not settings.copilot_enabled:
-        return _error_stream("Copilot 連携が無効です。⚙️ 設定でオンにしてください。")
+        return _error_stream("Copilot連携が無効です。設定でオンにしてください。")
 
     current = mode.current_mode()
     _require_manager()  # bootstrap 済み（= pixie_core 初期化済み）の確認

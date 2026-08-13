@@ -483,7 +483,7 @@ button:active { transform: translateY(1px); }
 .msg-del:hover { color: var(--danger); border-color: var(--danger); }
 /* ⏪ ロールバック（Code モード）。🗑 の左に並ぶ */
 .msg-rollback {
-  position: absolute; top: 4px; right: 34px; padding: 0 4px; line-height: 1.4;
+  position: absolute; top: 4px; right: 42px; padding: 0 4px; line-height: 1.4;
   background: var(--bg2); color: var(--muted); border: 1px solid var(--border);
   border-radius: 6px; font-size: 11px; opacity: 0; transition: opacity .12s;
 }
@@ -842,7 +842,7 @@ details.mdflow-mapping pre {
 
 /* Monaco 付箋グリフ */
 .pixie-note-glyph { background: transparent; }
-.pixie-note-glyph::after { content: "📌"; font-size: 12px; }
+.pixie-note-glyph::after { content: "●"; font-size: 10px; }
 .pixie-note-line { background: rgba(139,124,255,0.10); }
 
 /* ==== モード出し分け（統合シェル Stage C） ====================================

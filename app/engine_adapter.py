@@ -631,7 +631,7 @@ class AgentSession(HistoryOps):
             # ターンシーケンス(reset→user追加→run_graph)は pixie_core 側に集約済み。
             self._engine.run_turn(message, output_fn=self._emit, interactive_fn=self._approve)
         except self._CancelTurn:
-            emit_event({"type": "status", "text": "⏹ 中断しました。"})
+            emit_event({"type": "status", "text": "中断しました。"})
         except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
             emit_event({"type": "error", "text": f"{type(e).__name__}: {e}"})
         finally:
@@ -745,12 +745,12 @@ class AgentSession(HistoryOps):
                     paths = [item["path"] for item in result.get("changes", [])]
                     self._remember_changeset(result["id"])
                     self._emit_event({"type": "status", "text":
-                                      f"✅ ChangeSet {result['id']} を一括適用しました（{len(paths)}ファイル）"})
+                                      f"ChangeSet {result['id']} を一括適用しました（{len(paths)}ファイル）"})
                     return ([], "ChangeSetで承認済みの変更を一括適用しました: "
                             + ", ".join(paths)
                             + "。同じ編集を繰り返さず、必要な検証へ進んでください。")
                 details = result.get("conflicts") or result.get("errors") or result.get("error")
-                self._emit_event({"type": "status", "text": f"⚠️ ChangeSetを適用できませんでした: {details}"})
+                self._emit_event({"type": "status", "text": f"ChangeSetを適用できませんでした: {details}"})
                 return ([], "承認待ちの間に対象ファイルが変化したか、変更案を安全に適用できませんでした。"
                         "read_fileで最新版を確認し、変更案を作り直してください。")
             return (tool_calls, None)
@@ -957,7 +957,7 @@ class NoteSession(HistoryOps):
                 show_thinking=settings.show_thinking,
             )
         except self._CancelTurn:
-            emit_event({"type": "status", "text": "⏹ 中断しました。"})
+            emit_event({"type": "status", "text": "中断しました。"})
         except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
             emit_event({"type": "error", "text": f"{type(e).__name__}: {e}"})
         finally:
@@ -981,7 +981,7 @@ class NoteSession(HistoryOps):
             (approved if _tc_name(tc) in self._allowed else rejected).append(tc)
         for tc in rejected:
             self._emit_event({"type": "status",
-                              "text": f"⚠️ 許可されていないツール '{_tc_name(tc)}' を却下しました"
+                              "text": f"警告: 許可されていないツール '{_tc_name(tc)}' を却下しました"
                                       "（このモードは読み取り専用）"})
         return (approved, None)
 

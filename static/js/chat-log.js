@@ -60,7 +60,7 @@ export function addDeleteButton(el, onDelete) {
   const btn = document.createElement("button");
   btn.className = "msg-del";
   btn.type = "button";
-  btn.textContent = "🗑";
+  btn.textContent = "削除";
   btn.title = "この往復を削除（LLM の文脈からも消してコンテキストを節約する）";
   btn.addEventListener("click", onDelete);
   el.appendChild(btn);
@@ -72,7 +72,7 @@ export function addRollbackButton(el, onRollback) {
   const btn = document.createElement("button");
   btn.className = "msg-rollback";
   btn.type = "button";
-  btn.textContent = "⏪";
+  btn.textContent = "戻す";
   btn.title = "このターンで変更されたファイルを、ターンの前の状態へ戻す"
     + "（以降のターンで同じファイルに加えられた変更も巻き戻る）";
   btn.addEventListener("click", onRollback);
