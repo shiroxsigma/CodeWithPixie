@@ -873,7 +873,7 @@ def _copilot_direct(question_text: str, req: ChatReq,
         loop = asyncio.get_running_loop()
         progress: asyncio.Queue = asyncio.Queue()
         task = asyncio.create_task(asyncio.to_thread(
-            copilot.ask, question, list(req.attach_files),
+            copilot.ask_with_progress, question, list(req.attach_files),
             lambda line: loop.call_soon_threadsafe(progress.put_nowait, line)))
         # 完了も同じキューに番兵として流す。done() をポーリングする形だと
         # 「進捗を put した直後に完了」の順序を毎回考える羽目になる。
@@ -1179,28 +1179,24 @@ class ApproveEditReq(BaseModel):
 def api_approve_edit(req: ApproveEditReq):
     """「修正して承認」: 承認差分ビューで編集した内容をそのまま適用する。
 
-    適用はこのエンドポイントが直接行い、元ツール呼び出しは override 付きで却下する —
+    適用はAWPのChangeSet APIへ委譲し、元ツール呼び出しは override 付きで却下する —
     pixie_core は override をユーザーメッセージとして会話に積み、エージェントは
     「その書き込みは完了済み」と理解して後続のステップへ進む（二重書き込みしない）。
     """
     sess = _require_manager().get(_valid_sid(req.session_id))
     if sess is None:
         raise HTTPException(404, "session not found")
-    # サンドボックス: セッションの workspace 配下のみ書き込み可（プレビューは絶対パスで来る）
-    ws = Path(getattr(sess, "workspace", None) or config.WORKSPACE).resolve()
-    p = Path(req.path)
-    p = p.resolve() if p.is_absolute() else (ws / p).resolve()
-    if p != ws and ws not in p.parents:
-        raise HTTPException(400, "path outside workspace")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(req.content, encoding="utf-8")
-    try:
-        rel = p.relative_to(ws).as_posix()
-    except ValueError:
-        rel = str(p)
+    applier = getattr(sess, "apply_approval_edit", None)
+    if applier is None:
+        raise HTTPException(400, "このセッションはChangeSet適用に対応していません。")
+    result = applier(req.path, req.content)
+    if not result.get("applied"):
+        detail = result.get("errors") or result.get("conflicts") or result.get("error")
+        raise HTTPException(409, f"変更を適用できませんでした: {detail}")
+    rel = result["changes"][0]["path"]
     override = (
         f"ユーザーがあなたの書き込み提案を差分ビューで修正し、そのまま適用しました"
-        f"（{rel} は更新済みです）。この書き込みは完了したものとして扱い、"
+        f"（{rel} はChangeSetで更新済みです）。この書き込みは完了したものとして扱い、"
         f"同じ書き込みを再度出さず、後続のステップを続けてください。"
     )
     ok = sess.resolve_approval(req.id, False, override)

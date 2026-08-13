@@ -3291,11 +3291,19 @@ function renderApproval(ev) {
     const n = (ev.changeset.changes || []).length;
     summary.textContent = `ChangeSet ${ev.changeset.id || ""}：${n}ファイルを一括確認`;
     box.appendChild(summary);
-    for (const err of [...(ev.changeset.errors || []), ...(ev.changeset.conflicts || [])]) {
+    const doc = ev.changeset.document_validation || {};
+    for (const err of [...(ev.changeset.errors || []), ...(ev.changeset.conflicts || []),
+                       ...(doc.errors || [])]) {
       const warning = document.createElement("div");
       warning.className = "call danger";
       warning.textContent = "⚠ " + (err.path ? `${err.path}: ` : "")
         + (err.error || "base hash が現在内容と一致しません");
+      box.appendChild(warning);
+    }
+    for (const item of doc.warnings || []) {
+      const warning = document.createElement("div");
+      warning.className = "call";
+      warning.textContent = "ℹ " + (item.path ? `${item.path}: ` : "") + item.warning;
       box.appendChild(warning);
     }
   }

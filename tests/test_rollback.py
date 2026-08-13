@@ -19,6 +19,7 @@ def make_sess():
     """AgentSession を __init__ なしで組み立てる（スナップショット周りのみに注目）。"""
     sess = engine_adapter.AgentSession.__new__(engine_adapter.AgentSession)
     sess._snapshots = {}
+    sess._changesets_by_turn = {}
     return sess
 
 
@@ -55,6 +56,24 @@ def test_rollback_skips_unchanged(workspace):
 def test_rollback_unknown_turn(workspace):
     sess = make_sess()
     assert sess.rollback(99) is None
+
+
+def test_changeset_rollback_removes_created_files_without_snapshot(workspace):
+    created = workspace / "created.py"
+    created.write_text("new", encoding="utf-8")
+    sess = make_sess()
+
+    class Engine:
+        def revert_changeset(self, change_id):
+            assert change_id == "chg_1"
+            created.unlink()
+            return {"reverted": True, "restored": ["created.py"]}
+
+    sess._engine = Engine()
+    sess._changesets_by_turn[4] = ["chg_1"]
+
+    assert sess.rollback(4) == ["created.py"]
+    assert not created.exists()
 
 
 def test_snapshot_retention(workspace):

@@ -241,6 +241,7 @@ def _tc_args(tc) -> dict:
 # ---- 承認時の ChangeSet 変換 --------------------------------------------------
 _CHANGESET_TOOLS = frozenset({
     "write_file", "search_and_replace", "replace_lines", "append_to_file", "delete_file",
+    "replace_markdown_section", "insert_after_markdown_heading", "update_markdown_frontmatter",
 })
 
 
@@ -269,8 +270,16 @@ def _changeset_from_tool_calls(tool_calls, change_id: str) -> dict | None:
                          "end_line": args.get("end_line"), "content": args.get("new_content")}
         elif name == "append_to_file":
             operation = {"kind": "append", "content": args.get("content")}
-        else:
+        elif name == "delete_file":
             operation = {"kind": "delete_file"}
+        elif name == "replace_markdown_section":
+            operation = {"kind": "replace_section", "heading": args.get("heading"),
+                         "content": args.get("content")}
+        elif name == "insert_after_markdown_heading":
+            operation = {"kind": "insert_after_heading", "heading": args.get("heading"),
+                         "content": args.get("content")}
+        else:
+            operation = {"kind": "update_frontmatter", "values": args.get("values")}
         change = by_path.get(path)
         if change is None:
             change = {"path": path, "operations": []}
@@ -327,15 +336,15 @@ def bootstrap(awp_src):
     import pixie_core  # AWP との唯一の接点
 
     ver = str(getattr(pixie_core, "API_VERSION", ""))
-    # 1.9+ が必須: Worksetに加え、複数編集のpreview/競合検出/journal適用を使うため。
+    # 1.10+ が必須: Workset/ChangeSetに加え、Markdown節操作と文書整合性検査を使うため。
     try:
         major, minor = (int(x) for x in ver.split(".")[:2])
     except ValueError:
         major, minor = 0, 0
     global HISTORY_API
     HISTORY_API = (major, minor) >= (1, 6)
-    if (major, minor) < (1, 9):
-        raise RuntimeError(f"pixie_core API 1.9 以上が必要です（現在: {ver or '?'}）。"
+    if (major, minor) < (1, 10):
+        raise RuntimeError(f"pixie_core API 1.10 以上が必要です（現在: {ver or '?'}）。"
                            "AnythingWithPixie を更新してください。")
     if pixie_core.tool_count() <= 0:  # 起動スモーク
         raise RuntimeError("pixie_core: ツールが1つも登録されていません")
@@ -608,6 +617,7 @@ class AgentSession(HistoryOps):
         # ⏪ ロールバック用: {turn_id: {相対パス: ターン開始前のバイト列}}。
         # ターン開始直前（main._turn_stream の worker）で take_turn_snapshot が記録する。
         self._snapshots: dict[int, dict[str, bytes]] = {}
+        self._changesets_by_turn: dict[int, list[str]] = {}
 
     # ---- ターン実行（worker スレッドで呼ばれる） ----
     def run_turn(self, message: str, emit_event, approval_timeout: float = 0.0) -> None:
@@ -693,7 +703,7 @@ class AgentSession(HistoryOps):
         change_preview = None
         if change_spec is not None:
             try:
-                change_preview = self._engine.preview_changeset(change_spec)
+                change_preview = self._engine.validate_changeset(change_spec)
                 if change_preview.get("changes"):
                     _pin_changeset_hashes(change_spec, change_preview)
             except Exception as exc:  # preview不能でもrun_command等と同じ引数承認へ倒す
@@ -733,6 +743,7 @@ class AgentSession(HistoryOps):
                 result = self._engine.apply_changeset(change_spec)
                 if result.get("applied"):
                     paths = [item["path"] for item in result.get("changes", [])]
+                    self._remember_changeset(result["id"])
                     self._emit_event({"type": "status", "text":
                                       f"✅ ChangeSet {result['id']} を一括適用しました（{len(paths)}ファイル）"})
                     return ([], "ChangeSetで承認済みの変更を一括適用しました: "
@@ -744,6 +755,26 @@ class AgentSession(HistoryOps):
                         "read_fileで最新版を確認し、変更案を作り直してください。")
             return (tool_calls, None)
         return ([], None)
+
+    def _remember_changeset(self, change_id: str) -> None:
+        turn = getattr(self, "_open_turn", None)
+        if turn and turn.get("id"):
+            self._changesets_by_turn.setdefault(turn["id"], []).append(change_id)
+
+    def apply_approval_edit(self, path: str, content: str) -> dict:
+        """差分右ペインの手修正版をbase hash固定済みChangeSetとして適用する。"""
+        spec = {"id": f"chg_{uuid.uuid4().hex}", "changes": [{
+            "path": path, "operations": [{"kind": "write_file", "content": content}],
+        }]}
+        preview = self._engine.validate_changeset(spec)
+        if preview.get("changes"):
+            _pin_changeset_hashes(spec, preview)
+        if not preview.get("ok"):
+            return {**preview, "applied": False}
+        result = self._engine.apply_changeset(spec)
+        if result.get("applied"):
+            self._remember_changeset(result["id"])
+        return result
 
     # ---- 承認の解決（async エンドポイントから呼ぶ。Lock は取らない: 自己デッドロック回避） ----
     def resolve_approval(self, approval_id: int, approve: bool, override: str | None = None) -> bool:
@@ -816,7 +847,19 @@ class AgentSession(HistoryOps):
         以降に**作られた**ファイルは消さない（ユーザーが手で消せるよう残す。
         戻したファイルの相対パス一覧を返す。スナップショットが無ければ None。
         """
-        snap = self._snapshots.get(int(turn_id))
+        turn_id = int(turn_id)
+        change_ids = self._changesets_by_turn.get(turn_id, [])
+        if change_ids:
+            restored: list[str] = []
+            for change_id in reversed(change_ids):
+                result = self._engine.revert_changeset(change_id)
+                if not result.get("reverted"):
+                    return None
+                restored.extend(result.get("restored", []))
+            self._changesets_by_turn.pop(turn_id, None)
+            return list(dict.fromkeys(restored))
+
+        snap = self._snapshots.get(turn_id)
         if snap is None:
             return None
         restored: list[str] = []

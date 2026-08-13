@@ -223,8 +223,8 @@ def run(sess, *, compose_text: str, user_ask: str, attach_files: list[str],
         status(f"🕊️ Copilot に送信しました。回答を待っています（数十秒{files_note}）…")
         # PrayLight の進捗（アップロード中／完了など）をそのまま status に流す。
         # 添付付きは数分かかることがあり、無通知だと固まったように見えるため。
-        answer = copilot.ask(question, attach_files,
-                             on_progress=lambda line: status(f"🕊️ {line}"))
+        answer = copilot.ask_with_progress(
+            question, attach_files, on_progress=lambda line: status(f"🕊️ {line}"))
         if cancelled():
             status("⏹ 中断しました（Copilot の回答は破棄されました）。")
             return

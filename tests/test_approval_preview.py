@@ -42,12 +42,23 @@ def test_mixed_command_batch_is_not_reordered_into_changeset():
     ], "chg_test") is None
 
 
+def test_markdown_semantic_tools_map_to_document_operations():
+    result = engine_adapter._changeset_from_tool_calls([
+        _call("replace_markdown_section", {"path": "a.md", "heading": "Intro", "content": "new"}),
+        _call("update_markdown_frontmatter", {"path": "a.md", "values": {"title": "A"}}),
+    ], "chg_docs")
+    assert [op["kind"] for op in result["changes"][0]["operations"]] == [
+        "replace_section", "update_frontmatter",
+    ]
+
+
 # --- _approve が承認イベントに preview を載せる ---
 
 class _ApprovalHarness:
     """AgentSession._approve を単体で呼ぶ骨組み。承認待ちは極短タイムアウトで
     抜ける（タイムアウト→却下の経路）が、approval イベントはその前に発行済み。"""
     _approve = engine_adapter.AgentSession._approve
+    _remember_changeset = engine_adapter.AgentSession._remember_changeset
 
     def __init__(self, required, approve=False):
         self._cancel = False
@@ -60,6 +71,8 @@ class _ApprovalHarness:
         self.events = []
         self._emit_event = self.events.append
         self._engine = _FakeChangeEngine()
+        self._changesets_by_turn = {}
+        self._open_turn = {"id": 1}
         if approve:
             self._approval_event.set()
 
@@ -68,7 +81,7 @@ class _FakeChangeEngine:
     def __init__(self):
         self.applied = []
 
-    def preview_changeset(self, spec):
+    def validate_changeset(self, spec):
         changes = [{"path": item["path"], "before": "before\n", "after": "after\n",
                     "base_hash": f"hash-{i}", "conflict": False}
                    for i, item in enumerate(spec["changes"])]
@@ -136,6 +149,16 @@ class _FakeEditSession:
         self.resolved = (approval_id, approve, override)
         return True
 
+    def apply_approval_edit(self, path, content):
+        root = Path(self.workspace).resolve()
+        target = Path(path)
+        target = target.resolve() if target.is_absolute() else (root / target).resolve()
+        if target != root and root not in target.parents:
+            return {"applied": False, "error": "outside workspace"}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return {"applied": True, "changes": [{"path": target.relative_to(root).as_posix()}]}
+
 
 def _patch_manager(monkeypatch, sess):
     class Mgr:
@@ -154,7 +177,7 @@ def test_approve_edit_writes_file_and_overrides(tmp_path, monkeypatch):
     assert target.read_text(encoding="utf-8") == "print(1)\n"  # 親フォルダごと作成
     aid, approve, override = sess.resolved
     assert aid == 7 and approve is False
-    assert "更新済み" in override and "sub/a.py" in override  # 完了案内が相対パスで入る
+    assert "ChangeSetで更新済み" in override and "sub/a.py" in override
 
 
 def test_approve_edit_rejects_outside_workspace(tmp_path, monkeypatch):
@@ -163,7 +186,7 @@ def test_approve_edit_rejects_outside_workspace(tmp_path, monkeypatch):
     outside = tmp_path.parent / "evil.py"
     r = client.post("/api/approve-edit", json={
         "id": 1, "session_id": "s1", "path": str(outside.resolve()), "content": "x"})
-    assert r.status_code == 400
+    assert r.status_code == 409
     assert not outside.exists()
     assert sess.resolved is None  # 書き込みも承認解決も起きていない
 

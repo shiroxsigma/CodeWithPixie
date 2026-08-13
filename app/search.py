@@ -55,7 +55,8 @@ def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]
     cmd = [settings.rg_path, "--json", "-s" if case_sensitive else "-i",
            "--max-count", "5", *globs, query, str(config.WORKSPACE)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=15)
     except (subprocess.TimeoutExpired, OSError):
         return _search_python(query, max_results, case_sensitive)
 
@@ -73,7 +74,7 @@ def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]
         results.append({
             "path": rel,
             "line": data["line_number"],
-            "text": data["lines"]["text"].rstrip("\n")[:MAX_LINE_CHARS],
+            "text": data["lines"]["text"].rstrip("\r\n")[:MAX_LINE_CHARS],
         })
         if len(results) >= max_results:
             break

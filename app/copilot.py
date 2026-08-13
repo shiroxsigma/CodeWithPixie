@@ -9,6 +9,7 @@ NWP の実装を CWP 用に移植（AWP のツールは同期関数なので sub
 """
 from __future__ import annotations
 
+import inspect
 import subprocess
 import tempfile
 import threading
@@ -17,6 +18,23 @@ from pathlib import Path
 from . import config
 # ask() の引数名 `files`（添付リスト）と衝突するので別名で持つ。
 from . import files as fsutil
+
+
+def ask_with_progress(question: str, files: list | None = None, on_progress=None) -> str:
+    """進捗対応前の ``ask`` 代替実装とも互換性を保って呼び出す。"""
+    ask_fn = ask
+    try:
+        parameters = inspect.signature(ask_fn).parameters.values()
+        supports_progress = any(
+            parameter.name == "on_progress"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        supports_progress = False
+    if supports_progress:
+        return ask_fn(question, files, on_progress=on_progress)
+    return ask_fn(question, files)
 
 
 def _praylight_paths(script_name: str = "copilot_ask.py") -> tuple[Path, Path]:
