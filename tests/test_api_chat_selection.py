@@ -136,3 +136,16 @@ def test_context_files_do_not_consume_prompt_budget(sess, monkeypatch):
     sent = sess.messages[0]
     assert "`a.py`" in sent and "`b.py`" in sent
     assert big not in sent
+
+
+def test_workset_is_emitted_to_gui_before_agent_runs():
+    class Session:
+        def run_turn(self, message, emit, timeout):
+            emit({"type": "token", "text": "answer"})
+
+    events = []
+    workset = {"items": [{"path": "a.py", "role": "target"}], "omitted": [], "stats": {}}
+    main._run_code_with_workset(Session(), "task", workset, events.append)
+
+    assert [event["type"] for event in events] == ["workset", "token"]
+    assert events[0]["workset"] is workset

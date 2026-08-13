@@ -3212,6 +3212,9 @@ function handleEvent(ev) {
     case "approval":
       renderApproval(ev);
       break;
+    case "workset":
+      renderWorkset(ev.workset);
+      break;
     case "files_changed":
       onFilesChanged(ev.paths);
       break;
@@ -3221,6 +3224,28 @@ function handleEvent(ev) {
     case "done":
       break;
   }
+}
+
+function renderWorkset(workset) {
+  if (!workset || !state.assistantEl) return;
+  const items = workset.items || [];
+  const omitted = workset.omitted || [];
+  const role = { target: "対象", pinned: "ピン", caller: "呼出元", dependency: "依存",
+    test: "テスト", spec: "文書", symbol: "シンボル", related: "関連" };
+  addToolStatus(state.assistantEl,
+    `📚 Workset: ${items.length}件（自動追加 ${workset.stats?.auto_added || 0}件）`);
+  items.slice(0, 16).forEach((item) => {
+    const details = [];
+    if (item.symbols?.length) details.push(`symbol ${item.symbols.length}`);
+    if (item.sections?.length) details.push(`節 ${item.sections.length}`);
+    if (item.requirements?.length) details.push(`要件 ${item.requirements.length}`);
+    if (item.mermaid?.length) details.push(`Mermaid ${item.mermaid.length}`);
+    addToolStatus(state.assistantEl,
+      `  ${role[item.role] || item.role}: ${item.path}` + (details.length ? `（${details.join(" / ")}）` : ""));
+  });
+  if (items.length > 16) addToolStatus(state.assistantEl, `  …ほか ${items.length - 16}件`);
+  omitted.slice(0, 8).forEach((item) =>
+    addToolStatus(state.assistantEl, `  ⏭ 省略: ${item.path}（${item.reason}）`));
 }
 
 function finishStream() {

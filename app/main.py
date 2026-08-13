@@ -765,6 +765,15 @@ def _code_plan_prompt(message: str) -> str:
     )
 
 
+def _run_code_with_workset(sess, message: str, workset: dict | None, emit, *, plan_first=False):
+    """WorksetをGUIへ先に通知してから、同じ内容でCode/Planターンを実行する。"""
+    if workset:
+        emit({"type": "workset", "workset": workset})
+    if plan_first:
+        return _code_plan_phase(sess, message, emit)
+    return sess.run_turn(message, emit, settings.approval_timeout)
+
+
 def _code_plan_phase(sess, message: str, emit) -> None:
     """計画フェーズの1ターン: 読み取り専用ツールに制限して run_turn し、必ず元に戻す。
 
@@ -1142,9 +1151,11 @@ async def api_chat(req: ChatReq):
     ) if builder is not None else None
     message = _code_user_text(req, req.message, workset)
     if req.plan_first:
-        return _turn_stream(sess, lambda emit: _code_plan_phase(sess, message, emit),
+        return _turn_stream(sess, lambda emit: _run_code_with_workset(
+            sess, message, workset, emit, plan_first=True),
                             label=req.message)
-    return _turn_stream(sess, lambda emit: sess.run_turn(message, emit, settings.approval_timeout),
+    return _turn_stream(sess, lambda emit: _run_code_with_workset(
+        sess, message, workset, emit),
                         label=req.message)
 
 
