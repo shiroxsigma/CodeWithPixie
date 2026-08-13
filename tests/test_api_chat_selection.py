@@ -23,13 +23,22 @@ class _FakeSession(engine_adapter.HistoryOps):
         self.busy = threading.Lock()
         self.messages = []
         self.snapshots = []
+        self.worksets = []
         self._init_turns()  # _turn_stream が往復を記録する（Engine 無しなので実質 no-op）
 
     def set_copilot(self, enabled):
         pass
 
-    def set_workspace_snapshot(self, current_file, current_content):
-        self.snapshots.append((current_file, current_content))
+    def set_workspace_snapshot(self, current_file, current_content, context_files=()):
+        self.snapshots.append((current_file, current_content,
+                               [(f.path, f.content) for f in context_files]))
+
+    def build_workset(self, task, current_file, pinned_paths):
+        self.worksets.append((task, current_file, pinned_paths))
+        paths = ([current_file] if current_file else []) + [p for p in pinned_paths if p != current_file]
+        return {"items": [{"path": p, "role": "target" if p == current_file else "pinned",
+                            "lines": 1, "chars": 7, "buffer": True} for p in paths],
+                "omitted": []}
 
     def run_turn(self, message, emit, timeout=0.0):
         self.messages.append(message)
@@ -75,7 +84,7 @@ def test_selection_is_passed_to_agent(sess):
 
 def test_unsaved_current_buffer_is_passed_as_workspace_snapshot(sess):
     _post(current_file="src/a.py", current_content="UNSAVED = True\n")
-    assert sess.snapshots == [("src/a.py", "UNSAVED = True\n")]
+    assert sess.snapshots == [("src/a.py", "UNSAVED = True\n", [])]
     # 本文をプロンプトへ重複投入せず、read_file の仮想バッファから必要時に読む。
     assert "UNSAVED = True" not in sess.messages[0]
 
@@ -97,15 +106,16 @@ def test_whitespace_only_selection_ignored(sess):
     assert sess.messages[0] == "この関数を直して"
 
 
-# --- チェック済み参考ファイル（context_files）の埋め込み ---
+# --- チェック済み参考ファイル（context_files）の Workset 化 ---
 
-def test_checked_context_files_are_embedded(sess):
+def test_checked_context_files_are_referenced_without_embedding(sess):
     _post(context_files=[{"path": "ref/one.py", "content": "AAA = 1"},
                          {"path": "ref/two.py", "content": "BBB = 2"}])
     sent = sess.messages[0]
-    assert "参考ファイル（チェック済み）" in sent
-    assert "## ref/one.py" in sent and "AAA = 1" in sent
-    assert "## ref/two.py" in sent and "BBB = 2" in sent
+    assert "Workset（選択・ピン留め済み）" in sent
+    assert "`ref/one.py`" in sent and "AAA = 1" not in sent
+    assert "`ref/two.py`" in sent and "BBB = 2" not in sent
+    assert sess.snapshots[0][2] == [("ref/one.py", "AAA = 1"), ("ref/two.py", "BBB = 2")]
     assert sent.endswith("この関数を直して")  # 本題は末尾のまま
 
 
@@ -115,15 +125,14 @@ def test_current_file_not_duplicated_in_context_files(sess):
           context_files=[{"path": "src/a.py", "content": "OLD ON DISK"}])
     sent = sess.messages[0]
     assert "OLD ON DISK" not in sent
-    assert sent.count("src/a.py") == 1
+    assert sent.count("src/a.py") == 2  # 現在ファイル説明 + Workset の target
 
 
-def test_context_files_budget_omits_excess(sess, monkeypatch):
+def test_context_files_do_not_consume_prompt_budget(sess, monkeypatch):
     big = "y" * 1000
     monkeypatch.setattr(main.settings, "context_char_budget", 1500)
     _post(context_files=[{"path": "a.py", "content": big},
                          {"path": "b.py", "content": big}])
     sent = sess.messages[0]
-    assert "## a.py" in sent             # 1件目は予算内
-    assert "## b.py" not in sent         # 2件目は予算超過で本文省略
-    assert "b.py" in sent and "省略した" in sent  # 注記に出る
+    assert "`a.py`" in sent and "`b.py`" in sent
+    assert big not in sent

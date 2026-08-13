@@ -58,7 +58,7 @@ class _FakePlanSess:
     def set_copilot(self, enabled):
         pass
 
-    def set_workspace_snapshot(self, current_file, current_content):
+    def set_workspace_snapshot(self, current_file, current_content, context_files=()):
         self.snapshots.append((current_file, current_content))
 
     def set_plan_phase(self, on):

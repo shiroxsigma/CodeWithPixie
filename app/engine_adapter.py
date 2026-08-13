@@ -364,16 +364,16 @@ def bootstrap(awp_src):
     import pixie_core  # AWP との唯一の接点
 
     ver = str(getattr(pixie_core, "API_VERSION", ""))
-    # 1.7+ が必須: Note モードの固定ツールプロファイルと履歴 API に加え、Code モードで
-    # 未保存エディタバッファを read_file へ重ねる set_workspace_snapshot を使うため。
+    # 1.8+ が必須: 未保存バッファを read_file へ重ねる API に加え、Code モードで
+    # ピン留め対象を全文なしの Workset にする build_workset を使うため。
     try:
         major, minor = (int(x) for x in ver.split(".")[:2])
     except ValueError:
         major, minor = 0, 0
     global HISTORY_API
     HISTORY_API = (major, minor) >= (1, 6)
-    if (major, minor) < (1, 7):
-        raise RuntimeError(f"pixie_core API 1.7 以上が必要です（現在: {ver or '?'}）。"
+    if (major, minor) < (1, 8):
+        raise RuntimeError(f"pixie_core API 1.8 以上が必要です（現在: {ver or '?'}）。"
                            "AnythingWithPixie を更新してください。")
     if pixie_core.tool_count() <= 0:  # 起動スモーク
         raise RuntimeError("pixie_core: ツールが1つも登録されていません")
@@ -668,21 +668,38 @@ class AgentSession(HistoryOps):
             if changed:
                 emit_event({"type": "files_changed", "paths": changed})
 
-    def set_workspace_snapshot(self, current_file: str, current_content: str) -> None:
-        """Code エディタの現在バッファを pixie_core の read_file へ重ねる。
+    def set_workspace_snapshot(self, current_file: str, current_content: str,
+                               context_files=()) -> None:
+        """Code エディタの現在・ピン留めバッファを pixie_core の read_file へ重ねる。
 
         毎ターン空スナップショットも渡して、前ターンで開いていたファイルの内容が
         セッションに残留しないようにする。パス検証は公開 API 側が workspace 基準で行う。
         """
         buffers = []
         self._workspace_buffer_overrides = {}
+        for item in context_files or ():
+            path = item.get("path") if isinstance(item, dict) else getattr(item, "path", "")
+            content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+            if path:
+                buffers.append({"path": path, "content": content or ""})
         if current_file:
+            # 同じパスが pinned にもあれば、現在エディタの未保存内容を最後に置いて優先する。
+            buffers = [b for b in buffers if b["path"] != current_file]
             buffers.append({"path": current_file, "content": current_content or ""})
-            p = Path(current_file)
+        for item in buffers:
+            p = Path(item["path"])
             root = Path(self.workspace or config.WORKSPACE)
             resolved = p.resolve() if p.is_absolute() else (root / p).resolve()
-            self._workspace_buffer_overrides[str(resolved)] = current_content or ""
+            self._workspace_buffer_overrides[str(resolved)] = item["content"]
         self._engine.set_workspace_snapshot({"buffers": buffers})
+
+    def build_workset(self, task: str, current_file: str, pinned_paths: list[str]) -> dict:
+        """公開 API へ Workset 構築を委譲する。本文は結果へ含まれない。"""
+        return self._engine.build_workset({
+            "task": task,
+            "selected_path": current_file or None,
+            "pinned_paths": pinned_paths,
+        })
 
     # ---- output_fn: engine → SSE イベント分類 ----
     def _emit(self, text, end="", flush=False):

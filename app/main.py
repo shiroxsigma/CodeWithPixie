@@ -691,7 +691,7 @@ def _sse(ev: dict) -> str:
 SELECTION_MAX_CHARS = 8000
 
 
-def _code_user_text(req: ChatReq, message: str) -> str:
+def _code_user_text(req: ChatReq, message: str, workset: dict | None = None) -> str:
     """Code モードのユーザーテキスト（エディタ側の文脈を前置きする）。
 
     Note/Plan モードの note_prompts.build_user_text に相当する Code モード版。
@@ -707,27 +707,28 @@ def _code_user_text(req: ChatReq, message: str) -> str:
             f"read_file はエディタの未保存バッファをディスクより優先します。）\n\n"
             f"{message}"
         )
-    # ツリーでチェックされた参考ファイル（Note モードの build_user_text と同じ書式・上限）。
-    if req.context_files:
-        budget = settings.context_char_budget
-        included: list[str] = []
-        omitted: list[str] = []
-        for f in req.context_files:
-            if f.path == req.current_file:
-                continue  # 開いているファイルは上で前置済み（未保存編集込みの方が新しい）
-            content = f.content or ""
-            if len(content) > note_prompts.MAX_CONTEXT_CHARS_PER_FILE:
-                content = content[:note_prompts.MAX_CONTEXT_CHARS_PER_FILE] + "\n…（長いため以降を省略）"
-            if len(content) > budget:
-                omitted.append(f.path)
-                continue
-            budget -= len(content)
-            included.append(f"## {f.path}\n```\n{content}\n```")
-        if included:
-            message = "# 参考ファイル（チェック済み）\n\n" + "\n\n".join(included) + "\n\n" + message
-        if omitted:
-            message = ("# 注記\nコンテキスト上限のため次のチェック済み参考ファイルは本文を省略した: "
-                       + ", ".join(omitted) + "\n\n") + message
+    # ピン留めは全文を貼らず Workset の参照だけを載せる。内容は snapshot にあるため、
+    # エージェントは必要なファイル・範囲だけ read_file できる。長文を毎ターン prefill しない。
+    if workset and workset.get("items"):
+        rows = []
+        for item in workset["items"]:
+            source = "未保存バッファ" if item.get("buffer") else "ディスク"
+            rows.append(
+                f"- `{item['path']}` ({item.get('role', 'pinned')}, "
+                f"{item.get('lines', 0)}行/{item.get('chars', 0)}文字, {source})"
+            )
+        message = (
+            "# Workset（選択・ピン留め済み）\n"
+            + "\n".join(rows)
+            + "\n必要な本文だけ read_file で取得してください。全ファイルを先に読む必要はありません。\n\n"
+            + message
+        )
+    if workset and workset.get("omitted"):
+        omitted = ", ".join(
+            f"{item.get('path', '?')} ({item.get('reason', 'unknown')})"
+            for item in workset["omitted"]
+        )
+        message = f"# Workset 省略\n{omitted}\n\n" + message
     # 選択範囲も渡す（Note モードと同じ機能を Code モードでも: 「この関数を直して」の「この」）。
     # 本文（未保存の編集を含むエディタ上の実体）を埋め込むのは、エージェントが read_file で
     # 読むとディスク上の古い内容になるため。長い選択は前置きが本題を押し流すので切り詰める。
@@ -1132,8 +1133,14 @@ async def api_chat(req: ChatReq):
     # pixie_core の仮想バッファへ渡す。本文をプロンプトへ複製せず read_file から必要時に読む。
     setter = getattr(sess, "set_workspace_snapshot", None)
     if setter is not None:
-        setter(req.current_file or "", req.current_content)
-    message = _code_user_text(req, req.message)
+        setter(req.current_file or "", req.current_content, req.context_files)
+    builder = getattr(sess, "build_workset", None)
+    workset = builder(
+        req.message,
+        req.current_file or "",
+        [f.path for f in req.context_files],
+    ) if builder is not None else None
+    message = _code_user_text(req, req.message, workset)
     if req.plan_first:
         return _turn_stream(sess, lambda emit: _code_plan_phase(sess, message, emit),
                             label=req.message)
