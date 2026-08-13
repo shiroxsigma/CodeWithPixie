@@ -3260,6 +3260,21 @@ function renderApproval(ev) {
   h.textContent = "⚠ エージェントが以下のツール実行を要求しています（承認が必要）";
   box.appendChild(h);
 
+  if (ev.changeset) {
+    const summary = document.createElement("div");
+    summary.className = "call";
+    const n = (ev.changeset.changes || []).length;
+    summary.textContent = `ChangeSet ${ev.changeset.id || ""}：${n}ファイルを一括確認`;
+    box.appendChild(summary);
+    for (const err of [...(ev.changeset.errors || []), ...(ev.changeset.conflicts || [])]) {
+      const warning = document.createElement("div");
+      warning.className = "call danger";
+      warning.textContent = "⚠ " + (err.path ? `${err.path}: ` : "")
+        + (err.error || "base hash が現在内容と一致しません");
+      box.appendChild(warning);
+    }
+  }
+
   for (const c of ev.calls) {
     const div = document.createElement("div");
     div.className = "call";
@@ -3279,7 +3294,9 @@ function renderApproval(ev) {
 
   // 書き込み系ツールにはサーバが実行前/実行後の内容を付けてくる → 左ペインに差分表示。
   // （無いもの（run_command 等・巨大ファイル等）はこのバーの引数表示だけで判断する）
-  const previews = ev.calls.filter((c) => c.preview).map((c) => c.preview);
+  const previews = ev.changeset?.changes?.length
+    ? ev.changeset.changes
+    : ev.calls.filter((c) => c.preview).map((c) => c.preview);
   // 単一のファイル書き込み承認なら、右ペインを編集して「✓ 修正して承認」できる
   const editInfo = (ev.calls.length === 1 && previews.length === 1)
     ? { id: ev.id, path: previews[0].path } : null;
@@ -3292,6 +3309,8 @@ function renderApproval(ev) {
   const approve = document.createElement("button");
   approve.className = "btn-approve";
   approve.textContent = "✓ 承認して実行";
+  approve.disabled = !!ev.changeset && !ev.changeset.ok;
+  if (approve.disabled) approve.title = "競合または検証エラーがあるため承認できません";
   approve.onclick = () => resolveApproval(ev.id, true, null);
   const reject = document.createElement("button");
   reject.className = "btn-reject";

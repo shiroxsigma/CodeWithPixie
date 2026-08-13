@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 
 from pathlib import Path
 
@@ -237,98 +238,60 @@ def _tc_args(tc) -> dict:
     return a or {}
 
 
-# ---- 承認時の差分プレビュー計算 ------------------------------------------------
-#: 差分プレビューの上限。超えるものはスキップ（SSE の肥大化・メモリ防止）。
-_PREVIEW_MAX_BYTES = 1_000_000   # 読み込む既存ファイルのサイズ上限
-_PREVIEW_MAX_CHARS = 300_000     # before/after 文字列の長さ上限
+# ---- 承認時の ChangeSet 変換 --------------------------------------------------
+_CHANGESET_TOOLS = frozenset({
+    "write_file", "search_and_replace", "replace_lines", "append_to_file", "delete_file",
+})
 
 
-def _preview_path(path: str) -> Path:
-    p = Path(path)
-    return p.resolve() if p.is_absolute() else (config.WORKSPACE / p).resolve()
+def _changeset_from_tool_calls(tool_calls, change_id: str) -> dict | None:
+    """同一バッチのファイル編集を、pathごとに順序を保った1 ChangeSetへ変換する。
 
-
-def _read_preview_base(path: str, buffer_overrides: dict[str, str] | None = None) -> str | None:
-    """プレビュー用に書き換え対象の現在内容を読む。
-    未存在 → ""（新規ファイル）、読めない（バイナリ・巨大・権限等）→ None（preview 見送り）。
-    ここに来る path はエンジンがディスパッチ境界で絶対化したもの（相対で来ても
-    config.WORKSPACE 基準で解決を試みる＝ベストエフォート）。"""
-    p = _preview_path(path)
-    try:
-        if buffer_overrides and str(p) in buffer_overrides:
-            text = buffer_overrides[str(p)]
-            return text if len(text) <= _PREVIEW_MAX_CHARS else None
-        if not p.exists():
-            return ""
-        if not p.is_file() or p.stat().st_size > _PREVIEW_MAX_BYTES:
+    1件でも非対応ツールが混じる場合は None。run_command とファイル編集を勝手に分離すると
+    実行順が変わるため、そのバッチは従来の個別実行へフォールバックする。
+    """
+    changes: list[dict] = []
+    by_path: dict[str, dict] = {}
+    for tc in tool_calls:
+        name, args = _tc_name(tc), _tc_args(tc)
+        if name not in _CHANGESET_TOOLS or not isinstance(args, dict):
             return None
-        text = p.read_text(encoding="utf-8")  # strict: バイナリは UnicodeDecodeError → None
-        if len(text) > _PREVIEW_MAX_CHARS:
+        path = args.get("path")
+        if not isinstance(path, str) or not path.strip():
             return None
-        return text
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def _tool_preview(name: str, args: dict,
-                  buffer_overrides: dict[str, str] | None = None) -> dict | None:
-    """承認対象の書き込み系ツールについて、実行前後のファイル内容を計算する
-    （{"path", "before", "after"} — 承認ビューが左ペインの差分エディタで表示する）。
-
-    計算は AWP のツール実装と一致させる: search_and_replace は app/patch.py（AWP の
-    _fuzzy_apply 移植・3層ファジー）、replace_lines は _compute_replace_lines_content
-    （1オリジン・両端含む・範囲クランプ）の再現。計算できないものは None を返し、
-    承認バーは従来どおり引数全文表示にフォールバックする。"""
-    if not isinstance(args, dict):
-        return None
-    try:
         if name == "write_file":
-            path = str(args.get("path") or "")
-            after = args.get("content")
-            if not path or not isinstance(after, str):
-                return None
-            before = _read_preview_base(path, buffer_overrides)
-            if before is None or len(after) > _PREVIEW_MAX_CHARS:
-                return None
-            return {"path": path, "before": before, "after": after}
+            operation = {"kind": "write_file", "content": args.get("content")}
+        elif name == "search_and_replace":
+            operation = {"kind": "search_replace", "search": args.get("search_block"),
+                         "replace": args.get("replace_block")}
+        elif name == "replace_lines":
+            operation = {"kind": "replace_lines", "start_line": args.get("start_line"),
+                         "end_line": args.get("end_line"), "content": args.get("new_content")}
+        elif name == "append_to_file":
+            operation = {"kind": "append", "content": args.get("content")}
+        else:
+            operation = {"kind": "delete_file"}
+        change = by_path.get(path)
+        if change is None:
+            change = {"path": path, "operations": []}
+            by_path[path] = change
+            changes.append(change)
+        change["operations"].append(operation)
+    return {"id": change_id, "changes": changes} if changes else None
 
-        if name == "search_and_replace":
-            path = str(args.get("path") or "")
-            search = args.get("search_block")
-            replace = args.get("replace_block")
-            if not path or not isinstance(search, str) or not isinstance(replace, str):
-                return None
-            before = _read_preview_base(path, buffer_overrides)
-            if before is None:
-                return None
-            res = patch.apply_edits(before, [{"search": search, "replace": replace}])
-            if not res["applied"]:
-                return None  # マッチしない＝ツール側も失敗するので、紛らわしい差分は出さない
-            return {"path": path, "before": before, "after": res["content"]}
 
-        if name == "replace_lines":
-            path = str(args.get("path") or "")
-            new_content = args.get("new_content")
-            if not path or not isinstance(new_content, str):
-                return None
-            before = _read_preview_base(path, buffer_overrides)
-            if before is None:
-                return None
-            start = int(args.get("start_line"))
-            end = int(args.get("end_line"))
-            lines = before.splitlines(keepends=True)
-            # AWP _compute_replace_lines_content と同じガード（範囲外ならツールも失敗）
-            if start < 1 or start > len(lines) or end < start:
-                return None
-            prefix = lines[: start - 1]
-            suffix = lines[min(end, len(lines)):]
-            new_lines = new_content.splitlines(keepends=True)
-            if new_content and new_lines and not new_content.endswith(("\n", "\r\n")):
-                new_lines[-1] = new_lines[-1] + "\n"
-            return {"path": path, "before": before, "after": "".join(prefix + new_lines + suffix)}
-    except (ValueError, TypeError, OSError):
-        return None
-    return None
+def _pin_changeset_hashes(changeset: dict, preview: dict) -> dict:
+    """承認表示時のbase hashを適用用ChangeSetへ固定し、クリックまでの外部変更を検出する。"""
+    hashes = {item["path"]: item["base_hash"] for item in preview.get("changes", [])}
+    # previewはworkspace相対pathを返す。入力が絶対pathでも順序は同じなのでzipをfallbackに使う。
+    preview_items = preview.get("changes", [])
+    for index, change in enumerate(changeset.get("changes", [])):
+        value = hashes.get(change["path"])
+        if value is None and index < len(preview_items):
+            value = preview_items[index].get("base_hash")
+        if value:
+            change["base_hash"] = value
+    return changeset
 
 
 # --- プロセス1回だけの AWP ブートストラップ（全セッション共有） ---
@@ -364,16 +327,15 @@ def bootstrap(awp_src):
     import pixie_core  # AWP との唯一の接点
 
     ver = str(getattr(pixie_core, "API_VERSION", ""))
-    # 1.8+ が必須: 未保存バッファを read_file へ重ねる API に加え、Code モードで
-    # ピン留め対象を全文なしの Workset にする build_workset を使うため。
+    # 1.9+ が必須: Worksetに加え、複数編集のpreview/競合検出/journal適用を使うため。
     try:
         major, minor = (int(x) for x in ver.split(".")[:2])
     except ValueError:
         major, minor = 0, 0
     global HISTORY_API
     HISTORY_API = (major, minor) >= (1, 6)
-    if (major, minor) < (1, 8):
-        raise RuntimeError(f"pixie_core API 1.8 以上が必要です（現在: {ver or '?'}）。"
+    if (major, minor) < (1, 9):
+        raise RuntimeError(f"pixie_core API 1.9 以上が必要です（現在: {ver or '?'}）。"
                            "AnythingWithPixie を更新してください。")
     if pixie_core.tool_count() <= 0:  # 起動スモーク
         raise RuntimeError("pixie_core: ツールが1つも登録されていません")
@@ -727,24 +689,29 @@ class AgentSession(HistoryOps):
         self._approval_id += 1
         aid = self._approval_id
         self._pending_id = aid
+        change_spec = _changeset_from_tool_calls(tool_calls, f"chg_{uuid.uuid4().hex}")
+        change_preview = None
+        if change_spec is not None:
+            try:
+                change_preview = self._engine.preview_changeset(change_spec)
+                if change_preview.get("changes"):
+                    _pin_changeset_hashes(change_spec, change_preview)
+            except Exception as exc:  # preview不能でもrun_command等と同じ引数承認へ倒す
+                change_preview = {"ok": False, "changes": [],
+                                  "errors": [{"error": f"{type(exc).__name__}: {exc}"}]}
         calls_view = []
         for tc in tool_calls:
             name = _tc_name(tc)
             args = _tc_args(tc)
             entry = {"name": name, "args": args, "needs_approval": name in self._approval_required}
-            # 書き込み系は「実行するとどう変わるか」の差分を添える（承認ビューが左ペインに
-            # 表示する）。計算できないもの（対象外ツール・巨大ファイル等）は従来どおり引数表示だけ。
-            if entry["needs_approval"]:
-                preview = _tool_preview(
-                    name, args, getattr(self, "_workspace_buffer_overrides", None)
-                )
-                if preview:
-                    entry["preview"] = preview
             calls_view.append(entry)
         self._approval_decision = None
         self._approval_event.clear()
-        self._emit_event({"type": "approval", "id": aid, "calls": calls_view,
-                          "note": (content or "").strip()[:2000]})
+        event = {"type": "approval", "id": aid, "calls": calls_view,
+                 "note": (content or "").strip()[:2000]}
+        if change_preview is not None:
+            event["changeset"] = change_preview
+        self._emit_event(event)
 
         got = self._approval_event.wait(self._approval_timeout)
         self._pending_id = 0
@@ -760,6 +727,21 @@ class AgentSession(HistoryOps):
         if dec.get("override"):
             return ([], dec["override"])
         if dec.get("approve"):
+            # ファイル編集だけのバッチはAWP ChangeSetで一括適用する。これにより承認から
+            # 実適用までのbase hash競合を再検査し、全ファイルをjournalから巻き戻せる。
+            if change_spec is not None and change_preview and change_preview.get("ok"):
+                result = self._engine.apply_changeset(change_spec)
+                if result.get("applied"):
+                    paths = [item["path"] for item in result.get("changes", [])]
+                    self._emit_event({"type": "status", "text":
+                                      f"✅ ChangeSet {result['id']} を一括適用しました（{len(paths)}ファイル）"})
+                    return ([], "ChangeSetで承認済みの変更を一括適用しました: "
+                            + ", ".join(paths)
+                            + "。同じ編集を繰り返さず、必要な検証へ進んでください。")
+                details = result.get("conflicts") or result.get("errors") or result.get("error")
+                self._emit_event({"type": "status", "text": f"⚠️ ChangeSetを適用できませんでした: {details}"})
+                return ([], "承認待ちの間に対象ファイルが変化したか、変更案を安全に適用できませんでした。"
+                        "read_fileで最新版を確認し、変更案を作り直してください。")
             return (tool_calls, None)
         return ([], None)
 

@@ -1,9 +1,8 @@
-"""承認時の差分プレビュー（engine_adapter._tool_preview / _approve の preview 付与）と
+"""承認時のChangeSetプレビュー（AWP公開APIへの委譲）と
 「修正して承認」（/api/approve-edit）のテスト。
 
-_llM は呼ばない。_tool_preview は tmp_path の実ファイルに対して純粋計算し、
-_approve は承認待ちを極短タイムアウトで抜けるハーネスで「イベントに preview が
-載ること」だけを検証する。
+LLM は呼ばない。ツール呼び出しのChangeSet変換と、承認イベントに一括previewが
+載ること、承認後にjournal適用へ委譲することを検証する。
 """
 import json
 import sys
@@ -19,91 +18,28 @@ from app import engine_adapter, main  # noqa: E402
 client = TestClient(main.app, base_url="http://127.0.0.1")
 
 
-# --- _tool_preview（書き込み系3ツールの前後計算） ---
+# --- tool_calls → ChangeSet（同一pathは順序を保って集約） ---
 
-def test_write_file_existing(tmp_path):
-    p = tmp_path / "a.py"
-    p.write_text("old = 1\n", encoding="utf-8")
-    pv = engine_adapter._tool_preview("write_file", {"path": str(p), "content": "new = 2\n"})
-    assert pv == {"path": str(p), "before": "old = 1\n", "after": "new = 2\n"}
-
-
-def test_preview_uses_unsaved_buffer_override(tmp_path):
-    p = tmp_path / "a.py"
-    p.write_text("disk = True\n", encoding="utf-8")
-    unsaved = "user_edit = True\nvalue = 1\n"
-    pv = engine_adapter._tool_preview(
-        "search_and_replace",
-        {"path": str(p), "search_block": "value = 1", "replace_block": "value = 2"},
-        {str(p.resolve()): unsaved},
-    )
-    assert pv["before"] == unsaved
-    assert pv["after"] == "user_edit = True\nvalue = 2\n"
+def test_tool_calls_become_one_multi_file_changeset():
+    calls = [
+        _call("search_and_replace", {"path": "a.py", "search_block": "a", "replace_block": "b"}),
+        _call("append_to_file", {"path": "a.py", "content": "tail"}),
+        _call("replace_lines", {"path": "b.py", "start_line": 2, "end_line": 3,
+                                "new_content": "new"}),
+    ]
+    result = engine_adapter._changeset_from_tool_calls(calls, "chg_test")
+    assert result["id"] == "chg_test"
+    assert [item["path"] for item in result["changes"]] == ["a.py", "b.py"]
+    assert [op["kind"] for op in result["changes"][0]["operations"]] == [
+        "search_replace", "append",
+    ]
 
 
-def test_write_file_new_file(tmp_path):
-    p = tmp_path / "new.py"
-    pv = engine_adapter._tool_preview("write_file", {"path": str(p), "content": "x = 1\n"})
-    assert pv["before"] == ""        # 未存在は空（新規作成として差分表示できる）
-    assert pv["after"] == "x = 1\n"
-
-
-def test_write_file_binary_target_skipped(tmp_path):
-    p = tmp_path / "b.bin"
-    p.write_bytes(b"\x00\xff\x00\xff\x80\x81")
-    assert engine_adapter._tool_preview("write_file", {"path": str(p), "content": "x"}) is None
-
-
-def test_search_and_replace_applied(tmp_path):
-    p = tmp_path / "s.py"
-    p.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-    pv = engine_adapter._tool_preview(
-        "search_and_replace",
-        {"path": str(p), "search_block": "beta", "replace_block": "BETA"})
-    assert pv["after"] == "alpha\nBETA\ngamma\n"
-    assert pv["before"] == "alpha\nbeta\ngamma\n"
-
-
-def test_search_and_replace_no_match_returns_none(tmp_path):
-    """マッチしない提案はツール側も失敗するので、紛らわしい差分を出さない。"""
-    p = tmp_path / "s.py"
-    p.write_text("alpha\n", encoding="utf-8")
-    pv = engine_adapter._tool_preview(
-        "search_and_replace",
-        {"path": str(p), "search_block": "nope", "replace_block": "x"})
-    assert pv is None
-
-
-def test_replace_lines_middle(tmp_path):
-    p = tmp_path / "r.py"
-    p.write_text("l1\nl2\nl3\nl4\n", encoding="utf-8")
-    pv = engine_adapter._tool_preview(
-        "replace_lines",
-        {"path": str(p), "start_line": 2, "end_line": 3, "new_content": "L2-3"})
-    assert pv["after"] == "l1\nL2-3\nl4\n"   # 1オリジン・両端含む（AWP と同一セマンティクス）
-
-
-def test_replace_lines_end_clamped(tmp_path):
-    p = tmp_path / "r.py"
-    p.write_text("l1\nl2\n", encoding="utf-8")
-    pv = engine_adapter._tool_preview(
-        "replace_lines",
-        {"path": str(p), "start_line": 2, "end_line": 99, "new_content": "tail"})
-    assert pv["after"] == "l1\ntail\n"
-
-
-def test_replace_lines_out_of_range_returns_none(tmp_path):
-    p = tmp_path / "r.py"
-    p.write_text("l1\n", encoding="utf-8")
-    assert engine_adapter._tool_preview(
-        "replace_lines",
-        {"path": str(p), "start_line": 5, "end_line": 6, "new_content": "x"}) is None
-
-
-def test_unsupported_tools_return_none():
-    assert engine_adapter._tool_preview("run_command", {"command": "dir"}) is None
-    assert engine_adapter._tool_preview("make_directory", {"path": "d"}) is None
-    assert engine_adapter._tool_preview("write_file", {"path": ""}) is None  # 不正な引数
+def test_mixed_command_batch_is_not_reordered_into_changeset():
+    assert engine_adapter._changeset_from_tool_calls([
+        _call("write_file", {"path": "a.py", "content": "x"}),
+        _call("run_command", {"command": "pytest"}),
+    ], "chg_test") is None
 
 
 # --- _approve が承認イベントに preview を載せる ---
@@ -113,30 +49,49 @@ class _ApprovalHarness:
     抜ける（タイムアウト→却下の経路）が、approval イベントはその前に発行済み。"""
     _approve = engine_adapter.AgentSession._approve
 
-    def __init__(self, required):
+    def __init__(self, required, approve=False):
         self._cancel = False
         self._approval_required = required
         self._approval_id = 0
         self._pending_id = 0
         self._approval_event = threading.Event()
-        self._approval_timeout = 0.01
+        self._approval_timeout = 0.1
         self._approval_decision = None
         self.events = []
         self._emit_event = self.events.append
+        self._engine = _FakeChangeEngine()
+        if approve:
+            self._approval_event.set()
+
+
+class _FakeChangeEngine:
+    def __init__(self):
+        self.applied = []
+
+    def preview_changeset(self, spec):
+        changes = [{"path": item["path"], "before": "before\n", "after": "after\n",
+                    "base_hash": f"hash-{i}", "conflict": False}
+                   for i, item in enumerate(spec["changes"])]
+        return {"id": spec["id"], "ok": True, "changes": changes, "errors": [], "conflicts": []}
+
+    def apply_changeset(self, spec):
+        self.applied.append(spec)
+        return {"id": spec["id"], "applied": True,
+                "changes": [{"path": item["path"]} for item in spec["changes"]]}
 
 
 def _call(name, args):
     return {"function": {"name": name, "arguments": json.dumps(args)}}
 
 
-def test_approve_event_carries_preview(tmp_path):
+def test_approve_event_carries_changeset_preview(tmp_path):
     p = tmp_path / "t.py"
-    p.write_text("before\n", encoding="utf-8")
     h = _ApprovalHarness({"write_file"})
     h._approve([_call("write_file", {"path": str(p), "content": "after\n"})], "")
     ev = next(e for e in h.events if e["type"] == "approval")
     assert ev["calls"][0]["needs_approval"] is True
-    assert ev["calls"][0]["preview"] == {"path": str(p), "before": "before\n", "after": "after\n"}
+    assert ev["changeset"]["changes"][0]["before"] == "before\n"
+    assert ev["changeset"]["changes"][0]["after"] == "after\n"
 
 
 def test_approve_event_skips_preview_for_command():
@@ -144,7 +99,28 @@ def test_approve_event_skips_preview_for_command():
     h = _ApprovalHarness({"run_command"})
     h._approve([_call("run_command", {"command": "dir"})], "")
     ev = next(e for e in h.events if e["type"] == "approval")
-    assert "preview" not in ev["calls"][0]
+    assert "changeset" not in ev
+
+
+def test_approved_file_batch_is_applied_once_as_changeset():
+    h = _ApprovalHarness({"write_file"})
+    # _approveがwaitへ入った後に相関ID付き承認を返す。
+    def approve():
+        while h._pending_id == 0:
+            pass
+        h._approval_decision = {"id": h._pending_id, "approve": True, "override": None}
+        h._approval_event.set()
+    thread = threading.Thread(target=approve)
+    thread.start()
+    approved, override = h._approve([
+        _call("write_file", {"path": "a.py", "content": "a"}),
+        _call("write_file", {"path": "b.py", "content": "b"}),
+    ], "")
+    thread.join()
+    assert approved == []
+    assert "一括適用" in override
+    assert len(h._engine.applied) == 1
+    assert [c["base_hash"] for c in h._engine.applied[0]["changes"]] == ["hash-0", "hash-1"]
 
 
 # --- /api/approve-edit（修正して承認） ---
