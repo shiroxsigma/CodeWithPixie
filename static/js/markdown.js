@@ -75,7 +75,13 @@ if (md) {
       // block.textContent（= renderMermaid が読む図のソース）が先頭の改行を失い、
       // エディタ側の ```mermaid ブロックと一致しなくなる—— 直接編集が
       // 「図の位置を特定できませんでした」で一切使えなくなる。
-      return `<pre class="mermaid-src">\n${escapeHtml(token.content)}</pre>`;
+      // custom renderer は markdown-it の通常の renderToken を通らないため、core で
+      // token に付けた data-src-* も自分で出力する。これを落とすと SVG 内の文字を
+      // 選択した際に、文書先頭など別ブロックの同じ文字へ対応付けられてしまう。
+      const srcAttrs = sourceMap && token.map
+        ? ` data-src-line="${token.map[0] + 1}" data-src-end="${token.map[1]}"`
+        : "";
+      return `<pre class="mermaid-src"${srcAttrs}>\n${escapeHtml(token.content)}</pre>`;
     }
     // mdflow-mapping（条件マッピング定義）は生 YAML を見せず折りたたむ。
     // テキストが正であることの透明性のため、開けばソースは見える。
@@ -463,6 +469,11 @@ async function renderMermaid(el, gen, opts) {
     let renderSrc = flow ? flow.injected : src;
 
     const finish = (box) => {
+      // .mermaid-src を SVG の箱へ置換してもソース対応情報を失わないよう引き継ぐ。
+      // meta は選択された SVG ノード/辺を Mermaid ソース上の labelSpan へ戻すために使う。
+      if (block.dataset.srcLine) box.dataset.srcLine = block.dataset.srcLine;
+      if (block.dataset.srcEnd) box.dataset.srcEnd = block.dataset.srcEnd;
+      box.__mermaidMeta = meta;
       block.replaceWith(box);
       if (flow) box.after(buildPresetList(flow, ctx));
     };

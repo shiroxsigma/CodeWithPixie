@@ -1541,7 +1541,15 @@ function previewSelectionSource(model) {
   // 既に塗ってあるところの一部だけを選んだ場合は、その <mark> 全体を対象にする。
   // 選択ぶんだけを囲うと ==気に==なると==ころ== のように入れ子が壊れるため。
   const mark = enclosingMark(range);
-  const found = findInSource(model.getValueInRange(lineRange), mark ? mark.textContent : sel.toString());
+  const needle = mark ? mark.textContent : sel.toString();
+
+  // Mermaid の SVG はコードフェンス全体から生成される。単純な文字検索では、同じラベルが
+  // 複数あると常に最初の文字へ当たるため、選択した SVG ノード/辺をパーサの labelSpan に
+  // 戻してから、その範囲内だけを検索する。
+  const mermaidHit = mermaidSelectionSource(model, range, needle);
+  if (mermaidHit) return mermaidHit;
+
+  const found = findInSource(model.getValueInRange(lineRange), needle);
   let textRange = null;
   if (found) {
     const base = model.getOffsetAt({ lineNumber: first, column: 1 });
@@ -1557,6 +1565,78 @@ function closestOf(node, selector) {
 }
 
 const srcBlockOf = (node) => closestOf(node, "[data-src-line]");
+
+/** Mermaid SVG 内の選択を、そのノード／辺ラベルのソース範囲へ戻す。 */
+function mermaidSelectionSource(model, range, needle) {
+  const startBox = closestOf(range.startContainer, ".mermaid-box");
+  const endBox = closestOf(range.endContainer, ".mermaid-box");
+  if (!startBox || startBox !== endBox) return null;
+  const meta = startBox.__mermaidMeta;
+  if (!meta?.src) return null;
+
+  const flow = mermaidEdit.parseFlowchart(meta.src);
+  if (!flow.supported) return null;
+  let span = null;
+
+  // ノードラベル。DOM id から Mermaid の nodeId を復元し、定義ラベルだけに絞る。
+  const startNode = closestOf(range.startContainer, "g[id*='flowchart-']");
+  const endNode = closestOf(range.endContainer, "g[id*='flowchart-']");
+  if (startNode && startNode === endNode) {
+    const id = mermaidEdit.resolveNodeId(startNode.id, flow.nodes);
+    const node = id ? flow.nodes.get(id) : null;
+    span = node?.def?.labelSpan || node?.firstRef?.span || null;
+  }
+
+  // 矢印ラベル。ラベルに最も近い辺パスを、既存の DOM→辺 index 解決へ渡す。
+  if (!span) {
+    const startLabel = closestOf(range.startContainer, ".edgeLabel");
+    const endLabel = closestOf(range.endContainer, ".edgeLabel");
+    if (startLabel && startLabel === endLabel) {
+      const path = nearestMermaidEdgePath(startBox, startLabel);
+      const idx = path ? mermaidEdit.resolveEdgeIndex(path, flow) : null;
+      span = idx != null ? flow.edges[idx]?.arrow?.labelSpan : null;
+    }
+  }
+  if (!span) return null;
+
+  const blockLine = Number(startBox.dataset.srcLine) + previewLineOffset;
+  // data-src-line は ```mermaid の開始行。meta.src の先頭はその次の行。
+  const contentLine = clampLine(model, blockLine + 1);
+  if (!contentLine) return null;
+  const sourceBase = model.getOffsetAt({ lineNumber: contentLine, column: 1 });
+  const fragment = meta.src.slice(span.start, span.end);
+  const found = findInSource(fragment, needle);
+
+  // 表示上の文字が Mermaid のエスケープや <br/> をまたいでいて厳密に絞れない場合も、
+  // 文書内の別の同名文字へ誤爆させず、選択したラベル全体を安全なフォールバックにする。
+  const start = sourceBase + span.start + (found?.start || 0);
+  const end = sourceBase + span.start + (found?.end ?? fragment.length);
+  const textRange = state.monaco.Range.fromPositions(
+    model.getPositionAt(start), model.getPositionAt(end));
+  const first = textRange.startLineNumber;
+  const last = textRange.endLineNumber;
+  const lineRange = new state.monaco.Range(first, 1, last, model.getLineMaxColumn(last));
+  return { lineRange, textRange };
+}
+
+/** Mermaid の矢印ラベルに最も近い flowchart-link を返す。 */
+function nearestMermaidEdgePath(box, labelEl) {
+  const r = labelEl.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  let best = null;
+  let bestD = Infinity;
+  for (const path of box.querySelectorAll("path.flowchart-link")) {
+    try {
+      const len = path.getTotalLength();
+      if (!len) continue;
+      const p = path.getPointAtLength(len / 2).matrixTransform(path.getScreenCTM());
+      const d = (p.x - cx) ** 2 + (p.y - cy) ** 2;
+      if (d < bestD) { bestD = d; best = path; }
+    } catch { /* 描画途中で測れないパスは無視 */ }
+  }
+  return bestD < 40 * 40 ? best : null;
+}
 
 /** 選択が丸ごと1つの <mark> の中に収まっていれば、その要素。 */
 function enclosingMark(range) {
