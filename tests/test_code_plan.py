@@ -52,10 +52,14 @@ class _FakePlanSess:
         self.busy = threading.Lock()
         self.phases = []
         self.messages = []
+        self.snapshots = []
         self.fail = False
 
     def set_copilot(self, enabled):
         pass
+
+    def set_workspace_snapshot(self, current_file, current_content):
+        self.snapshots.append((current_file, current_content))
 
     def set_plan_phase(self, on):
         self.phases.append(on)

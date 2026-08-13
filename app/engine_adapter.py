@@ -243,15 +243,21 @@ _PREVIEW_MAX_BYTES = 1_000_000   # 読み込む既存ファイルのサイズ上
 _PREVIEW_MAX_CHARS = 300_000     # before/after 文字列の長さ上限
 
 
-def _read_preview_base(path: str) -> str | None:
+def _preview_path(path: str) -> Path:
+    p = Path(path)
+    return p.resolve() if p.is_absolute() else (config.WORKSPACE / p).resolve()
+
+
+def _read_preview_base(path: str, buffer_overrides: dict[str, str] | None = None) -> str | None:
     """プレビュー用に書き換え対象の現在内容を読む。
     未存在 → ""（新規ファイル）、読めない（バイナリ・巨大・権限等）→ None（preview 見送り）。
     ここに来る path はエンジンがディスパッチ境界で絶対化したもの（相対で来ても
     config.WORKSPACE 基準で解決を試みる＝ベストエフォート）。"""
-    p = Path(path)
-    if not p.is_absolute():
-        p = (config.WORKSPACE / p).resolve()
+    p = _preview_path(path)
     try:
+        if buffer_overrides and str(p) in buffer_overrides:
+            text = buffer_overrides[str(p)]
+            return text if len(text) <= _PREVIEW_MAX_CHARS else None
         if not p.exists():
             return ""
         if not p.is_file() or p.stat().st_size > _PREVIEW_MAX_BYTES:
@@ -264,7 +270,8 @@ def _read_preview_base(path: str) -> str | None:
         return None
 
 
-def _tool_preview(name: str, args: dict) -> dict | None:
+def _tool_preview(name: str, args: dict,
+                  buffer_overrides: dict[str, str] | None = None) -> dict | None:
     """承認対象の書き込み系ツールについて、実行前後のファイル内容を計算する
     （{"path", "before", "after"} — 承認ビューが左ペインの差分エディタで表示する）。
 
@@ -280,7 +287,7 @@ def _tool_preview(name: str, args: dict) -> dict | None:
             after = args.get("content")
             if not path or not isinstance(after, str):
                 return None
-            before = _read_preview_base(path)
+            before = _read_preview_base(path, buffer_overrides)
             if before is None or len(after) > _PREVIEW_MAX_CHARS:
                 return None
             return {"path": path, "before": before, "after": after}
@@ -291,7 +298,7 @@ def _tool_preview(name: str, args: dict) -> dict | None:
             replace = args.get("replace_block")
             if not path or not isinstance(search, str) or not isinstance(replace, str):
                 return None
-            before = _read_preview_base(path)
+            before = _read_preview_base(path, buffer_overrides)
             if before is None:
                 return None
             res = patch.apply_edits(before, [{"search": search, "replace": replace}])
@@ -304,7 +311,7 @@ def _tool_preview(name: str, args: dict) -> dict | None:
             new_content = args.get("new_content")
             if not path or not isinstance(new_content, str):
                 return None
-            before = _read_preview_base(path)
+            before = _read_preview_base(path, buffer_overrides)
             if before is None:
                 return None
             start = int(args.get("start_line"))
@@ -357,16 +364,16 @@ def bootstrap(awp_src):
     import pixie_core  # AWP との唯一の接点
 
     ver = str(getattr(pixie_core, "API_VERSION", ""))
-    # 1.4+ が必須: Note モードの固定ツールプロファイル（tool_set）・system_suffix・
-    # load_history（履歴シード）を使うため（Stage C）。
+    # 1.7+ が必須: Note モードの固定ツールプロファイルと履歴 API に加え、Code モードで
+    # 未保存エディタバッファを read_file へ重ねる set_workspace_snapshot を使うため。
     try:
         major, minor = (int(x) for x in ver.split(".")[:2])
     except ValueError:
         major, minor = 0, 0
     global HISTORY_API
     HISTORY_API = (major, minor) >= (1, 6)
-    if (major, minor) < (1, 4):
-        raise RuntimeError(f"pixie_core API 1.4 以上が必要です（現在: {ver or '?'}）。"
+    if (major, minor) < (1, 7):
+        raise RuntimeError(f"pixie_core API 1.7 以上が必要です（現在: {ver or '?'}）。"
                            "AnythingWithPixie を更新してください。")
     if pixie_core.tool_count() <= 0:  # 起動スモーク
         raise RuntimeError("pixie_core: ツールが1つも登録されていません")
@@ -634,6 +641,7 @@ class AgentSession(HistoryOps):
         self._emit_event = None
         self._cancel = False
         self._classifier = _StreamClassifier()
+        self._workspace_buffer_overrides: dict[str, str] = {}
 
         # ⏪ ロールバック用: {turn_id: {相対パス: ターン開始前のバイト列}}。
         # ターン開始直前（main._turn_stream の worker）で take_turn_snapshot が記録する。
@@ -659,6 +667,22 @@ class AgentSession(HistoryOps):
             changed = files.diff_changed(before)
             if changed:
                 emit_event({"type": "files_changed", "paths": changed})
+
+    def set_workspace_snapshot(self, current_file: str, current_content: str) -> None:
+        """Code エディタの現在バッファを pixie_core の read_file へ重ねる。
+
+        毎ターン空スナップショットも渡して、前ターンで開いていたファイルの内容が
+        セッションに残留しないようにする。パス検証は公開 API 側が workspace 基準で行う。
+        """
+        buffers = []
+        self._workspace_buffer_overrides = {}
+        if current_file:
+            buffers.append({"path": current_file, "content": current_content or ""})
+            p = Path(current_file)
+            root = Path(self.workspace or config.WORKSPACE)
+            resolved = p.resolve() if p.is_absolute() else (root / p).resolve()
+            self._workspace_buffer_overrides[str(resolved)] = current_content or ""
+        self._engine.set_workspace_snapshot({"buffers": buffers})
 
     # ---- output_fn: engine → SSE イベント分類 ----
     def _emit(self, text, end="", flush=False):
@@ -694,7 +718,9 @@ class AgentSession(HistoryOps):
             # 書き込み系は「実行するとどう変わるか」の差分を添える（承認ビューが左ペインに
             # 表示する）。計算できないもの（対象外ツール・巨大ファイル等）は従来どおり引数表示だけ。
             if entry["needs_approval"]:
-                preview = _tool_preview(name, args)
+                preview = _tool_preview(
+                    name, args, getattr(self, "_workspace_buffer_overrides", None)
+                )
                 if preview:
                     entry["preview"] = preview
             calls_view.append(entry)

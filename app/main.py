@@ -703,7 +703,8 @@ def _code_user_text(req: ChatReq, message: str) -> str:
     if req.current_file:
         message = (
             f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
-            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。）\n\n"
+            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。"
+            f"read_file はエディタの未保存バッファをディスクより優先します。）\n\n"
             f"{message}"
         )
     # ツリーでチェックされた参考ファイル（Note モードの build_user_text と同じ書式・上限）。
@@ -1127,6 +1128,11 @@ async def api_chat(req: ChatReq):
     if not sess.busy.acquire(blocking=False):
         raise HTTPException(409, "このセッションは別のターンを実行中です。")
 
+    # Code モードでも Note/Plan と同じく、選択範囲だけでなく現在ファイルの未保存全文を
+    # pixie_core の仮想バッファへ渡す。本文をプロンプトへ複製せず read_file から必要時に読む。
+    setter = getattr(sess, "set_workspace_snapshot", None)
+    if setter is not None:
+        setter(req.current_file or "", req.current_content)
     message = _code_user_text(req, req.message)
     if req.plan_first:
         return _turn_stream(sess, lambda emit: _code_plan_phase(sess, message, emit),

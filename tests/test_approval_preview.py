@@ -28,6 +28,19 @@ def test_write_file_existing(tmp_path):
     assert pv == {"path": str(p), "before": "old = 1\n", "after": "new = 2\n"}
 
 
+def test_preview_uses_unsaved_buffer_override(tmp_path):
+    p = tmp_path / "a.py"
+    p.write_text("disk = True\n", encoding="utf-8")
+    unsaved = "user_edit = True\nvalue = 1\n"
+    pv = engine_adapter._tool_preview(
+        "search_and_replace",
+        {"path": str(p), "search_block": "value = 1", "replace_block": "value = 2"},
+        {str(p.resolve()): unsaved},
+    )
+    assert pv["before"] == unsaved
+    assert pv["after"] == "user_edit = True\nvalue = 2\n"
+
+
 def test_write_file_new_file(tmp_path):
     p = tmp_path / "new.py"
     pv = engine_adapter._tool_preview("write_file", {"path": str(p), "content": "x = 1\n"})

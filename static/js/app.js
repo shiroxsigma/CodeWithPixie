@@ -2924,6 +2924,7 @@ async function sendChat() {
       if (r && r.content != null) context_files.push({ path: p, content: r.content });
     }
     body = { message: msg, session_id: state.sessionId, current_file: state.currentFile,
+             current_content: state.currentFile ? state.editor.getValue() : "",
              selection: getSelection(), plan_first: codePlan };
     if (context_files.length) body.context_files = context_files;
   }

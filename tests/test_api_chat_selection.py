@@ -22,10 +22,14 @@ class _FakeSession(engine_adapter.HistoryOps):
     def __init__(self):
         self.busy = threading.Lock()
         self.messages = []
+        self.snapshots = []
         self._init_turns()  # _turn_stream が往復を記録する（Engine 無しなので実質 no-op）
 
     def set_copilot(self, enabled):
         pass
+
+    def set_workspace_snapshot(self, current_file, current_content):
+        self.snapshots.append((current_file, current_content))
 
     def run_turn(self, message, emit, timeout=0.0):
         self.messages.append(message)
@@ -67,6 +71,13 @@ def test_selection_is_passed_to_agent(sess):
     assert "選択中" in sent or "選択" in sent
     assert "src/a.py" in sent
     assert sent.endswith("この関数を直して")  # 本題は末尾（前置きに埋もれさせない）
+
+
+def test_unsaved_current_buffer_is_passed_as_workspace_snapshot(sess):
+    _post(current_file="src/a.py", current_content="UNSAVED = True\n")
+    assert sess.snapshots == [("src/a.py", "UNSAVED = True\n")]
+    # 本文をプロンプトへ重複投入せず、read_file の仮想バッファから必要時に読む。
+    assert "UNSAVED = True" not in sess.messages[0]
 
 
 def test_no_selection_keeps_message_unchanged(sess):
