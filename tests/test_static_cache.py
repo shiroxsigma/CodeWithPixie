@@ -20,6 +20,19 @@ from app.main import app  # noqa: E402
 client = TestClient(app, base_url="http://127.0.0.1")
 
 
+def test_index_uses_versioned_cwp_favicon():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert '/static/favicon.svg?v=3' in response.text
+    assert "🧚" not in response.text
+
+
+def test_legacy_favicon_is_explicitly_cleared():
+    response = client.get("/favicon.ico")
+    assert response.status_code == 204
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+
+
 def test_static_module_is_revalidated():
     """app.js から import されるだけのモジュールにも no-cache が付く。"""
     r = client.get("/static/js/markdown.js")

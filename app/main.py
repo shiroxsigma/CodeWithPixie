@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1369,6 +1369,12 @@ def index():
         html = html.replace(f'"{target}"', f'"{target}?v={mtime}"')
     # index.html 自体も握られると ?v= の書き換えごと古いままになる
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon_compat():
+    """古いブラウザの自動favicon要求に、妖精アイコンを再利用させない。"""
+    return Response(status_code=204, headers={"Cache-Control": "no-store, max-age=0"})
 
 
 class NoCacheStatic(StaticFiles):

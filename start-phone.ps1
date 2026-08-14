@@ -5,7 +5,10 @@ Set-Location $PSScriptRoot
 
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
-  throw ".venv が見つかりません。先に run.bat でセットアップしてください。"
+  & (Join-Path $PSScriptRoot "setup.bat")
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path $python)) {
+    throw "Python環境のセットアップに失敗しました。"
+  }
 }
 
 $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue

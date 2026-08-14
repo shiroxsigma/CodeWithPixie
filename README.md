@@ -28,6 +28,9 @@ NoteWithPixie（安全・読取専用の Web エディタ）  … 不変
 ## セットアップ
 
 前提: **LM Studio** で OpenAI 互換サーバを起動しモデルをロード（例 `http://localhost:1234/v1`）。
+
+Python環境と必要パッケージをまとめて準備する場合は、`setup.bat`を実行してください。
+初回の`run.bat`または`start-phone.bat`でも、未セットアップなら自動的に実行されます。
 コード編集用途なので function calling 対応のコーダー系モデル推奨（qwen2.5-coder 等）。
 
 ```bat

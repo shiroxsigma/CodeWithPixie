@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+httpx
+pyyaml
+python-pptx
+python-docx
+openpyxl
+pypdf
