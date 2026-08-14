@@ -6,6 +6,7 @@ __pycache__/
 # local config & secrets
 config.json
 .env
+.token
 
 # runtime workspace contents (keep the folder, ignore its files)
 /workspace/*

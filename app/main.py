@@ -15,11 +15,11 @@ import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import (code_chat, compact, config, copilot, copilot_flow, engine_adapter, extract,
+from . import (auth, code_chat, compact, config, copilot, copilot_flow, engine_adapter, extract,
                files, history, mdflow, mode, note_api, note_prompts, patch, search)
 from .config import settings
 from .engine_adapter import AgentSession
@@ -30,6 +30,7 @@ STATIC = BASE / "static"
 app = FastAPI(title="CodeWithPixie")
 
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", settings.host}
+PUBLIC_PATHS = {"/healthz"}
 
 MAX_SESSIONS = 8  # 1プロセスで同時に保持する会話（セッション）数の上限
 
@@ -118,10 +119,16 @@ def _valid_sid(sid: str) -> str:
 
 @app.middleware("http")
 async def verify_origin(request: Request, call_next):
-    """DNS リバインディング & CSRF 対策: ローカル以外の Host / Origin を拒否する。"""
+    """Host/Originを検証し、LAN公開時は全画面・APIをトークンで保護する。"""
     host = request.headers.get("host", "").split(":")[0].lower()
     if host not in ALLOWED_HOSTS:
         return JSONResponse({"detail": "forbidden host"}, status_code=403)
+    path = request.url.path
+    lan = settings.host not in ("127.0.0.1", "localhost")
+    if lan and path not in PUBLIC_PATHS:
+        token = request.query_params.get("t") or request.cookies.get(auth.COOKIE)
+        if not auth.ok(token):
+            return PlainTextResponse("Not Found", status_code=404)
     # 破壊操作を解放し得る POST は Origin も検証（承認/中断/書込を外部ページから叩かせない）。
     if request.method == "POST":
         origin = request.headers.get("origin")
@@ -129,7 +136,18 @@ async def verify_origin(request: Request, call_next):
             from urllib.parse import urlparse
             if urlparse(origin).hostname not in ALLOWED_HOSTS:
                 return JSONResponse({"detail": "forbidden origin"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    if lan and path == "/" and request.query_params.get("t"):
+        response.set_cookie(
+            auth.COOKIE, auth.TOKEN, httponly=True, samesite="strict",
+            max_age=31536000, path="/",
+        )
+    return response
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 # --- モデル -------------------------------------------------------------------
@@ -1375,7 +1393,14 @@ app.mount("/static", NoCacheStatic(directory=STATIC), name="static")
 def run() -> None:
     import uvicorn
 
-    print(f"CodeWithPixie -> http://{settings.host}:{settings.port}  (workspace: {config.WORKSPACE})")
+    lan = settings.host not in ("127.0.0.1", "localhost")
+    suffix = f"/?t={auth.TOKEN}" if lan else "/"
+    url = f"http://{settings.host}:{settings.port}{suffix}"
+    print(f"CodeWithPixie -> {url}  (workspace: {config.WORKSPACE})")
+    if lan:
+        print("同じWi-Fiのスマホで上のURLを開いてください。初回アクセス後はCookieに保存されます。")
+    else:
+        print("スマホから使う場合は start-phone.bat で起動してください。")
     # 注意: reload はワーカースレッド/グローバル状態と相性が悪いので使わない（監査指摘）。
     uvicorn.run(app, host=settings.host, port=settings.port)
 

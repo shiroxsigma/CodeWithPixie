@@ -20,6 +20,7 @@ from pydantic_settings import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_JSON = PROJECT_ROOT / "config.json"
+TOKEN_FILE = PROJECT_ROOT / ".token"
 
 
 class Settings(BaseSettings):
@@ -63,9 +64,11 @@ class Settings(BaseSettings):
     lmstudio_api_key: str = "lm-studio"
     lmstudio_model: str = "local-model"
 
-    # --- サーバ（ローカル専用にバインド） ---
+    # --- サーバ（通常はローカル専用。start-phone.ps1だけLAN IPへ上書き） ---
     host: str = "127.0.0.1"
     port: int = 8771
+    # LAN公開時の共有トークン。空なら.tokenへ安全な値を自動生成して再利用する。
+    token: str = ""
 
     # ripgrep のパス（PATH にあれば "rg" のまま）。ファイル検索 API 用。
     rg_path: str = "rg"

@@ -37,9 +37,27 @@ python -m pipenv install
 :: 2) 設定（LM Studio の base_url / model を自分の環境に合わせる）
 copy config.json.example config.json
 
-:: 3) 起動  ->  http://127.0.0.1:8770
+:: 3) 起動  ->  http://127.0.0.1:8771
 run.bat
 ```
+
+### スマホ・別PCから使う
+
+PCと端末を同じWi-Fiへ接続し、通常の`run.bat`ではなく次を起動します。
+
+```bat
+start-phone.bat
+```
+
+初回だけWindowsファイアウォールの確認が表示されます。起動ログに出る
+`http://<LAN IP>:8771/?t=...`をスマホや別PCで開いてください。最初のアクセス後は
+認証Cookieが1年間保存されるため、ホーム画面やブックマークへ登録できます。
+
+LAN起動時は画面とAPIのすべてを16文字以上の共有トークンで保護します。トークンは
+`.token`へ自動生成され、再起動しても変わりません。任意の値を使う場合は
+`CWP_TOKEN`環境変数または`config.json`の`token`に設定してください。URLは同じWi-Fi内でも
+秘密として扱い、他人へ共有しないでください。通常の`run.bat`は従来どおり
+`127.0.0.1`だけで待ち受け、LANには公開しません。
 
 - **ルートプロジェクト**（作業対象フォルダ）は既定 `workspace/`（`config.json` の `workspace_root`）。
   **起動後もトップバーのフォルダ表示や 📂 ボタンから実行中に変更できる**（`POST /api/workspace`）。
