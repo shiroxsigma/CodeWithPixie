@@ -105,8 +105,17 @@ def _chat(message, session_id="s1"):
 
 def test_turn_id_is_streamed_first(sess):
     evs = _chat("こんにちは")
-    assert evs[0] == {"type": "turn", "id": 1}
-    assert evs[-1] == {"type": "done"}
+    assert evs[0] == {"type": "turn", "id": 1, "schema_version": 1,
+                      "turn_id": 1, "sequence": 0}
+    assert evs[-1] == {"type": "done", "schema_version": 1,
+                       "turn_id": 1, "sequence": 2}
+
+
+def test_turn_events_have_monotonic_sequence(sess):
+    evs = _chat("順番")
+    assert [event["sequence"] for event in evs] == list(range(len(evs)))
+    assert all(event["schema_version"] == 1 for event in evs)
+    assert all(event["turn_id"] == 1 for event in evs)
 
 
 def test_each_turn_records_only_its_own_messages(sess):

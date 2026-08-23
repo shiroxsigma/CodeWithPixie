@@ -46,8 +46,9 @@ def test_note_system_suffix_has_progressive_writing_guide():
 
 
 def test_note_tools_are_read_only_names():
-    assert engine_adapter.NOTE_TOOLS == frozenset(
+    assert engine_adapter.NOTE_EXTENSION_TOOLS == frozenset(
         {"list_workspace", "read_note", "grep_workspace", "describe_flows"})
+    assert engine_adapter.NOTE_TOOLS == engine_adapter.NOTE_EXTENSION_TOOLS | {"read_file"}
 
 
 # --- Note ツール登録ラッパ（kwargs 署名バグの回帰テスト） ----------------------
@@ -73,7 +74,7 @@ def test_note_tool_impls_have_explicit_signatures():
     core = _FakeCore()
     engine_adapter._register_note_tools(core)
     # read 系4ツールだけが登録される（ask_copilot は pack="copilot" の既存登録を再利用）
-    assert set(core.registered) == set(engine_adapter.NOTE_TOOLS)
+    assert set(core.registered) == set(engine_adapter.NOTE_EXTENSION_TOOLS)
     for name, fn in core.registered.items():
         params = inspect.signature(fn).parameters
         assert "kwargs" not in params, f"{name} が **kwargs のまま（ディスパッチで必ず死ぬ）"
@@ -162,10 +163,12 @@ def test_bootstrap_and_note_tools_registered():
     # note の read 系4ツールが pack="note" で登録され、OpenAI tools 形式に引けること。
     # ask_copilot は CWP 既存の pack="copilot" 登録を再利用する（note パックでは登録しない）。
     from pixie_core import registry
-    for name in engine_adapter.NOTE_TOOLS:
+    for name in engine_adapter.NOTE_EXTENSION_TOOLS:
         entry = registry.TOOL_REGISTRY.get(name)
         assert entry is not None, f"{name} が未登録"
         assert entry.get("pack") == "note", f"{name} の pack が note でない（コア集合へ混入の恐れ）"
+    # read_file はAWP標準ツール。Noteでも未保存WorkspaceSnapshotを読めるよう提示集合へ加える。
+    assert registry.TOOL_REGISTRY["read_file"].get("pack") is None
     copilot_entry = registry.TOOL_REGISTRY.get("ask_copilot")
     assert copilot_entry is not None
     assert copilot_entry.get("pack") == "copilot"
@@ -200,9 +203,18 @@ def test_note_session_engine_profile(tmp_path):
     )
     ctx = session._engine.context
     assert ctx.fixed_tool_set == engine_adapter.NOTE_TOOLS | {"ask_copilot"}
+    assert session._engine.profile.name == "note"
+    assert session._engine.profile.active_packs == frozenset({"copilot"})
     # suffix がエンジンの system ビルダーに載っていること
     assert session._engine._system_builder is not None
 
     # copilot off → 次ターンの提示集合から外れる
     session.set_copilot(False)
     assert ctx.fixed_tool_set == engine_adapter.NOTE_TOOLS
+
+    # NoteもCodeと同じ未保存バッファ／Workset経路を使う。
+    (tmp_path / "memo.md").write_text("disk\n", encoding="utf-8")
+    session.set_workspace_snapshot("memo.md", "unsaved\n")
+    workset = session.build_workset("直して", "memo.md", [])
+    target = next(item for item in workset["items"] if item["path"] == "memo.md")
+    assert target["buffer"] is True and target["chars"] == len("unsaved\n")

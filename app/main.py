@@ -12,6 +12,7 @@ import os
 import string
 import threading
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -19,7 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import (auth, code_chat, compact, config, copilot, copilot_flow, engine_adapter, extract,
+from . import (auth, code_chat, compact, config, copilot, copilot_flow, engine_adapter, engine_events, extract,
                files, history, mdflow, mode, note_api, note_prompts, patch, search)
 from .config import settings
 from .engine_adapter import AgentSession
@@ -27,7 +28,15 @@ from .engine_adapter import AgentSession
 BASE = Path(__file__).resolve().parent.parent
 STATIC = BASE / "static"
 
-app = FastAPI(title="CodeWithPixie")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """FastAPI推奨のlifespanで、プロセス共有エンジンを一度だけ初期化する。"""
+    _startup()
+    yield
+
+
+app = FastAPI(title="CodeWithPixie", lifespan=_lifespan)
 
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", settings.host}
 PUBLIC_PATHS = {"/healthz"}
@@ -90,7 +99,6 @@ _engine_error: str = ""
 _tool_count: int = 0
 
 
-@app.on_event("startup")
 def _startup() -> None:
     global _manager, _engine_error, _tool_count
     try:
@@ -443,7 +451,9 @@ def api_patch(req: PatchReq):
 @app.get("/api/status")
 def api_status():
     if _manager is None:
-        return {"ready": False, "error": _engine_error, "workspace": str(config.WORKSPACE)}
+        return {"ready": False, "error": _engine_error, "workspace": str(config.WORKSPACE),
+                "capabilities": engine_adapter.engine_capabilities(),
+                "event_schema_version": engine_events.SCHEMA_VERSION}
     srv = config.active_server()
     return {
         "ready": True,
@@ -453,6 +463,8 @@ def api_status():
         "tools": _tool_count,
         "sessions": _manager.count(),
         "max_sessions": MAX_SESSIONS,
+        "capabilities": engine_adapter.engine_capabilities(),
+        "event_schema_version": engine_events.SCHEMA_VERSION,
     }
 
 
@@ -702,7 +714,8 @@ async def api_copilot_read():
 
 
 def _sse(ev: dict) -> str:
-    return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+    normalized = engine_events.normalize_event(ev)
+    return f"data: {json.dumps(normalized, ensure_ascii=False)}\n\n"
 
 
 #: Code モードで前置きする選択範囲の上限文字数（これを超えると本題が押し流される）。
@@ -710,58 +723,14 @@ SELECTION_MAX_CHARS = 8000
 
 
 def _code_user_text(req: ChatReq, message: str, workset: dict | None = None) -> str:
-    """Code モードのユーザーテキスト（エディタ側の文脈を前置きする）。
-
-    Note/Plan モードの note_prompts.build_user_text に相当する Code モード版。
-    message を差し替えられるようにしてあるのは、/copilot が同じ文脈のまま「指示」だけを
-    質問組み立て依頼に差し替えて使うため。
-    """
-    # 開いているファイルをコンテキストとして前置する。小型モデルは「このファイル」「今開いて
-    # いるファイル」という指示語からパスを推測できず、ハルシネートしたパスを探し回る実測がある。
-    if req.current_file:
-        message = (
-            f"（コンテキスト: ユーザーが現在エディタで開いているファイルは {req.current_file} です。"
-            f"「このファイル」「今開いているもの」等の指示語はこのファイルを指します。"
-            f"read_file はエディタの未保存バッファをディスクより優先します。）\n\n"
-            f"{message}"
-        )
-    # ピン留めは全文を貼らず Workset の参照だけを載せる。内容は snapshot にあるため、
-    # エージェントは必要なファイル・範囲だけ read_file できる。長文を毎ターン prefill しない。
-    if workset and workset.get("items"):
-        rows = []
-        for item in workset["items"]:
-            source = "未保存バッファ" if item.get("buffer") else "ディスク"
-            rows.append(
-                f"- `{item['path']}` ({item.get('role', 'pinned')}, "
-                f"{item.get('lines', 0)}行/{item.get('chars', 0)}文字, {source})"
-            )
-        message = (
-            "# Workset（選択・ピン留め済み）\n"
-            + "\n".join(rows)
-            + "\n必要な本文だけ read_file で取得してください。全ファイルを先に読む必要はありません。\n\n"
-            + message
-        )
-    if workset and workset.get("omitted"):
-        omitted = ", ".join(
-            f"{item.get('path', '?')} ({item.get('reason', 'unknown')})"
-            for item in workset["omitted"]
-        )
-        message = f"# Workset 省略\n{omitted}\n\n" + message
-    # 選択範囲も渡す（Note モードと同じ機能を Code モードでも: 「この関数を直して」の「この」）。
-    # 本文（未保存の編集を含むエディタ上の実体）を埋め込むのは、エージェントが read_file で
-    # 読むとディスク上の古い内容になるため。長い選択は前置きが本題を押し流すので切り詰める。
-    sel = (req.selection or "").strip()
-    if sel:
-        if len(sel) > SELECTION_MAX_CHARS:
-            sel = sel[:SELECTION_MAX_CHARS] + "\n…（長いため以降を省略）"
-        where = f"（{req.current_file}）" if req.current_file else ""
-        message = (
-            f"（コンテキスト: ユーザーがエディタで選択中のテキスト{where}。"
-            f"「この関数」「選択部分」等はここを指します。エディタ上の実体なので、"
-            f"ディスク上の内容と異なる場合はこちらが新しいです。）\n"
-            f"```\n{sel}\n```\n\n{message}"
-        )
-    return message
+    """全モード共通のWorksetプロンプトをCode向けに組み立てる。"""
+    return note_prompts.build_workset_user_text(
+        message,
+        req.selection,
+        workset,
+        req.current_file or "",
+        selection_max_chars=SELECTION_MAX_CHARS,
+    )
 
 
 # --- Code モード plan-first サブモード（先に計画 → 承認 → 実行） ----------------
@@ -987,10 +956,17 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
     q: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
     turn_id = sess.begin_turn(label)
+    sequence = [0]
 
     def emit(ev: dict) -> None:
         # worker スレッド → イベントループへ安全に受け渡し。
-        loop.call_soon_threadsafe(q.put_nowait, ev)
+        if ev.get("type") == "__end__":
+            loop.call_soon_threadsafe(q.put_nowait, ev)
+            return
+        sequence[0] += 1
+        normalized = engine_events.normalize_event(
+            ev, turn_id=turn_id or None, sequence=sequence[0])
+        loop.call_soon_threadsafe(q.put_nowait, normalized)
 
     def worker() -> None:
         try:
@@ -1010,12 +986,15 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
         done = False
         try:
             if turn_id:
-                yield _sse({"type": "turn", "id": turn_id})
+                yield _sse(engine_events.normalize_event(
+                    {"type": "turn", "id": turn_id}, turn_id=turn_id, sequence=0))
             while True:
                 ev = await q.get()
                 if ev.get("type") == "__end__":
                     done = True
-                    yield _sse({"type": "done"})
+                    yield _sse(engine_events.normalize_event(
+                        {"type": "done"}, turn_id=turn_id or None,
+                        sequence=sequence[0] + 1))
                     break
                 yield _sse(ev)
         finally:
@@ -1025,12 +1004,58 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+def _split_workspace_context(sess, req: ChatReq) -> tuple[list[ContextFile], list[dict]]:
+    """参照本文をWorkspaceSnapshotへ載せられるものと外部参照に分ける。"""
+    root = Path(getattr(sess, "workspace", None) or config.WORKSPACE).resolve()
+    workspace_files = list(req.context_files)
+    external_refs: list[dict] = []
+    for ref in req.ref_texts:
+        candidate = Path(ref.path)
+        try:
+            resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            external_refs.append({"path": ref.path, "content": ref.content})
+        else:
+            workspace_files.append(ref)
+    return workspace_files, external_refs
+
+
+def _prepare_readonly_context(sess, req: ChatReq) -> tuple[dict | None, list[dict]]:
+    """Note/Planへ未保存snapshotと本文なしWorksetを設定する。"""
+    workspace_files, external_refs = _split_workspace_context(sess, req)
+    sess.set_workspace_snapshot(req.current_file or "", req.current_content, workspace_files)
+    workset = sess.build_workset(
+        req.message,
+        req.current_file or "",
+        [item.path for item in workspace_files],
+    )
+    return workset, external_refs
+
+
+def _prepare_while_busy(sess, prepare):
+    """ターン前準備に失敗してもbusyロックを残さない。"""
+    try:
+        return prepare()
+    except (TypeError, ValueError) as exc:
+        sess.busy.release()
+        raise HTTPException(400, f"エディタ文脈が不正です: {exc}") from exc
+    except Exception:
+        sess.busy.release()
+        raise
+
+
+def _run_readonly_with_workset(sess, user_text: str, workset: dict | None, emit) -> None:
+    if workset:
+        emit({"type": "workset", "workset": workset})
+    sess.run_turn(user_text, emit)
+
+
 def _note_chat(req: ChatReq) -> StreamingResponse:
     """Note モードのチャット経路（NWP engine_adapter.stream_turn の CWP 版）。
 
-    read 専用プロファイルの NoteSession（単一セッション）でターンを回す。動的コンテキスト
-    （現在ファイル・参考ファイル・選択・添付案内）は note_prompts.build_user_text で
-    ユーザーメッセージに載せる（pixie_core の「静的 system + 動的 user」設計と整合）。
+    read 専用プロファイルの NoteSession（単一セッション）でターンを回す。ワークスペース内
+    本文はWorkspaceSnapshotへ置き、Worksetの構造だけをプロンプトへ載せる。
     """
     _require_manager()  # bootstrap 済み（= pixie_core 初期化済み）の確認
     try:
@@ -1046,13 +1071,17 @@ def _note_chat(req: ChatReq) -> StreamingResponse:
     if not sess.seeded:
         sess.seed_history(req.history or note_api.load_chat_messages())
 
-    context = [{"path": c.path, "content": c.content}
-               for c in req.context_files + req.ref_texts]
-    user_text = note_prompts.build_user_text(
-        req.message, req.selection, context,
-        req.current_file or "", req.current_content, req.attach_files)
+    def prepare_note_context():
+        workset, external_refs = _prepare_readonly_context(sess, req)
+        user_text = note_prompts.build_workset_user_text(
+            req.message, req.selection, workset, req.current_file or "",
+            external_refs, req.attach_files, selection_max_chars=SELECTION_MAX_CHARS)
+        return workset, user_text
 
-    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit), label=req.message)
+    workset, user_text = _prepare_while_busy(sess, prepare_note_context)
+
+    return _turn_stream(sess, lambda emit: _run_readonly_with_workset(
+        sess, user_text, workset, emit), label=req.message)
 
 
 def _plan_chat(req: ChatReq) -> StreamingResponse:
@@ -1060,9 +1089,8 @@ def _plan_chat(req: ChatReq) -> StreamingResponse:
 
     Note モードと同じ「読み取り専用の単一セッション」構造だが、履歴サイドカーは使わない
     （計画は承認して Code モードへ渡した時点で役目を終わるもので、ワークスペースに
-    残す性質のものではない）。ファイル素材の組み立ては note_prompts.build_user_text を
-    共用する — あれは「現在ファイル・参考ファイル・選択範囲を予算内でユーザーテキストへ
-    載せる」汎用処理で、Note 固有の指示は system_suffix 側にあるため。
+    残す性質のものではない）。Code/Noteと同じWorkspaceSnapshot/Worksetを使い、未保存本文を
+    毎ターンのユーザーメッセージへ複製しない。
     """
     _require_manager()  # bootstrap 済み（= pixie_core 初期化済み）の確認
     try:
@@ -1074,13 +1102,17 @@ def _plan_chat(req: ChatReq) -> StreamingResponse:
     if not sess.busy.acquire(blocking=False):
         raise HTTPException(409, "Plan セッションは別のターンを実行中です。")
 
-    context = [{"path": c.path, "content": c.content}
-               for c in req.context_files + req.ref_texts]
-    user_text = note_prompts.build_user_text(
-        req.message, req.selection, context,
-        req.current_file or "", req.current_content, req.attach_files)
+    def prepare_plan_context():
+        workset, external_refs = _prepare_readonly_context(sess, req)
+        user_text = note_prompts.build_workset_user_text(
+            req.message, req.selection, workset, req.current_file or "",
+            external_refs, req.attach_files, selection_max_chars=SELECTION_MAX_CHARS)
+        return workset, user_text
 
-    return _turn_stream(sess, lambda emit: sess.run_turn(user_text, emit), label=req.message)
+    workset, user_text = _prepare_while_busy(sess, prepare_plan_context)
+
+    return _turn_stream(sess, lambda emit: _run_readonly_with_workset(
+        sess, user_text, workset, emit), label=req.message)
 
 
 def _compact_chat(focus: str, req: ChatReq) -> StreamingResponse:
@@ -1159,15 +1191,19 @@ async def api_chat(req: ChatReq):
     # Code モードでも Note/Plan と同じく、選択範囲だけでなく現在ファイルの未保存全文を
     # pixie_core の仮想バッファへ渡す。本文をプロンプトへ複製せず read_file から必要時に読む。
     setter = getattr(sess, "set_workspace_snapshot", None)
-    if setter is not None:
-        setter(req.current_file or "", req.current_content, req.context_files)
     builder = getattr(sess, "build_workset", None)
-    workset = builder(
-        req.message,
-        req.current_file or "",
-        [f.path for f in req.context_files],
-    ) if builder is not None else None
-    message = _code_user_text(req, req.message, workset)
+
+    def prepare_code_context():
+        if setter is not None:
+            setter(req.current_file or "", req.current_content, req.context_files)
+        workset = builder(
+            req.message,
+            req.current_file or "",
+            [f.path for f in req.context_files],
+        ) if builder is not None else None
+        return workset, _code_user_text(req, req.message, workset)
+
+    workset, message = _prepare_while_busy(sess, prepare_code_context)
     if req.plan_first:
         return _turn_stream(sess, lambda emit: _run_code_with_workset(
             sess, message, workset, emit, plan_first=True),

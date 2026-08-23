@@ -21,7 +21,8 @@ NoteWithPixie（安全・読取専用の Web エディタ）  … 不変
   「AWP/src を sys.path に前置して `import pixie_core` する」1点のみ（`app/engine_adapter.py`）。
 - `pixie_core` は engine/tools/state/registry/config 等14モジュールを収めた **`src/pixie_core/` パッケージ**。
   `create_engine()` / `Engine.run_turn(output_fn, interactive_fn)` / `CancelTurn` / ツール分類 /
-  履歴編集（`history_drop` / `history_replace`）/ `API_VERSION`(1.6) を公開。
+  履歴編集 / WorkspaceSnapshot / Workset / journal付きChangeSet / 文書整合性検査を
+  `API_VERSION` 1.10 の公開面として提供する。
 - AWP の CLI・テストは `src/<name>.py` の **sys.modules エイリアスシム**でフラット import を維持
   （モジュール同一性を保持）。この物理移動で **CWP・NWP・AWP いずれも挙動不変**（AWP は 394 テストがグリーン）。
 
@@ -288,6 +289,14 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
   モード切替が要らず会話の文脈がそのまま続く点が違い（`plan_first` → `app/main.py` の
   `_code_plan_phase` がツール集合を一時制限する）。
 
+### 全モード共通のWorkspaceSnapshot / Workset
+
+Code / Note / Plan は、現在ファイルの未保存内容とチェック済みファイルをAWPの
+`WorkspaceSnapshot`へ登録する。ユーザーメッセージには本文を何万文字も複製せず、パス・役割・
+版情報だけの`Workset`を載せる。エージェントは必要な本文・範囲だけ`read_file`で取得し、同じ
+未保存バッファをディスクより優先して読む。Worksetへ入った理由と省略理由はチャットにも表示する。
+Workspace外の関連ファイルだけはsnapshotへ置けないため、抽出テキストを予算内で同梱する。
+
 ### 実装メモ（ターン境界の持ち方）
 削除の単位は「ユーザーから見た1往復」なので、境界は `run_turn` ではなく `_turn_stream`
 （＝1回の HTTP チャット要求）で開閉する — `/copilot` のように1往復の中で `run_turn` が
@@ -359,13 +368,16 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 残り（engine 深部に触れるため段階的に進める。各項目は AWP のテストを壊さないことを条件に着手）:
 
 1. 出力の**型付きイベント**再設計と、engine 内の直書き `print` 全廃（現状は stdout に逃がして握っている）。
-4. `AppContext` を「実行設定(core)」と「UI 機能(app)」に分離。
-5. 作業ディレクトリ/永続ストレージの**セッション別抽象化**（cwd 依存の解消）。
-6. write の**物理サンドボックス**（現状は cwd 限定＋承認のみ）、権限 allowlist。
+2. AWPの`AgentProfile`公開後、Code / Note / Planのセッション構築を1本へ統合。
+3. `AppContext` を「実行設定(core)」と「UI 機能(app)」に分離。
+4. write の**物理サンドボックス**（現状はworkspace限定＋承認のみ）、権限 allowlist。
 
 ## AWP 依存メモ
-- 参照境界: `../AnythingWithPixie/src/pixie_core.py`（`API_VERSION` と `Engine.run_turn` シグネチャに依存）。
-- CWP は起動時に `pixie_core.API_VERSION`（`1.x`）とツール登録数を検証する（`app/engine_adapter.py`）。
-  **1.4 以上が必須**（Note の固定ツールプロファイル）。**1.6 以上でコンテキスト管理が有効**になる
-  （往復の削除・`/compact`。1.6 未満では機能が無効化されるだけで、それ以外は従来どおり動く）。
+- 参照境界: `../AnythingWithPixie/src/pixie_core/`。
+- CWP は起動時に`pixie_core.API_VERSION`とツール登録数を検証し、**1.10以上を必須**とする。
+- `/api/status`はバージョン番号に加えて、公開メソッドから検出した`capabilities`を返す。
+  WorkspaceSnapshot / Workset / ChangeSet / 履歴 / 将来のContextPolicy・型付きイベントを個別判定する。
+- CWPのSSEは`schema_version`、`turn_id`、単調増加する`sequence`を持つ。旧AWPのstatus文字列も
+  CWP境界で`category` / `phase` / `tool`へ正規化するため、フロントは構造化フィールドを優先できる。
+- `.github/workflows/test.yml`はAWPもチェックアウトし、Python 3.12 / 3.13で統合テストを実行する。
 - AWP を更新して境界 API を変えた場合は `pixie_core.API_VERSION` を上げ、本 README も更新すること。

@@ -2672,6 +2672,8 @@ async function insertImage(file) {
 const PHASE_LABEL = {
   prefill: (sec) => `応答を待っています（prefill 中… ${sec}s）`,
   thinking: (sec) => `思考中… ${sec}s`,
+  tool: (sec) => `ツールを実行中… ${sec}s`,
+  verify: (sec) => `結果を検証中… ${sec}s`,
 };
 
 function beginAssistantStream(el) {
@@ -2690,7 +2692,8 @@ function beginAssistantStream(el) {
   const paint = () => {
     if (!wait.isConnected) return;
     const sec = ((performance.now() - phaseStart) / 1000).toFixed(1);
-    waitText.textContent = PHASE_LABEL[phase](sec);
+    const label = PHASE_LABEL[phase] || ((s) => `${phase}… ${s}s`);
+    waitText.textContent = label(sec);
   };
   const setPhase = (p) => {
     if (p !== phase) { phase = p; phaseStart = performance.now(); }
@@ -2988,11 +2991,17 @@ async function sendChat() {
   if (note) {
     body = await buildNotePayload(msg);
   } else if (plan) {
-    // Plan もサーバ側で note_prompts.build_user_text を通るので、開いているファイルは
-    // 本文込みで渡す（未保存の編集を前提にした計画を立てさせるため）。
+    // PlanもCode/Noteと同じWorkspaceSnapshot/Worksetを使う。チェック済み本文は
+    // プロンプトへ貼らず、サーバ側の仮想バッファからread_fileで必要時に読む。
+    const context_files = [];
+    for (const p of [...state.checkedFiles]) {
+      const r = await tryJSON("/api/file?path=" + encodeURIComponent(p));
+      if (r && r.content != null) context_files.push({ path: p, content: r.content });
+    }
     body = { message: msg, session_id: state.sessionId, selection: getSelection(),
              current_file: state.currentFile || "",
-             current_content: state.currentFile ? state.editor.getValue() : "" };
+             current_content: state.currentFile ? state.editor.getValue() : "",
+             context_files };
   } else {
     // チェック済みファイルをコンテキストに同梱（Note の buildNotePayload と同じ扱い。
     // 抽出失敗は tryJSON が alert してそのファイルだけ抜く）
@@ -3193,11 +3202,12 @@ function handleEvent(ev) {
       if (ev.text) state.assistantUi?.onToken(ev.text);
       break;
     case "status": {
-      const phase = phaseOf(ev.text);
+      // schema v1以降は構造化フィールドを優先。旧サーバでは文字列判定へフォールバックする。
+      const phase = ev.phase || phaseOf(ev.text || "");
       if (phase) { state.assistantUi?.setPhase(phase); break; }
       // ツール実行行・システム行はログ枠へ。エンジンはツール完了時にこの行を出すので、
       // 直後に次の ⏳ Prefill が来てフェーズは勝手に進む（ここでは触らない）。
-      addToolStatus(state.assistantEl, ev.text);
+      addToolStatus(state.assistantEl, ev.text, { category: ev.category, tool: ev.tool });
       break;
     }
     case "turn":
@@ -3216,6 +3226,18 @@ function handleEvent(ev) {
     case "files_changed":
       onFilesChanged(ev.paths);
       break;
+    case "turn_metrics": {
+      const metrics = ev.metrics || {};
+      const llmCalls = Array.isArray(metrics.llm_calls) ? metrics.llm_calls.length : 0;
+      const toolCalls = Number(metrics.tool_calls || 0);
+      const acceptanceRetries = Number(metrics.acceptance_retries || 0);
+      const parts = [`LLM ${llmCalls}`, `tools ${toolCalls}`];
+      if (metrics.exit_reason) parts.push(metrics.exit_reason);
+      if (acceptanceRetries) parts.push(`acceptance retry ${acceptanceRetries}`);
+      addToolStatus(state.assistantEl, `Turn: ${parts.join(" / ")}`,
+        { category: "turn_metrics" });
+      break;
+    }
     case "error":
       addToolStatus(state.assistantEl, "⚠ " + ev.text);
       break;

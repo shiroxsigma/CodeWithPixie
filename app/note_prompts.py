@@ -69,6 +69,87 @@ MDFLOW_PROMPT = """
 MAX_CONTEXT_CHARS_PER_FILE = 8000
 
 
+def build_workset_user_text(user_msg: str, selection: str, workset: dict | None,
+                            current_file: str = "", reference_texts: list[dict] | None = None,
+                            attach_files: list[str] | None = None,
+                            selection_max_chars: int = 8000) -> str:
+    """WorkspaceSnapshot/Workset 前提の動的ユーザーテキストを組み立てる。
+
+    ワークスペース内の本文はプロンプトへ複製せず、必要時に read_file で取得させる。
+    WorkspaceSnapshot に載せられない外部参照の抽出テキストだけは、従来どおり予算内で
+    同梱する。最後に必ず本題を置き、小型モデルで指示が前置きに埋もれるのを防ぐ。
+    """
+    parts: list[str] = []
+    if current_file:
+        parts.append(
+            f"# 現在エディタで開いているファイル\n`{current_file}`\n"
+            "「このファイル」「今のファイル」はこれを指す。未保存内容を含む最新版は "
+            "WorkspaceSnapshot にあり、read_file がディスクより優先して返す。"
+        )
+
+    if workset and workset.get("items"):
+        rows = []
+        for item in workset["items"]:
+            source = "未保存バッファ" if item.get("buffer") else "ディスク"
+            rows.append(
+                f"- `{item['path']}` ({item.get('role', 'pinned')}, "
+                f"{item.get('lines', 0)}行/{item.get('chars', 0)}文字, {source})"
+            )
+        parts.append(
+            "# Workset（選択・ピン留め済み）\n" + "\n".join(rows)
+            + "\n必要な本文・範囲だけ read_file で取得する。全ファイルの先読みは不要。"
+        )
+    if workset and workset.get("omitted"):
+        omitted = ", ".join(
+            f"{item.get('path', '?')} ({item.get('reason', 'unknown')})"
+            for item in workset["omitted"]
+        )
+        parts.append("# Workset 省略\n" + omitted)
+
+    # 外部参照は AWP の workspace snapshot に登録できないため、抽出済みテキストを同梱する。
+    budget = settings.context_char_budget
+    included: list[str] = []
+    omitted_refs: list[str] = []
+    for ref in reference_texts or []:
+        path = str(ref.get("path") or "")
+        if not path or path == current_file:
+            continue
+        content = str(ref.get("content") or "")
+        if len(content) > MAX_CONTEXT_CHARS_PER_FILE:
+            content = content[:MAX_CONTEXT_CHARS_PER_FILE] + "\n…（長いため以降を省略）"
+        if len(content) > budget:
+            omitted_refs.append(path)
+            continue
+        budget -= len(content)
+        included.append(f"## {path}\n```\n{content}\n```")
+    if included:
+        parts.append("# 外部参照（抽出テキスト）\n" + "\n\n".join(included))
+    if omitted_refs:
+        parts.append("# 外部参照の省略\nコンテキスト上限のため省略: " + ", ".join(omitted_refs))
+
+    sel = (selection or "").strip()
+    if sel:
+        if len(sel) > selection_max_chars:
+            sel = sel[:selection_max_chars] + "\n…（長いため以降を省略）"
+        where = f"（{current_file}）" if current_file else ""
+        parts.append(
+            f"# エディタで選択中のテキスト{where}\n"
+            "この実体を「この関数」「選択部分」として扱う。\n```\n" + sel + "\n```"
+        )
+
+    if attach_files:
+        parts.append(
+            "# ユーザーが添付した関連ファイル（原本）\n"
+            "図表やレイアウトを含めて外部Copilotに確認させる場合は ask_copilot の files に渡す。\n"
+            + "\n".join(f"- {path}" for path in attach_files)
+        )
+
+    if not parts:
+        return user_msg
+    parts.append("# 指示\n" + user_msg)
+    return "\n\n".join(parts)
+
+
 def build_user_text(user_msg: str, selection: str, context_files: list[dict],
                     current_file: str = "", current_content: str = "",
                     attach_files: list[str] | None = None) -> str:

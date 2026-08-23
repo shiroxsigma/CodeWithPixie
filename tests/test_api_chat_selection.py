@@ -149,3 +149,15 @@ def test_workset_is_emitted_to_gui_before_agent_runs():
 
     assert [event["type"] for event in events] == ["workset", "token"]
     assert events[0]["workset"] is workset
+
+
+def test_context_setup_failure_releases_busy_lock(sess, monkeypatch):
+    def reject(*_args, **_kwargs):
+        raise ValueError("outside workspace")
+
+    monkeypatch.setattr(sess, "set_workspace_snapshot", reject)
+    response = client.post("/api/chat", json={
+        "message": "x", "session_id": "s1", "current_file": "../outside.py"})
+    assert response.status_code == 400
+    assert "エディタ文脈が不正" in response.json()["detail"]
+    assert sess.busy.acquire(blocking=False)  # 失敗ターンがロックを残していない

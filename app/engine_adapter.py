@@ -131,8 +131,12 @@ class _StreamClassifier:
         return []
 
 
-#: Note モードで LLM に提示する read 系ツール（ask_copilot は設定で加わる）。NWP から移植。
-NOTE_TOOLS = frozenset({"list_workspace", "read_note", "grep_workspace", "describe_flows"})
+#: CWP が追加登録する Note 専用ツール。AWP 組み込みの read_file は含めない。
+NOTE_EXTENSION_TOOLS = frozenset({"list_workspace", "read_note", "grep_workspace", "describe_flows"})
+
+#: Note モードで LLM に提示する read 系ツール（ask_copilot は設定で加わる）。
+#: read_file は AWP の WorkspaceSnapshot を理解するため、現在ファイルの未保存内容も読める。
+NOTE_TOOLS = NOTE_EXTENSION_TOOLS | {"read_file"}
 
 #: pixie_core の base システムプロンプト末尾に足す静的指示（Note モード）。セッション内不変
 #: （prefix cache 保護）。MDFLOW_PROMPT は常時静的に含める: ターン毎の条件注入は system を
@@ -144,14 +148,14 @@ NOTE_SYSTEM_SUFFIX = (
     + note_prompts.MDFLOW_PROMPT
     + """
 ツールの使い方:
-- 依頼に必要な資料が手元に無ければ、list_workspace / grep_workspace で探し、read_note で読む。
+- 現在ファイルと Workset 内のテキストは read_file で必要な範囲だけ読む。read_file は未保存バッファを優先する。
+- Office/PDF の抽出が必要なら read_note を使う。資料が見つからなければ list_workspace / grep_workspace で探す。
 - 最新情報・外部知識・推敲の別視点が必要なときだけ ask_copilot を使う（遅いので1依頼につき原則1回まで）。
 - 同じツール呼び出しが2回連続で同じエラーになった場合は、そのツールの再呼び出しをやめる。
   手持ちの情報で進めるか、足りない点をユーザーに伝えて指示を仰ぐ（同じ呼び出しの反復は禁止）。
 - 必要な情報が揃ったら、ツールを呼ばずに最終回答を書く。ツール結果の丸写しではなく、依頼に沿って整理する。
 - 推測でパスを書かない。実在確認できたファイルだけを参照する。
-- 「現在エディタで開いているファイル」がメッセージに添付されている場合、その内容は未保存の編集を含む最新版。
-  同じファイルを read_note で読み直さない（ディスク上の古い内容が返る）。
+- 「現在エディタで開いているファイル」は WorkspaceSnapshot にある。read_note ではなく read_file で読む。
 - ファイルへの書き込み・削除・コマンド実行はできない。変更はすべて上記の search/replace / apply
   ブロックで提案し、反映はユーザーに委ねる。
 
@@ -305,6 +309,7 @@ def _pin_changeset_hashes(changeset: dict, preview: dict) -> dict:
 
 # --- プロセス1回だけの AWP ブートストラップ（全セッション共有） ---
 _core = None  # 読み込んだ pixie_core モジュール（キャッシュ）
+_capabilities: dict = {}
 
 #: pixie_core が履歴編集 API（1.6）を持つか。持たない AWP でも従来どおり動かし、
 #: 「往復の削除」「/compact」だけを無効化する（bootstrap が判定して立てる）。
@@ -317,7 +322,7 @@ def bootstrap(awp_src):
     マルチセッションでは複数の AgentSession を作るが、AWP モジュールの import と stdout の
     utf-8 化はプロセス共有の1回で済む。pixie_core.API_VERSION の互換性もここで検証する。
     """
-    global _core
+    global _core, _capabilities
     if _core is not None:
         return _core
 
@@ -353,9 +358,48 @@ def bootstrap(awp_src):
     _register_note_tools(pixie_core)
 
     _core = pixie_core
+    _capabilities = detect_capabilities(pixie_core)
     # 設定の思考許容時間をエンジンへ反映（API 1.5 未満なら黙って既定値のまま動く）。
     apply_think_budget(settings.think_budget_sec)
     return _core
+
+
+def detect_capabilities(core) -> dict:
+    """pixie_core の公開面から利用可能な機能を検出する。
+
+    API_VERSION の大小だけに依存すると、将来の独立した機能追加やバックポートを表せない。
+    CWP はこの表を /api/status で公開し、各経路は実在するメソッドを能力として扱う。
+    """
+    engine_type = getattr(core, "Engine", None)
+    create = getattr(core, "create_engine", None)
+    try:
+        create_params = set(inspect.signature(create).parameters) if create else set()
+    except (TypeError, ValueError):
+        create_params = set()
+
+    def engine_has(name: str) -> bool:
+        return engine_type is not None and callable(getattr(engine_type, name, None))
+
+    return {
+        "api_version": str(getattr(core, "API_VERSION", "")),
+        "workspace_snapshot": engine_has("set_workspace_snapshot"),
+        "workset": engine_has("build_workset"),
+        "changeset": all(engine_has(name) for name in (
+            "validate_changeset", "apply_changeset", "revert_changeset")),
+        "history": all(engine_has(name) for name in (
+            "history_size", "history_tail", "history_drop", "history_replace")),
+        "stream_timeout": engine_has("set_stream_timeout"),
+        # 次世代境界。AWP側に追加された時点でCWPはバージョン番号変更なしでも検出できる。
+        "context_policy": engine_has("set_context_policy"),
+        "structured_events": engine_has("run_turn_events"),
+        "turn_metrics": engine_has("get_turn_metrics"),
+        "agent_profiles": "profile" in create_params,
+    }
+
+
+def engine_capabilities() -> dict:
+    """現在 bootstrap 済みのエンジン能力をコピーして返す。"""
+    return dict(_capabilities)
 
 
 def stream_timeout_sec(budget_sec) -> float:
@@ -392,8 +436,8 @@ def _apply_context_length(engine, server: dict) -> None:
     リモート LM Studio / llama-server は /v1/models に meta.n_ctx を返さず、バックエンドが
     32768 にフォールバックする。エンジンは get_total_context(llm)=llm.n_ctx() で窓長を測り
     切り詰め・チェックポイントを決めるので、実窓長とズレると溢れる。ここで生成直後に
-    backend._n_ctx を実測値へ差し替える（pixie_core 本体は非改変。private 属性だが、
-    LMStudioBackend.n_ctx() が返すのはこの値なので、これで get_total_context に効く）。"""
+    新しいAWPでは公開 set_context_policy を優先する。未対応のAPI 1.10では互換維持のため
+    backend._n_ctx へフォールバックする（LMStudioBackend.n_ctx() がこの値を返す）。"""
     n = 0
     try:
         n = int(server.get("context_length") or 0)
@@ -401,12 +445,80 @@ def _apply_context_length(engine, server: dict) -> None:
         n = 0
     if n <= 0:
         return  # 0 = 自動（バックエンドが取得した値／フォールバックのまま）
+    # AWPが公開ContextPolicyを備えたら、private属性へ触れず自動的に新契約へ移行する。
+    public_setter = getattr(engine, "set_context_policy", None)
+    if callable(public_setter):
+        public_setter({"context_length": n})
+        return
     try:
         llm = engine.context.llm
         if hasattr(llm, "_n_ctx"):
             llm._n_ctx = n
     except Exception:  # noqa: BLE001 - 上書きに失敗しても自動値で動作は続く
         pass
+
+
+def _create_profiled_engine(core, server: dict, workspace: str, *,
+                            name: str, tool_set=None, system_suffix: str = "",
+                            active_packs=()):
+    """Create an engine through API 1.11 profiles, with an API 1.10 fallback."""
+    profile_type = getattr(core, "AgentProfile", None)
+    if callable(profile_type):
+        policy = None
+        try:
+            context_length = int(server.get("context_length") or 0)
+        except (TypeError, ValueError):
+            context_length = 0
+        policy_type = getattr(core, "ContextPolicy", None)
+        if context_length > 0 and callable(policy_type):
+            policy = policy_type(context_length=context_length)
+        profile = profile_type(
+            name=name,
+            tool_set=tool_set,
+            system_suffix=system_suffix,
+            active_packs=active_packs,
+            context_policy=policy,
+        )
+        engine = core.create_engine(server, str(workspace), profile=profile)
+    else:
+        kwargs = {}
+        if tool_set is not None:
+            kwargs["tool_set"] = tool_set
+        if system_suffix:
+            kwargs["system_suffix"] = system_suffix
+        engine = core.create_engine(server, str(workspace), **kwargs)
+        _apply_context_length(engine, server)
+    return engine
+
+
+class _EngineStreamOps:
+    """Shared AWP native-event bridge for Code, Note, and Plan sessions."""
+
+    def _on_engine_event(self, event) -> None:
+        value = event.as_dict() if callable(getattr(event, "as_dict", None)) else dict(event)
+        event_type = value.get("type")
+        if event_type == "output":
+            self._emit(value.get("text", ""), end=value.get("end", ""),
+                       flush=bool(value.get("flush", False)))
+        elif event_type == "turn_completed":
+            self._emit_event({"type": "turn_metrics", "metrics": value.get("metrics", {})})
+
+    def _run_engine_stream(self, user_text: str, *, interactive_fn,
+                           show_thinking: bool = False):
+        runner = getattr(self._engine, "run_turn_events", None)
+        if callable(runner):
+            return runner(
+                user_text,
+                event_fn=self._on_engine_event,
+                interactive_fn=interactive_fn,
+                show_thinking=show_thinking,
+            )
+        return self._engine.run_turn(
+            user_text,
+            output_fn=self._emit,
+            interactive_fn=interactive_fn,
+            show_thinking=show_thinking,
+        )
 
 
 def _register_copilot_tool(pixie_core) -> None:
@@ -579,7 +691,43 @@ class HistoryOps:
         }
 
 
-class AgentSession(HistoryOps):
+class _WorkspaceContextOps:
+    """Monaco の未保存バッファと明示選択を AWP の公開コンテキストAPIへ渡す共通層。"""
+
+    def _init_workspace_context(self) -> None:
+        self._workspace_buffer_overrides: dict[str, str] = {}
+
+    def set_workspace_snapshot(self, current_file: str, current_content: str,
+                               context_files=()) -> None:
+        """現在・ピン留めバッファを read_file へ重ね、前ターンの残留を消す。"""
+        buffers = []
+        self._workspace_buffer_overrides = {}
+        for item in context_files or ():
+            path = item.get("path") if isinstance(item, dict) else getattr(item, "path", "")
+            content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+            if path:
+                buffers.append({"path": path, "content": content or ""})
+        if current_file:
+            # 同じパスが pinned にもあれば、現在エディタの未保存内容を優先する。
+            buffers = [b for b in buffers if b["path"] != current_file]
+            buffers.append({"path": current_file, "content": current_content or ""})
+        for item in buffers:
+            p = Path(item["path"])
+            root = Path(self.workspace or config.WORKSPACE)
+            resolved = p.resolve() if p.is_absolute() else (root / p).resolve()
+            self._workspace_buffer_overrides[str(resolved)] = item["content"]
+        self._engine.set_workspace_snapshot({"buffers": buffers})
+
+    def build_workset(self, task: str, current_file: str, pinned_paths: list[str]) -> dict:
+        """本文を複製せず、選択・ピン留め・関連候補の構造だけを作る。"""
+        return self._engine.build_workset({
+            "task": task,
+            "selected_path": current_file or None,
+            "pinned_paths": pinned_paths,
+        })
+
+
+class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     """1会話（セッション）分の埋め込みエンジン。pixie_core.Engine を1つ保持する。
 
     複数インスタンスを同一プロセスで並行実行できる（state_board は pixie_core 側で ContextVar
@@ -589,14 +737,16 @@ class AgentSession(HistoryOps):
     def __init__(self, core, server: dict, workspace):
         self._core = core
         self._CancelTurn = core.CancelTurn
-        self._engine = core.create_engine(server, str(workspace))  # 自セッション専用の Engine
-        _apply_context_length(self._engine, server)  # 手動コンテキスト長（設定時のみ）
+        self._engine = _create_profiled_engine(
+            core, server, str(workspace), name="code"
+        )  # 自セッション専用の Engine
         self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))
 
         self._approval_required = frozenset(core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
         self.tool_count = self._engine.tool_count
         self.model_name = self._engine.model_name
         self.workspace = getattr(self._engine, "workspace", None)  # このセッションの作業フォルダ
+        self._init_workspace_context()
 
         # ターン実行の排他（1セッション）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()
@@ -612,7 +762,6 @@ class AgentSession(HistoryOps):
         self._emit_event = None
         self._cancel = False
         self._classifier = _StreamClassifier()
-        self._workspace_buffer_overrides: dict[str, str] = {}
 
         # ⏪ ロールバック用: {turn_id: {相対パス: ターン開始前のバイト列}}。
         # ターン開始直前（main._turn_stream の worker）で take_turn_snapshot が記録する。
@@ -629,7 +778,7 @@ class AgentSession(HistoryOps):
         before = files.snapshot_mtimes()
         try:
             # ターンシーケンス(reset→user追加→run_graph)は pixie_core 側に集約済み。
-            self._engine.run_turn(message, output_fn=self._emit, interactive_fn=self._approve)
+            self._run_engine_stream(message, interactive_fn=self._approve)
         except self._CancelTurn:
             emit_event({"type": "status", "text": "中断しました。"})
         except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
@@ -639,39 +788,6 @@ class AgentSession(HistoryOps):
             changed = files.diff_changed(before)
             if changed:
                 emit_event({"type": "files_changed", "paths": changed})
-
-    def set_workspace_snapshot(self, current_file: str, current_content: str,
-                               context_files=()) -> None:
-        """Code エディタの現在・ピン留めバッファを pixie_core の read_file へ重ねる。
-
-        毎ターン空スナップショットも渡して、前ターンで開いていたファイルの内容が
-        セッションに残留しないようにする。パス検証は公開 API 側が workspace 基準で行う。
-        """
-        buffers = []
-        self._workspace_buffer_overrides = {}
-        for item in context_files or ():
-            path = item.get("path") if isinstance(item, dict) else getattr(item, "path", "")
-            content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
-            if path:
-                buffers.append({"path": path, "content": content or ""})
-        if current_file:
-            # 同じパスが pinned にもあれば、現在エディタの未保存内容を最後に置いて優先する。
-            buffers = [b for b in buffers if b["path"] != current_file]
-            buffers.append({"path": current_file, "content": current_content or ""})
-        for item in buffers:
-            p = Path(item["path"])
-            root = Path(self.workspace or config.WORKSPACE)
-            resolved = p.resolve() if p.is_absolute() else (root / p).resolve()
-            self._workspace_buffer_overrides[str(resolved)] = item["content"]
-        self._engine.set_workspace_snapshot({"buffers": buffers})
-
-    def build_workset(self, task: str, current_file: str, pinned_paths: list[str]) -> dict:
-        """公開 API へ Workset 構築を委譲する。本文は結果へ含まれない。"""
-        return self._engine.build_workset({
-            "task": task,
-            "selected_path": current_file or None,
-            "pinned_paths": pinned_paths,
-        })
 
     # ---- output_fn: engine → SSE イベント分類 ----
     def _emit(self, text, end="", flush=False):
@@ -876,7 +992,7 @@ class AgentSession(HistoryOps):
         return restored
 
 
-class NoteSession(HistoryOps):
+class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     """Note モード1会話分の埋め込みエンジン（NWP engine_adapter.NoteSession の移植）。
 
     AgentSession（Code モード）との違い:
@@ -899,18 +1015,21 @@ class NoteSession(HistoryOps):
     TOOLS = NOTE_TOOLS
     #: base システムプロンプト末尾へ静的に足す指示（サブクラスで差し替える）。
     SYSTEM_SUFFIX = NOTE_SYSTEM_SUFFIX
+    PROFILE_NAME = "note"
 
     def __init__(self, core, server: dict, workspace: str, copilot_enabled: bool):
         self._core = core
         self._CancelTurn = core.CancelTurn
         self._allowed = self._allowed_set(copilot_enabled)
-        self._engine = core.create_engine(
-            server, workspace,
+        self._engine = _create_profiled_engine(
+            core, server, workspace,
+            name=self.PROFILE_NAME,
             tool_set=self._allowed,
             system_suffix=self.SYSTEM_SUFFIX,
+            active_packs={"copilot"} if copilot_enabled else (),
         )
-        _apply_context_length(self._engine, server)  # 手動コンテキスト長（設定時のみ）
         self.workspace = getattr(self._engine, "workspace", workspace)
+        self._init_workspace_context()
         self.model_name = self._engine.model_name
         self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))
 
@@ -950,9 +1069,8 @@ class NoteSession(HistoryOps):
         self._cancel = False
         self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         try:
-            self._engine.run_turn(
+            self._run_engine_stream(
                 user_text,
-                output_fn=self._emit,
                 interactive_fn=self._guard,
                 show_thinking=settings.show_thinking,
             )
@@ -1004,6 +1122,7 @@ class PlanSession(NoteSession):
 
     TOOLS = PLAN_TOOLS
     SYSTEM_SUFFIX = PLAN_SYSTEM_SUFFIX
+    PROFILE_NAME = "plan"
 
 
 # --- Note モードの単一セッション管理（ワークスペース1本＝会話1本） ---

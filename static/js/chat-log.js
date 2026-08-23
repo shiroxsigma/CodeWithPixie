@@ -80,7 +80,7 @@ export function addRollbackButton(el, onRollback) {
 }
 
 /** エージェントのツール実行ステータスを本文の上のログ枠に積む。 */
-export function addToolStatus(el, text) {
+export function addToolStatus(el, text, meta = {}) {
   let log = el.querySelector(".tool-log");
   if (!log) {
     log = document.createElement("div");
@@ -89,6 +89,8 @@ export function addToolStatus(el, text) {
   }
   const line = document.createElement("div");
   line.className = "tool-status";
+  if (meta.category) line.classList.add("status-" + meta.category);
+  if (meta.tool) line.dataset.tool = meta.tool;
   line.textContent = text;
   log.appendChild(line);
   scrollMessages();

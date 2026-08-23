@@ -815,6 +815,10 @@ details.mdflow-mapping pre {
   font-family: ui-monospace, "Cascadia Code", monospace;
   white-space: pre-wrap; word-break: break-all;
 }
+.msg .tool-status.status-warning { color: #e8b85c; }
+.msg .tool-status.status-validation { color: #9db7ff; }
+.msg .tool-status.status-changeset,
+.msg .tool-status.status-success { color: #83d49a; }
 
 #composer { padding: 8px 10px; border-top: 1px solid var(--border); }
 #chip-bar { min-height: 20px; margin-bottom: 4px; }

@@ -1,0 +1,37 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cwp-awp-contract:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout CodeWithPixie
+        uses: actions/checkout@v4
+
+      - name: Checkout AnythingWithPixie public API
+        uses: actions/checkout@v4
+        with:
+          repository: shiroxsigma/AnythingWithPixie
+          path: AnythingWithPixie
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run unit and AWP integration tests
+        env:
+          CWP_AWP_SRC: ./AnythingWithPixie/src
+        run: python -m pytest -q

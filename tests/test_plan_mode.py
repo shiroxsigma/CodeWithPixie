@@ -126,6 +126,7 @@ def test_plan_session_engine_profile(tmp_path):
     )
     ctx = session._engine.context
     assert ctx.fixed_tool_set == engine_adapter.PLAN_TOOLS
+    assert session._engine.profile.name == "plan"
     assert not ctx.fixed_tool_set.intersection(engine_adapter._core.DESTRUCTIVE_TOOLS)
 
 
@@ -137,10 +138,24 @@ class _FakePlanSession(engine_adapter.HistoryOps):
     def __init__(self):
         self.busy = threading.Lock()
         self.messages = []
+        self.snapshots = []
+        self.worksets = []
         self._init_turns()  # _turn_stream が往復を記録する（Engine 無しなので実質 no-op）
 
     def set_copilot(self, enabled):
         pass
+
+    def set_workspace_snapshot(self, current_file, current_content, context_files=()):
+        self.snapshots.append((current_file, current_content,
+                               [(f.path, f.content) for f in context_files]))
+
+    def build_workset(self, task, current_file, pinned_paths):
+        self.worksets.append((task, current_file, pinned_paths))
+        paths = ([current_file] if current_file else []) + [
+            path for path in pinned_paths if path != current_file]
+        return {"items": [{"path": path, "role": "target" if path == current_file else "pinned",
+                            "lines": 1, "chars": 7, "buffer": True} for path in paths],
+                "omitted": [], "stats": {}}
 
     def run_turn(self, user_text, emit):
         self.messages.append(user_text)
@@ -173,19 +188,28 @@ def _events(body):
 
 def test_plan_chat_streams_turn_contract(plan_sess):
     evs = _events({"message": "ダークモードを足したい", "session_id": "s1"})
-    assert [e["type"] for e in evs] == ["status", "token", "done"]
-    assert "```plan" in evs[1]["text"]
+    assert [e["type"] for e in evs] == ["workset", "status", "token", "done"]
+    assert "```plan" in evs[2]["text"]
+    assert evs[1]["category"] == "tool" and evs[1]["tool"] == "read_file"
+    assert [event["sequence"] for event in evs] == [1, 2, 3, 4]
+    assert all(event["schema_version"] == 1 for event in evs)
     assert plan_sess.busy.acquire(blocking=False)  # ターン後に必ず解放されている
 
 
 def test_plan_chat_passes_editor_context(plan_sess):
     _events({"message": "この関数を整理したい", "session_id": "s1",
              "selection": "def foo():\n    pass",
-             "current_file": "src/a.py", "current_content": "def foo():\n    pass\n"})
+             "current_file": "src/a.py", "current_content": "UNSAVED = True\n",
+             "context_files": [{"path": "src/b.py", "content": "B = 1\n"}]})
     sent = plan_sess.messages[0]
     assert "src/a.py" in sent
     assert "def foo():" in sent
+    assert "UNSAVED = True" not in sent and "B = 1" not in sent
     assert sent.endswith("この関数を整理したい")  # 本題は末尾（前置きに埋もれさせない）
+    assert plan_sess.snapshots == [
+        ("src/a.py", "UNSAVED = True\n", [("src/b.py", "B = 1\n")])]
+    assert plan_sess.worksets == [
+        ("この関数を整理したい", "src/a.py", ["src/b.py"])]
 
 
 def test_plan_chat_is_busy_serialized(plan_sess):
