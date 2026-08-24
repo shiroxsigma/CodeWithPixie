@@ -20,9 +20,9 @@ NoteWithPixie（安全・読取専用の Web エディタ）  … 不変
 - **CWP は AWP 内部に直接触れず、公開境界 `pixie_core` だけに依存**する。接点は
   「AWP/src を sys.path に前置して `import pixie_core` する」1点のみ（`app/engine_adapter.py`）。
 - `pixie_core` は engine/tools/state/registry/config 等14モジュールを収めた **`src/pixie_core/` パッケージ**。
-  `create_engine()` / `Engine.run_turn(output_fn, interactive_fn)` / `CancelTurn` / ツール分類 /
-  履歴編集 / WorkspaceSnapshot / Workset / journal付きChangeSet / 文書整合性検査を
-  `API_VERSION` 1.10 の公開面として提供する。
+  `AgentProfile` / `ContextPolicy` / `create_engine()` / `Engine.run_turn_events()` /
+  `Engine.get_turn_metrics()` / `CancelTurn` / 履歴編集 / WorkspaceSnapshot / Workset /
+  journal付きChangeSet / 文書整合性検査を `API_VERSION` 1.11 の公開面として提供する。
 - AWP の CLI・テストは `src/<name>.py` の **sys.modules エイリアスシム**でフラット import を維持
   （モジュール同一性を保持）。この物理移動で **CWP・NWP・AWP いずれも挙動不変**（AWP は 394 テストがグリーン）。
 
@@ -317,8 +317,8 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 
 | ファイル | 役割 |
 |---|---|
-| `app/engine_adapter.py` | **AWP との唯一の接点**。`pixie_core` だけを import し、出力の SSE 分類・承認ブリッジ・協調キャンセル・変更検知という **Web 固有部分**を担う（エンジン構築とターン制御は `pixie_core` に委譲） |
-| `pixie_core`（AWP 側）| AWP が公開する UI 非依存の埋め込み API。`create_engine()` / `Engine.run_turn()` / `CancelTurn` / ツール分類。AWP 内部への依存を1枚に集約した安定境界 |
+| `app/engine_adapter.py` | **AWP との唯一の接点**。Code / Note / Plan を `AgentProfile` で構築し、型付きイベントの SSE 変換・承認ブリッジ・協調キャンセル・変更検知という **Web 固有部分**を担う |
+| `pixie_core`（AWP 側）| AWP が公開する UI 非依存の埋め込み API。`AgentProfile` / `ContextPolicy` / `EngineEvent` / turn metrics を含む安定境界 |
 | `app/main.py` | FastAPI。静的配信・ファイル API・SSE チャット・`/api/approve`・`/api/interrupt`・文脈操作（`/api/chat/turn/delete`・`/api/context`・`/api/session/clear`） |
 | `app/compact.py` | `/compact`（会話の要約 → 履歴の差し替え）|
 | `app/files.py` | ワークスペース安全アクセス（表示・エディタ読み書き用） |
@@ -367,8 +367,10 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 
 残り（engine 深部に触れるため段階的に進める。各項目は AWP のテストを壊さないことを条件に着手）:
 
-1. 出力の**型付きイベント**再設計と、engine 内の直書き `print` 全廃（現状は stdout に逃がして握っている）。
-2. AWPの`AgentProfile`公開後、Code / Note / Planのセッション構築を1本へ統合。
+1. ~~出力の**型付きイベント**再設計と、engine 内の直書き `print` 全廃。~~ **完了** —
+   API 1.11の`EngineEvent`境界へ移行し、engine内通知も`output_fn`経由に統一した。
+2. ~~AWPの`AgentProfile`公開後、Code / Note / Planのセッション構築を1本へ統合。~~ **完了** —
+   API 1.11の共通プロファイル生成とネイティブイベント橋渡しを全3モードで使用する。
 3. `AppContext` を「実行設定(core)」と「UI 機能(app)」に分離。
 4. write の**物理サンドボックス**（現状はworkspace限定＋承認のみ）、権限 allowlist。
 
@@ -376,8 +378,10 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 - 参照境界: `../AnythingWithPixie/src/pixie_core/`。
 - CWP は起動時に`pixie_core.API_VERSION`とツール登録数を検証し、**1.10以上を必須**とする。
 - `/api/status`はバージョン番号に加えて、公開メソッドから検出した`capabilities`を返す。
-  WorkspaceSnapshot / Workset / ChangeSet / 履歴 / 将来のContextPolicy・型付きイベントを個別判定する。
+  WorkspaceSnapshot / Workset / ChangeSet / 履歴 / AgentProfile / ContextPolicy / 型付きイベント /
+  turn metricsを個別判定する。
 - CWPのSSEは`schema_version`、`turn_id`、単調増加する`sequence`を持つ。旧AWPのstatus文字列も
   CWP境界で`category` / `phase` / `tool`へ正規化するため、フロントは構造化フィールドを優先できる。
+  API 1.11ではターン完了時に`turn_metrics`も配信し、LLM呼出数・ツール回数・終了理由を表示する。
 - `.github/workflows/test.yml`はAWPもチェックアウトし、Python 3.12 / 3.13で統合テストを実行する。
 - AWP を更新して境界 API を変えた場合は `pixie_core.API_VERSION` を上げ、本 README も更新すること。

@@ -520,6 +520,23 @@ class _EngineStreamOps:
             show_thinking=show_thinking,
         )
 
+    def _replace_profile(self, *, tool_set, active_packs) -> None:
+        """Keep the public profile synchronized with runtime UI toggles."""
+        current = getattr(self._engine, "profile", None)
+        profile_type = getattr(getattr(self, "_core", None), "AgentProfile", None)
+        setter = getattr(self._engine, "set_profile", None)
+        if current is None or not callable(profile_type) or not callable(setter):
+            self._engine.context.fixed_tool_set = tool_set
+            self._engine.context.active_packs = set(active_packs)
+            return
+        setter(profile_type(
+            name=current.name,
+            tool_set=tool_set,
+            system_suffix=current.system_suffix,
+            active_packs=active_packs,
+            context_policy=current.context_policy,
+        ))
+
 
 def _register_copilot_tool(pixie_core) -> None:
     """CWP 固有の ask_copilot ツールを AWP レジストリに登録する（pack="copilot"）。
@@ -902,8 +919,10 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
 
     def set_copilot(self, enabled: bool) -> None:
         """このセッションで ask_copilot ツールの提示を on/off する（context.active_packs 経由）。"""
-        ctx = self._engine.context
-        ctx.active_packs = {"copilot"} if enabled else set()
+        self._replace_profile(
+            tool_set=self._engine.context.fixed_tool_set,
+            active_packs={"copilot"} if enabled else set(),
+        )
 
     def set_plan_phase(self, on: bool) -> None:
         """Code モードの plan-first サブモード: on の間だけ提示ツールを読み取り専用
@@ -914,7 +933,10 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         計画フェーズのターンはこの制限下で ```plan フェンスの計画だけを出し、承認後
         フロントが計画を次の指示として送り直すことで、フルツールの通常ターンに移る。
         """
-        self._engine.context.fixed_tool_set = frozenset(PLAN_TOOLS) if on else None
+        self._replace_profile(
+            tool_set=frozenset(PLAN_TOOLS) if on else None,
+            active_packs=getattr(self._engine.context, "active_packs", set()),
+        )
 
     def set_stream_timeout(self, overall: float) -> None:
         """LLM ストリームの打ち切り秒（思考許容時間に追随させる）。API 1.5 未満では無視。"""
@@ -1058,7 +1080,10 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     def set_copilot(self, enabled: bool) -> None:
         """ask_copilot の提示を on/off する。次ターン（次の run_turn）から反映される。"""
         self._allowed = self._allowed_set(enabled)
-        self._engine.context.fixed_tool_set = self._allowed
+        self._replace_profile(
+            tool_set=self._allowed,
+            active_packs={"copilot"} if enabled else set(),
+        )
 
     #: LLM ストリーム打ち切り秒の設定（AgentSession と同一実装を共有）。
     set_stream_timeout = AgentSession.set_stream_timeout

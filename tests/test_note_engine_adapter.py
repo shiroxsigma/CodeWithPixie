@@ -211,6 +211,8 @@ def test_note_session_engine_profile(tmp_path):
     # copilot off → 次ターンの提示集合から外れる
     session.set_copilot(False)
     assert ctx.fixed_tool_set == engine_adapter.NOTE_TOOLS
+    assert session._engine.profile.tool_set == engine_adapter.NOTE_TOOLS
+    assert session._engine.profile.active_packs == frozenset()
 
     # NoteもCodeと同じ未保存バッファ／Workset経路を使う。
     (tmp_path / "memo.md").write_text("disk\n", encoding="utf-8")
