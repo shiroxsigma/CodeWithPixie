@@ -3067,7 +3067,9 @@ async function sendChat() {
         if (!line.startsWith("data:")) continue;
         let ev;
         try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
-        handleEvent(ev);
+        // files_changed は開いているファイルの再読込を伴う。完了を待たないと
+        // ターン終了後も Monaco に変更前の内容が残ることがある。
+        await handleEvent(ev);
       }
     }
   } catch (e) {
@@ -3195,7 +3197,7 @@ function noteAfterTurn(assistantEl, message, visible, applyTarget, cancelled) {
   }
 }
 
-function handleEvent(ev) {
+async function handleEvent(ev) {
   switch (ev.type) {
     case "token":
       // text 欠落のイベントで文字列 "undefined" を本文へ混ぜない（search ブロックが壊れる）
@@ -3224,7 +3226,7 @@ function handleEvent(ev) {
       renderWorkset(ev.workset);
       break;
     case "files_changed":
-      onFilesChanged(ev.paths);
+      await onFilesChanged(ev.paths || []);
       break;
     case "turn_metrics": {
       const metrics = ev.metrics || {};
