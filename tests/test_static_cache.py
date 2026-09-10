@@ -56,5 +56,5 @@ def test_index_is_revalidated_and_versions_entry_points():
     r = client.get("/")
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-cache"
-    assert "/static/js/app.js?v=" in r.text
+    assert "/static/vue/app.js?v=" in r.text
     assert "/static/css/style.css?v=" in r.text

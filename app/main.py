@@ -1390,7 +1390,7 @@ mode.register_reset_hook(lambda: _manager.clear() if _manager is not None else N
 # URL にクエリが付かず、更新しても古い版が使われ続ける（実際に「バーにボタンが増えない」
 # 事故が起きた: app.js は最新なのに markdown.js だけ数世代前、という状態になる）。
 # 本命の対策は下の NoCacheStatic（毎回必ず問い合わせる）。ここは補助。
-_BUILT_ASSETS = ("js/app.js", "css/style.css")
+_BUILT_ASSETS = ("vue/app.js", "css/style.css")
 
 
 @app.get("/")
