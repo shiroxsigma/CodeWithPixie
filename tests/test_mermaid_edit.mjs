@@ -1,11 +1,11 @@
-// static/js/mermaid-edit.js の純粋関数（パーサ＋編集列の生成）のテスト。
+// frontend/src/legacy/mermaid-edit.js の純粋関数（パーサ＋編集列の生成）のテスト。
 // DOM に触らない部分だけを対象にしているので node だけで動く。
 // pytest からは tests/test_mermaid_edit_js.py が呼ぶ（node が無ければ skip）。
 //
 //   node tests/test_mermaid_edit.mjs
 
 import assert from "node:assert/strict";
-import * as M from "../static/js/mermaid-edit.js";
+import * as M from "../frontend/src/legacy/mermaid-edit.js";
 
 let pass = 0;
 const t = (name, fn) => {

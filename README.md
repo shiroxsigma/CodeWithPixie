@@ -28,6 +28,19 @@ NoteWithPixie（安全・読取専用の Web エディタ）  … 不変
 
 ## セットアップ
 
+正式UIは **Vue 3 + TypeScript + Vite**、バックエンドは **FastAPI** です。
+通常利用ではビルド済みの `static/vue/` が配信されるため、Node.jsは不要です。
+UIを変更する開発者だけが `frontend/` で次を実行します。
+
+```bat
+cd frontend
+npm ci
+npm run build
+```
+
+変更前の確認には `npm run typecheck`、`npm test`、`npm run format:check` を使います。
+`static/vue/` はViteの生成物なので、直接編集しないでください。
+
 前提: **LM Studio** で OpenAI 互換サーバを起動しモデルをロード（例 `http://localhost:1234/v1`）。
 
 Python環境と必要パッケージをまとめて準備する場合は、`setup.bat`を実行してください。
@@ -275,7 +288,7 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
 | `/code` `/note` `/plan` | モード切替（バッジのクリックと同じ。狙ったモードへ一発で） |
 | `/copilot` `/copilot!` | 上記の Copilot 連携 |
 
-`/help` `/undo` などブラウザで完結するものは `static/js/app.js` の `LOCAL_COMMANDS`、
+`/help` `/undo` などブラウザで完結するものは `frontend/src/legacy/app.js` の `LOCAL_COMMANDS`、
 `/compact` `/copilot` などエージェントを動かすものは `POST /api/chat` の先頭で分岐する。
 **知らない `/...` はコマンド扱いしない**（`/api/chat のバグを直して` のような依頼を拒まないため）。
 
@@ -326,12 +339,13 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 | `app/history.py` | ローカル履歴（保存前の内容を `.pixie_history/` へ退避・世代の間引き・復元） |
 | `app/patch.py` | search/replace の3層ファジー適用（手動レビュー用・NWP 由来） |
 | `app/config.py` | 設定（`CWP_*` / config.json） |
-| `static/js/app.js` | フロント本体（ツリー・エディタ・保存・プレビュー・チャット・承認バー） |
-| `static/js/api.js` | バックエンド呼び出しの共通ラッパ。4xx/5xx を `ApiError` にして握り潰さない（NWP 由来） |
-| `static/js/markdown.js` | markdown-it / mermaid 描画。チャット返信とプレビューで共用（NWP 由来） |
-| `static/js/mermaid-export.js` | 描画済み SVG → PNG 変換とクリップボード。保存先の決定は app.js が `setDiagramSaver` で注入する |
-| `static/js/mermaid-edit.js` | フローチャートの双方向編集: ソースのパーサ（span付きモデル）＋編集操作（最小編集列の生成）＋プレビュー上の編集モードDOM。適用は app.js が `executeEdits` で行う |
-| `static/js/confluence.js` | 「📥 貼付」の HTML→Markdown 変換（turndown + GFM プラグインの UMD。未取得なら縮退） |
+| `frontend/src/` | Vue 3 + TypeScriptの画面コンポーネントとViteエントリポイント |
+| `frontend/src/legacy/app.js` | 段階移行中のフロントコントローラー（ツリー・エディタ・保存・チャット・承認バー） |
+| `frontend/src/legacy/api.js` | バックエンド呼び出しの共通ラッパ。4xx/5xxを`ApiError`にして握り潰さない |
+| `frontend/src/legacy/markdown.js` | markdown-it / mermaid描画。チャット返信とプレビューで共用 |
+| `frontend/src/legacy/mermaid-export.js` | 描画済みSVGからPNGへの変換とクリップボード連携 |
+| `frontend/src/legacy/mermaid-edit.js` | フローチャートのパーサ、編集操作、プレビュー上の編集モードDOM |
+| `frontend/src/legacy/confluence.js` | 「📥 貼付」のHTMLからMarkdownへの変換 |
 | `static/vendor/` | Monaco / markdown-it / mermaid / turndown（`scripts/fetch_*.py` で取得） |
 
 ### ターン1回の流れ

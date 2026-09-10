@@ -1909,7 +1909,7 @@ async function copyRichPreview() {
 
 // ---- Confluence / Web からの貼り付け（HTML → Markdown 変換） ------------------
 // Confluence のページをブラウザでコピー（Ctrl+C）するとクリップボードに
-// text/html が入る。それを Turndown（static/js/confluence.js、要ベンダリング）で
+// text/html が入る。それを Turndown（legacy/confluence.js、要ベンダリング）で
 // Markdown にして、エディタのカーソル位置へ挿入する。認証もAPIも要らない往復の片側。
 
 let cfPendingHtml = null;  // 貼り付け/読込で捕まえたHTML。null = プレーンテキストのみ

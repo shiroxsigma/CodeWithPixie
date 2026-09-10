@@ -2,7 +2,7 @@
 
 サーバが Cache-Control を返さないと、ブラウザは Last-Modified からの経過時間で
 「推測の鮮度」を決めて再利用し、サーバへ問い合わせすらしない。その結果
-app.js だけ新しく markdown.js は数世代前、という状態が実機で起きた
+Vue のエントリポイントや分割チャンクが古いまま、という状態を防ぐ
 （図のバーに拡大縮小ボタンが増えない、という形で表面化した）。
 index.html の ?v= 書き換えは直接参照される 2 ファイルにしか効かないので、
 ES モジュールの import 先まで守るにはヘッダ側が要る。
@@ -34,8 +34,8 @@ def test_legacy_favicon_is_explicitly_cleared():
 
 
 def test_static_module_is_revalidated():
-    """app.js から import されるだけのモジュールにも no-cache が付く。"""
-    r = client.get("/static/js/markdown.js")
+    """Viteのエントリポイントにもno-cacheが付く。"""
+    r = client.get("/static/vue/app.js")
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-cache"
     # no-store ではない: 変わっていなければ 304 で済ませたい
@@ -44,8 +44,8 @@ def test_static_module_is_revalidated():
 
 def test_static_not_modified_keeps_cache_control():
     """304 のときもヘッダが落ちない（落ちると次回また推測キャッシュに戻る）。"""
-    first = client.get("/static/js/markdown.js")
-    again = client.get("/static/js/markdown.js",
+    first = client.get("/static/vue/app.js")
+    again = client.get("/static/vue/app.js",
                        headers={"if-none-match": first.headers["etag"]})
     assert again.status_code == 304
     assert again.headers["cache-control"] == "no-cache"

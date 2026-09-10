@@ -5,7 +5,7 @@ NoteWithPixie/app/mdflow.py からの移植（Stage C）。二重実装。
 
 D:\\Workspace\\MdFlow の mdflow/{mapping,mermaid,frontmatter}.py からの移植
 （PPT 関連の payload/pptx_io/upsert_preset は除外）。プレビュー描画は
-static/js/mdflow.js が同じ仕様を JS で実装しており、正規表現・評価の意味論は
+frontend/src/legacy/mdflow.js が同じ仕様を JS で実装しており、正規表現・評価の意味論は
 本モジュールと一致させること（乖離すると「プレビューでは描けるのに
 /api/patch 検証では警告」というちぐはぐが起きる）。
 
@@ -40,7 +40,7 @@ import yaml
 # mdflow-mapping ブロック（移植元: mdflow/mapping.py）
 # --------------------------------------------------------------------------- #
 
-# static/js/mdflow.js の MAPPING_BLOCK_RE と同一パターン
+# frontend/src/legacy/mdflow.js の MAPPING_BLOCK_RE と同一パターン
 _BLOCK_RE = re.compile(
     r"^```[ \t]*(?:yaml[ \t]+)?mdflow-mapping[ \t]*\n(.*?)^```",
     re.DOTALL | re.MULTILINE,
@@ -397,7 +397,7 @@ def block_by_id(blocks: list[MermaidBlock], diagram_id: str) -> Optional[Mermaid
 # YAML Frontmatter（選択状態＝単一ソースの正。移植元: mdflow/frontmatter.py）
 # --------------------------------------------------------------------------- #
 
-# static/js/mdflow.js の FM_RE と同一パターン（先頭の BOM も許容）
+# frontend/src/legacy/mdflow.js の FM_RE と同一パターン（先頭の BOM も許容）
 _FM_RE = re.compile(r"^﻿?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.DOTALL)
 
 
