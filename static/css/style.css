@@ -19,6 +19,18 @@ body {
   color: var(--fg);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+/* Vue のマウント要素が、従来 body 直下だった header / #split の高さ制約を
+   引き継ぐ。min-height:0 が無いと Markdown の内容高に押されてページ全体が伸び、
+   右のファイル一覧とチャットまで画面外へスクロールしてしまう。 */
+#app {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* --- top bar --- */
