@@ -363,7 +363,8 @@ function buildExportBar(box, meta, zoom = null) {
 
   // PNG 化は「表示されている SVG」から行う。mdflow のプリセット切替でハイライトが
   // 変わった状態も、見えているとおりに書き出される。
-  const png = () => svgToPngBlob(box.querySelector("svg"), { background: pngBackground() });
+  const png = (background = pngBackground()) =>
+    svgToPngBlob(box.querySelector("svg"), { background });
 
   bar.appendChild(status);  // 結果は左、ボタンは右
   // 拡大縮小は viewBox が読めた図だけ（自然サイズが分からないと倍率を決められない）
@@ -403,11 +404,23 @@ function buildExportBar(box, meta, zoom = null) {
       return "✓ コピーしました";
     }));
   bar.appendChild(copy);
+
+  const copyWhite = document.createElement("button");
+  copyWhite.type = "button";
+  copyWhite.title = "白背景のPNGをクリップボードへコピーする（資料や白いスライド向け）";
+  copyWhite.textContent = "白でコピー";
+  copyWhite.addEventListener("click", () =>
+    run(copyWhite, "白背景でコピーしました", async () => {
+      await copyPngToClipboard(await png(pngBackground("white")));
+      return "✓ 白背景でコピーしました";
+    }));
+  bar.appendChild(copyWhite);
   return bar;
 }
 
-/** PNG の下地色。図はダークテーマで描かれているので、透明のままだと白地で読めない。 */
-export function pngBackground() {
+/** PNG の下地色。通常はテーマ色、資料向けコピーでは明示的に白を使う。 */
+export function pngBackground(mode = "theme") {
+  if (mode === "white") return "#ffffff";
   const v = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
   return v || "#1e1e2a";
 }
