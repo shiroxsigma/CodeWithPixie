@@ -1,3 +1,25 @@
+<script setup lang="ts">
+import { computed } from "vue";
+import { chatRuntime } from "../chat/runtime";
+
+const { state: chat, busy } = chatRuntime;
+const phaseLabel = computed(
+  () =>
+    ({
+      idle: "",
+      switching: "会話切替中",
+      sending: "送信中",
+      running: "実行中",
+      approval: "承認待ち",
+      stopping: "中断中",
+      completed: "完了",
+      cancelled: "中断しました",
+      limited: "実行上限に達しました",
+      failed: "失敗",
+    })[chat.phase],
+);
+</script>
+
 <template>
   <main id="split">
     <!-- 左：コードエディタ -->
@@ -227,7 +249,19 @@
           ></textarea>
           <div class="composer-actions">
             <span class="hint">Ctrl+Enter で送信</span>
-            <button id="send-btn">送信</button>
+            <span role="status" aria-live="polite" :title="chat.error">{{
+              phaseLabel
+            }}</span>
+            <button
+              id="send-btn"
+              :class="{ stop: busy }"
+              :disabled="
+                chat.phase === 'stopping' || chat.phase === 'switching'
+              "
+              :title="busy ? 'エージェントの実行を中断する' : ''"
+            >
+              {{ busy ? "停止" : "送信" }}
+            </button>
           </div>
           <!-- Copilot 取り込みバー（Note モード専用。設定モーダル側の #copilot-* とは別 id） -->
           <div id="copilot-bar" class="note-only">

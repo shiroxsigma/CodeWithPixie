@@ -17,6 +17,7 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+from pydantic import Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_JSON = PROJECT_ROOT / "config.json"
@@ -106,6 +107,9 @@ class Settings(BaseSettings):
     # 超えると engine が思考を打ち切り「結論生成に移ります」で締める。難しい依頼で打ち切られる
     # なら伸ばす。伸ばすほど1ターンの待ち時間が延びる（pixie_core API 1.5 で実行時変更）。
     think_budget_sec: int = 90
+    turn_timeout_sec: float = Field(default=600.0, gt=0, allow_inf_nan=False)
+    turn_max_llm_calls: int = Field(default=32, gt=0)
+    turn_max_tool_calls: int = Field(default=100, gt=0)
 
 
 settings = Settings()

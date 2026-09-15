@@ -23,13 +23,21 @@ import re
 import sys
 import threading
 import uuid
+from contextvars import ContextVar
 
 from pathlib import Path
 
 from . import config, files, note_prompts, note_tools, patch
+from .python_kernel import KernelError, PythonKernel
 from .config import settings
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+# pixie_core はツール実行時にもターンの ContextVar を引き継ぐ。これによりグローバルに
+# 登録されたツールから、実行中の会話専用カーネルへ安全にルーティングできる。
+_ACTIVE_AGENT_SESSION: ContextVar["AgentSession | None"] = ContextVar(
+    "cwp_active_agent_session", default=None
+)
 
 #: 破壊的ツールのうち、承認をスキップして自動実行する低リスクの状態/参照系。
 #: （pixie_core.DESTRUCTIVE_TOOLS からこれらを除いた集合が「承認必須」になる）
@@ -341,21 +349,22 @@ def bootstrap(awp_src):
     import pixie_core  # AWP との唯一の接点
 
     ver = str(getattr(pixie_core, "API_VERSION", ""))
-    # 1.10+ が必須: Workset/ChangeSetに加え、Markdown節操作と文書整合性検査を使うため。
+    # 1.12+ が必須: ターン制御と中断可能なLLM通信を使うため。
     try:
         major, minor = (int(x) for x in ver.split(".")[:2])
     except ValueError:
         major, minor = 0, 0
     global HISTORY_API
     HISTORY_API = (major, minor) >= (1, 6)
-    if (major, minor) < (1, 10):
-        raise RuntimeError(f"pixie_core API 1.10 以上が必要です（現在: {ver or '?'}）。"
+    if (major, minor) < (1, 12):
+        raise RuntimeError(f"pixie_core API 1.12 以上が必要です（現在: {ver or '?'}）。"
                            "AnythingWithPixie を更新してください。")
     if pixie_core.tool_count() <= 0:  # 起動スモーク
         raise RuntimeError("pixie_core: ツールが1つも登録されていません")
 
     _register_copilot_tool(pixie_core)
     _register_note_tools(pixie_core)
+    _register_python_tools(pixie_core)
 
     _core = pixie_core
     _capabilities = detect_capabilities(pixie_core)
@@ -422,10 +431,12 @@ def apply_think_budget(seconds, sessions=()) -> int:
     v = int(seconds)
     if _core is None or not hasattr(_core, "set_think_budget"):
         return v
-    v = _core.set_think_budget(v)
+    if not hasattr(_core, "TurnControl"):
+        v = _core.set_think_budget(v)
     timeout = stream_timeout_sec(v)
     for s in (*sessions, _note_session, _plan_session):
         if s is not None:
+            s._think_budget_sec = v
             s.set_stream_timeout(timeout)
     return v
 
@@ -494,6 +505,44 @@ def _create_profiled_engine(core, server: dict, workspace: str, *,
 class _EngineStreamOps:
     """Shared AWP native-event bridge for Code, Note, and Plan sessions."""
 
+    def _new_control(self):
+        core = getattr(self, "_core", None)
+        if core is None or not hasattr(core, "TurnControl"):
+            return None
+        think = getattr(self, "_think_budget_sec", settings.think_budget_sec)
+        return core.TurnControl(core.TurnLimits(
+            timeout=settings.turn_timeout_sec,
+            llm_calls=settings.turn_max_llm_calls,
+            tool_calls=settings.turn_max_tool_calls,
+            think_seconds=think,
+            stream_timeout=stream_timeout_sec(think),
+        ))
+
+    def reserve_turn(self):
+        with self._execution_lock:
+            if getattr(self, "_closed", False) or not self.busy.acquire(blocking=False):
+                return False
+            try:
+                self._control = self._new_control()
+                self._cancel = False
+                self.outcome = {"status": "completed", "reason": "completed"}
+            except BaseException:
+                self.busy.release()
+                raise
+            return True
+
+    def cancel_execution(self):
+        with self._execution_lock:
+            self._cancel = True
+            control = getattr(self, "_control", None)
+            if control is not None:
+                control.cancel()
+
+    def release_turn(self):
+        with self._execution_lock:
+            self._control = None
+            self.busy.release()
+
     def _on_engine_event(self, event) -> None:
         value = event.as_dict() if callable(getattr(event, "as_dict", None)) else dict(event)
         event_type = value.get("type")
@@ -501,23 +550,38 @@ class _EngineStreamOps:
             self._emit(value.get("text", ""), end=value.get("end", ""),
                        flush=bool(value.get("flush", False)))
         elif event_type == "turn_completed":
+            reason = value.get("metrics", {}).get("exit_reason", "")
+            if reason.startswith(("llm_connection_error", "empty_response", "loop_force_exit")) or reason == "final_answer_acceptance_unresolved":
+                self.outcome = {"status": "failed", "reason": reason}
+            elif reason.startswith(("max_tool_calls", "iteration_limit", "continuation_limit")):
+                self.outcome = {"status": "limit_reached", "reason": reason}
+            elif reason.startswith("user_rejected"):
+                self.outcome = {"status": "cancelled", "reason": reason}
             self._emit_event({"type": "turn_metrics", "metrics": value.get("metrics", {})})
 
     def _run_engine_stream(self, user_text: str, *, interactive_fn,
                            show_thinking: bool = False):
         runner = getattr(self._engine, "run_turn_events", None)
+        control = getattr(self, "_control", None)
+        if control is None:
+            control = self._new_control()
+            if control is not None and getattr(self, "_cancel", False):
+                control.cancel()
+        options = {"control": control} if control is not None else {}
         if callable(runner):
             return runner(
                 user_text,
                 event_fn=self._on_engine_event,
                 interactive_fn=interactive_fn,
                 show_thinking=show_thinking,
+                **options,
             )
         return self._engine.run_turn(
             user_text,
             output_fn=self._emit,
             interactive_fn=interactive_fn,
             show_thinking=show_thinking,
+            **options,
         )
 
     def _replace_profile(self, *, tool_set, active_packs) -> None:
@@ -564,6 +628,65 @@ def _register_copilot_tool(pixie_core) -> None:
     )
     def ask_copilot(question, files=None):  # noqa: ANN001 - AWP ツールは動的引数
         return copilot.ask(str(question), files or [])
+
+
+def _register_python_tools(pixie_core) -> None:
+    """Codeモード用の会話単位・永続Pythonカーネルを登録する。"""
+
+    @pixie_core.register_tool(
+        name="execute_python",
+        description=("同じ会話内で変数・importを保持するPythonセルを実行する。コード編集後の"
+                     "動作確認、段階的なデータ調査、前回結果を使った追加検証に使う。"),
+        schema={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "実行するPythonコード"},
+                "timeout": {"type": "number", "minimum": 0.1, "maximum": 120,
+                            "description": "タイムアウト秒（既定30秒）"},
+            },
+            "required": ["code"],
+        },
+        prompt_desc="execute_python: 状態を保持するPythonセルでコードを実行・検証する",
+    )
+    def execute_python(code: str, timeout: float = 30.0) -> str:
+        session = _ACTIVE_AGENT_SESSION.get()
+        if session is None:
+            return "エラー: 実行中のCodeセッションがありません。"
+
+        def stream(event: dict) -> None:
+            text = str(event.get("text") or "")
+            if text:
+                shown = text if len(text) <= 4000 else text[:4000] + "\n…（表示省略）"
+                session._emit_event({
+                    "type": "status", "category": "python_output",
+                    "text": f"🐍 {event.get('type')}: {shown}",
+                })
+
+        try:
+            return session.python_kernel.execute(
+                str(code or ""), timeout, stream,
+                cancelled=lambda: getattr(session, "_cancel", False),
+            )
+        except (KernelError, OSError, ValueError) as exc:
+            return f"エラー: {exc}"
+
+    @pixie_core.register_tool(
+        name="restart_python_kernel",
+        description="この会話のPython実行状態（変数・import）を破棄し、空のカーネルへ戻す。",
+        schema={"type": "object", "properties": {}},
+        prompt_desc="restart_python_kernel: 会話のPython状態をリセットする",
+    )
+    def restart_python_kernel() -> str:
+        session = _ACTIVE_AGENT_SESSION.get()
+        if session is None:
+            return "エラー: 実行中のCodeセッションがありません。"
+        if getattr(session, "_cancel", False):
+            return "エラー: Python実行は停止されました。"
+        try:
+            session.python_kernel.restart()
+        except (KernelError, OSError, ValueError) as exc:
+            return f"エラー: {exc}"
+        return "Pythonカーネルを再起動しました。変数とimportは消去されました。"
 
 
 def _register_note_tools(pixie_core) -> None:
@@ -759,14 +882,20 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         )  # 自セッション専用の Engine
         self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))
 
-        self._approval_required = frozenset(core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
+        self._approval_required = (
+            frozenset(core.DESTRUCTIVE_TOOLS) - APPROVAL_SKIP
+        ) | {"execute_python"}
         self.tool_count = self._engine.tool_count
         self.model_name = self._engine.model_name
         self.workspace = getattr(self._engine, "workspace", None)  # このセッションの作業フォルダ
+        self.python_kernel = PythonKernel(self.workspace or workspace)
         self._init_workspace_context()
 
         # ターン実行の排他（1セッション）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()
+        self._execution_lock = threading.RLock()
+        self._control = None
+        self._closed = False
         self._init_turns()  # 往復の記録（削除・/compact 用。HistoryOps）
 
         # 承認の相関 ID とイベント。
@@ -777,7 +906,6 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
 
         # ターン単位の状態。
         self._emit_event = None
-        self._cancel = False
         self._classifier = _StreamClassifier()
 
         # ⏪ ロールバック用: {turn_id: {相対パス: ターン開始前のバイト列}}。
@@ -787,24 +915,38 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
 
     # ---- ターン実行（worker スレッドで呼ばれる） ----
     def run_turn(self, message: str, emit_event, approval_timeout: float = 0.0) -> None:
+        owned = getattr(self, "_control", None) is None and not self.busy.locked()
+        if owned and not self.reserve_turn():
+            raise RuntimeError("Session is busy or closed")
         self._emit_event = emit_event
-        self._cancel = False
         self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         self._approval_timeout = approval_timeout if approval_timeout and approval_timeout > 0 else None
 
         before = files.snapshot_mtimes()
+        token = _ACTIVE_AGENT_SESSION.set(self)
         try:
             # ターンシーケンス(reset→user追加→run_graph)は pixie_core 側に集約済み。
             self._run_engine_stream(message, interactive_fn=self._approve)
+        except getattr(self._core, "TurnStopped", self._CancelTurn) as exc:
+            reason = getattr(exc, "reason", "cancelled")
+            self.outcome = {"status": "cancelled" if reason == "cancelled" else "limit_reached", "reason": reason}
+            emit_event({"type": "status", "text": reason})
         except self._CancelTurn:
+            self.outcome = {"status": "cancelled", "reason": "cancelled"}
             emit_event({"type": "status", "text": "中断しました。"})
-        except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
+        except Exception as e:
+            self.outcome = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}  # worker の例外は SSE に流して握る（ハング防止）
             emit_event({"type": "error", "text": f"{type(e).__name__}: {e}"})
         finally:
-            self._emit_flush()
-            changed = files.diff_changed(before)
-            if changed:
-                emit_event({"type": "files_changed", "paths": changed})
+            try:
+                _ACTIVE_AGENT_SESSION.reset(token)
+                self._emit_flush()
+                changed = files.diff_changed(before)
+                if changed:
+                    emit_event({"type": "files_changed", "paths": changed})
+            finally:
+                if owned:
+                    self.release_turn()
 
     # ---- output_fn: engine → SSE イベント分類 ----
     def _emit(self, text, end="", flush=False):
@@ -856,8 +998,23 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             event["changeset"] = change_preview
         self._emit_event(event)
 
-        got = self._approval_event.wait(self._approval_timeout)
-        self._pending_id = 0
+        import time
+        deadline = time.monotonic() + self._approval_timeout if self._approval_timeout else None
+        try:
+            while True:
+                control = getattr(self, "_control", None)
+                if control is not None:
+                    control.check()
+                if self._cancel:
+                    raise self._CancelTurn()
+                if deadline is not None and time.monotonic() >= deadline:
+                    got = False
+                    break
+                if self._approval_event.wait(min(0.1, max(0, deadline - time.monotonic())) if deadline else 0.1):
+                    got = True
+                    break
+        finally:
+            self._pending_id = 0
         if self._cancel:
             return ([], None)
         if not got:
@@ -873,6 +1030,9 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             # ファイル編集だけのバッチはAWP ChangeSetで一括適用する。これにより承認から
             # 実適用までのbase hash競合を再検査し、全ファイルをjournalから巻き戻せる。
             if change_spec is not None and change_preview and change_preview.get("ok"):
+                control = getattr(self, "_control", None)
+                if control is not None:
+                    control.charge("tool_calls", len(tool_calls))
                 result = self._engine.apply_changeset(change_spec)
                 if result.get("applied"):
                     paths = [item["path"] for item in result.get("changes", [])]
@@ -945,8 +1105,16 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             setter(overall)
 
     def cancel(self) -> None:
-        self._cancel = True
+        self.cancel_execution()
         self._approval_event.set()  # 承認待ちを解放（_approve が [] を返して終了）
+        self.python_kernel.stop()
+
+    def close(self) -> None:
+        """セッションに属する子プロセスを解放する。"""
+        with self._execution_lock:
+            self._closed = True
+            self.cancel()
+            self.python_kernel.close()
 
     # ---- ⏪ ロールバック（ターン開始前のスナップショット） ----
     def take_turn_snapshot(self, turn_id: int) -> None:
@@ -1057,12 +1225,14 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
 
         # ターン実行の排他（1セッション1ターン）。main.py が非ブロッキングで取得する。
         self.busy = threading.Lock()
+        self._execution_lock = threading.RLock()
+        self._control = None
+        self._closed = False
         self._init_turns()  # 往復の記録（削除・/compact 用。HistoryOps）
         self.seeded = False  # サイドカー履歴からのシード済みフラグ（セッション生成後の初回のみ）
 
         # ターン単位の状態。
         self._emit_event = None
-        self._cancel = False
         self._classifier = _StreamClassifier()
 
     @classmethod
@@ -1090,8 +1260,10 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
 
     # ---- ターン実行（worker スレッドで呼ばれる） ----
     def run_turn(self, user_text: str, emit_event) -> None:
+        owned = getattr(self, "_control", None) is None and not self.busy.locked()
+        if owned and not self.reserve_turn():
+            raise RuntimeError("Session is busy or closed")
         self._emit_event = emit_event
-        self._cancel = False
         self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         try:
             self._run_engine_stream(
@@ -1099,12 +1271,22 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
                 interactive_fn=self._guard,
                 show_thinking=settings.show_thinking,
             )
+        except getattr(self._core, "TurnStopped", self._CancelTurn) as exc:
+            reason = getattr(exc, "reason", "cancelled")
+            self.outcome = {"status": "cancelled" if reason == "cancelled" else "limit_reached", "reason": reason}
+            emit_event({"type": "status", "text": reason})
         except self._CancelTurn:
+            self.outcome = {"status": "cancelled", "reason": "cancelled"}
             emit_event({"type": "status", "text": "中断しました。"})
-        except Exception as e:  # worker の例外は SSE に流して握る（ハング防止）
+        except Exception as e:
+            self.outcome = {"status": "failed", "reason": f"{type(e).__name__}: {e}"}  # worker の例外は SSE に流して握る（ハング防止）
             emit_event({"type": "error", "text": f"{type(e).__name__}: {e}"})
         finally:
-            self._emit_flush()  # 改行で終わらなかったステータス行を出し切る
+            try:
+                self._emit_flush()  # 改行で終わらなかったステータス行を出し切る
+            finally:
+                if owned:
+                    self.release_turn()
 
     # ---- output_fn: engine → SSE イベント分類（AgentSession と同一ロジックを共有） ----
     _emit = AgentSession._emit
@@ -1130,7 +1312,7 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
 
     def cancel(self) -> None:
         """協調キャンセル。次の output_fn / interactive_fn 呼び出しで CancelTurn が飛ぶ。"""
-        self._cancel = True
+        self.cancel_execution()
 
 
 class PlanSession(NoteSession):

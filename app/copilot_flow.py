@@ -183,7 +183,7 @@ def run(sess, *, compose_text: str, user_ask: str, attach_files: list[str],
         フェーズ間で必ず見る: run_turn は入口で _cancel を False に戻すので、
         Copilot 待ちの数十秒の間に切断されても、見ないまま次のフェーズへ入ってしまう。
         """
-        return bool(getattr(sess, "_cancel", False))
+        return bool(getattr(sess, "_cancel", False)) or getattr(sess, "outcome", {}).get("status") in {"failed", "cancelled", "limit_reached"}
 
     # 組み立て中は ask_copilot を伏せる。この経路自体が Copilot への質問なので、
     # 途中で勝手にもう一度聞かれると数十秒を二重に払ったうえ質問が二重になる。

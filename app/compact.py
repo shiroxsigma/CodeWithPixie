@@ -124,7 +124,7 @@ def run(sess, *, focus: str, emit, approval_timeout: float = 0.0) -> None:
     else:
         sess.run_turn(build_prompt(focus), sink)
 
-    if getattr(sess, "_cancel", False):
+    if getattr(sess, "_cancel", False) or getattr(sess, "outcome", {}).get("status") in {"failed", "cancelled", "limit_reached"}:
         return  # 中断済み（run_turn 側が "⏹ 中断しました。" を出している）
 
     summary = extract_summary("".join(body))

@@ -7,6 +7,7 @@
 //   計画ビューに出し、承認したら Code モードへ切り替えてその計画を最初の指示として送る。
 // モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code /
 //   mode-plan で出し分け。
+import { chatRuntime, consumeChatStream } from "../chat/runtime";
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
 import {
   available as mdAvailable, pngBackground, renderInto, renderPlain, resetDiagramZoom,
@@ -24,6 +25,8 @@ function newSessionId() {
   return (crypto.randomUUID && crypto.randomUUID()) ||
     ("s-" + Math.random().toString(36).slice(2) + Date.now().toString(36));
 }
+
+chatRuntime.select(newSessionId());
 
 const state = {
   editor: null,
@@ -48,13 +51,13 @@ const state = {
   collapsedDirs: new Set(), // 折りたたみ中のフォルダ
   knownDirs: new Set(),     // 既出のフォルダ。初出だけを閉じる（開いた状態の記憶を壊さない）
   changedPaths: new Set(),  // 直近ターンでエージェントが変更したファイル
-  streaming: false,
-  abort: null,
+  get streaming() { return chatRuntime.busy.value; },
   assistantEl: null,        // 進行中ターンのアシスタント吹き出し
   assistantUi: null,        // beginAssistantStream のハンドル
   turnId: 0,                // 進行中ターンのサーバ側 ID（turn イベント。0 = 文脈編集不可）
   compacted: null,          // /compact の結果（compacted イベント）。ターン確定時に畳む
-  sessionId: newSessionId(),  // このタブ/会話のセッション。並行セッションはサーバ側で分離される。
+  get sessionId() { return chatRuntime.state.sessionId; },
+  set sessionId(value) { chatRuntime.select(value, chatRuntime.state.phase === "switching" ? chatRuntime.active : undefined); },  // 会話切替の完了まで送信をロックする。
 
   // --- モード（統合シェル）---
   mode: "code",             // "code" | "note" | "plan"。GET /api/mode で起動時に取得
@@ -317,37 +320,50 @@ async function switchMode(next, opts = {}) {
       !confirm(`${MODE_LABEL[next]} モードに切り替えますか？\n（会話セッションはリセットされます）`)) return false;
   // 自動保存は Note でしか動かない。Note から抜けると予約が宙に浮くので、
   // まだ Note のうちに確定させる（タイマーもここで落ちる）。
-  await flushAutosave();
-  let m;
+  const run = chatRuntime.begin("switching");
+  if (!run) return;
+  let failure = "";
   try {
-    m = await postJSON("/api/mode", { mode: next });
+    await flushAutosave();
+    let m;
+    try {
+      m = await postJSON("/api/mode", { mode: next });
+    } catch (e) {
+      failure = e.message;
+      alert("⚠️ モードを切り替えられません: " + e.message);
+      return false;
+    }
+    setModeState(m);
+    // 旧モードの会話表示・承認バーを持ち越さない（サーバ側もセッションリセット済み）。
+    // 計画の承認から Code へ移るときだけはログを残す（何を承認した流れなのかが読めるように）。
+    if (!opts.keepMessages) $("messages").innerHTML = "";
+    $("approval").classList.add("hidden");
+    $("approval").innerHTML = "";
+    state.assistantEl = null;
+    state.sessionId = newSessionId();
+    updateSessionInfo();
+    clearNoteState();
+    applyModeUI();
+    await loadFileList();
+    if (isNote()) {
+      await loadHistory();  // Note の履歴はワークスペースのサイドカーから復元
+      if (state.currentFile) { await loadNotes(); await loadRefs(); }
+      addMessage("system", "Noteモードに切り替えました（読み取り専用エージェント・クリック反映）。");
+    } else if (isPlan()) {
+      addMessage("system", "Planモードに切り替えました"
+        + "（調べて実行計画を立てるだけ。承認するまでファイルは変更されません）。");
+    } else {
+      addMessage("system", "Codeモードに切り替えました（自律エージェント・破壊操作は承認制）。");
+    }
+    return true;
   } catch (e) {
-    alert("⚠️ モードを切り替えられません: " + e.message);
+    failure = e.message;
+    alert(e.message);
     return false;
+  } finally {
+    chatRuntime.finish(run, failure);
   }
-  setModeState(m);
-  // 旧モードの会話表示・承認バーを持ち越さない（サーバ側もセッションリセット済み）。
-  // 計画の承認から Code へ移るときだけはログを残す（何を承認した流れなのかが読めるように）。
-  if (!opts.keepMessages) $("messages").innerHTML = "";
-  $("approval").classList.add("hidden");
-  $("approval").innerHTML = "";
-  state.assistantEl = null;
-  state.sessionId = newSessionId();
-  updateSessionInfo();
-  clearNoteState();
-  applyModeUI();
-  await loadFileList();
-  if (isNote()) {
-    await loadHistory();  // Note の履歴はワークスペースのサイドカーから復元
-    if (state.currentFile) { await loadNotes(); await loadRefs(); }
-    addMessage("system", "Noteモードに切り替えました（読み取り専用エージェント・クリック反映）。");
-  } else if (isPlan()) {
-    addMessage("system", "Planモードに切り替えました"
-      + "（調べて実行計画を立てるだけ。承認するまでファイルは変更されません）。");
-  } else {
-    addMessage("system", "Codeモードに切り替えました（自律エージェント・破壊操作は承認制）。");
-  }
-  return true;
+
 }
 
 // ---- 会話履歴の永続化（Note モードのみ） -------------------------------------
@@ -2772,7 +2788,7 @@ function phaseOf(text) {
 }
 
 /** Note モードの送信ペイロード（選択・チェック済みコンテキスト・関連ファイル・履歴）。 */
-async function buildNotePayload(msg) {
+async function buildNotePayload(msg, signal) {
   const selection = getSelection();
   // Copilot へ「原本のファイルとして」渡すもの。抽出テキストは図表・レイアウト・
   // スライド構造が落ちるので、資料そのものを見てほしいときは原本を添付する必要がある
@@ -2786,8 +2802,9 @@ async function buildNotePayload(msg) {
     // content: undefined のまま送ると /api/chat 側のバリデーションで丸ごと 422 になる。
     let r = null;
     try {
-      r = await jsonFetch("/api/file?path=" + encodeURIComponent(p));
+      r = await jsonFetch("/api/file?path=" + encodeURIComponent(p), { signal });
     } catch (e) {
+      if (signal?.aborted) throw e;
       alert("⚠️ " + e.message);
       // 423 = OS がロックしている（Office で開いたまま）。この後の Copilot 添付も
       // 同じ理由で必ず失敗するので、添付候補からも外す — 外さないと「1ファイルが
@@ -2813,8 +2830,9 @@ async function buildNotePayload(msg) {
         let rr = null;
         try {
           rr = await jsonFetch(
-            `/api/refs/read?note=${encodeURIComponent(state.currentFile)}&idx=${i}`);
+            `/api/refs/read?note=${encodeURIComponent(state.currentFile)}&idx=${i}`, { signal });
         } catch (e) {
+          if (signal?.aborted) throw e;
           alert("⚠️ " + e.message);
           if (e.status === 423) continue;  // ロック中は添付も失敗する（上のループと同じ）
         }
@@ -2947,26 +2965,40 @@ async function clearConversation() {
   if (state.streaming) { alert("⚠️ 応答の生成中はリセットできません。"); return; }
   const extra = isNote() ? "\n（保存されている会話履歴も消えます）" : "";
   if (!confirm("この会話をリセットしますか？" + extra)) return;
+  const run = chatRuntime.begin("switching");
+  if (!run) return;
+  let failure = "";
   try {
-    await postJSON("/api/session/clear", { session_id: state.sessionId });
-  } catch (e) {
-    alert("⚠️ リセットできません: " + e.message);
-    return;
-  }
-  if (isNote()) {
     try {
-      await jsonFetch("/api/chat/history", { method: "DELETE" });
-      state.history = [];
-      state.historyLoaded = true;
+      await postJSON("/api/session/clear", { session_id: state.sessionId });
     } catch (e) {
-      alert("⚠️ 保存履歴を消せませんでした: " + e.message);
+      failure = e.message;
+      alert("⚠️ リセットできません: " + e.message);
+      return;
     }
+    if (isNote()) {
+      try {
+        await jsonFetch("/api/chat/history", { method: "DELETE" });
+        state.history = [];
+        state.historyLoaded = true;
+      } catch (e) {
+      failure = e.message;
+        alert("⚠️ 保存履歴を消せませんでした: " + e.message);
+      }
+    }
+    $("messages").innerHTML = "";
+    state.assistantEl = null;
+    state.sessionId = newSessionId();  // Code は以降のターンを新しいセッションで始める
+    updateSessionInfo();
+    addMessage("system", "🧹 会話をリセットしました。");
+  } catch (e) {
+    failure = e.message;
+    alert(e.message);
+    return false;
+  } finally {
+    chatRuntime.finish(run, failure);
   }
-  $("messages").innerHTML = "";
-  state.assistantEl = null;
-  state.sessionId = newSessionId();  // Code は以降のターンを新しいセッションで始める
-  updateSessionInfo();
-  addMessage("system", "🧹 会話をリセットしました。");
+
 }
 
 async function sendChat() {
@@ -2974,123 +3006,126 @@ async function sendChat() {
   const input = $("chat-input");
   const msg = input.value.trim();
   if (!msg) return;
-
-  // ローカル完結のスラッシュコマンド（/help・/undo 等）はここで処理して終わり。
-  // サーバへ送るコマンド（/compact・/copilot）は通常の送信経路に乗る。
-  if (await runLocalCommand(msg)) { input.value = ""; return; }
-
-  const note = isNote();
-  const plan = isPlan();
-  // Code モード plan-first サブモード: このターンは「計画フェーズ」（読み取り専用で計画だけ出す）。
-  // 計画承認直後の実行フェーズ（approvePlan が planExecNext を立てる）は除外する。
-  const codePlan = isCode() && state.codeStyle === "plan" && !state.planExecNext;
-  state.planExecNext = false;
-  // 反映先の追跡は「送信時の選択範囲」。以降の編集にデコレーションで追随する。
-  const applyTarget = note ? trackApplyTarget() : null;
-  let body;
-  if (note) {
-    body = await buildNotePayload(msg);
-  } else if (plan) {
-    // PlanもCode/Noteと同じWorkspaceSnapshot/Worksetを使う。チェック済み本文は
-    // プロンプトへ貼らず、サーバ側の仮想バッファからread_fileで必要時に読む。
-    const context_files = [];
-    for (const p of [...state.checkedFiles]) {
-      const r = await tryJSON("/api/file?path=" + encodeURIComponent(p));
-      if (r && r.content != null) context_files.push({ path: p, content: r.content });
-    }
-    body = { message: msg, session_id: state.sessionId, selection: getSelection(),
-             current_file: state.currentFile || "",
-             current_content: state.currentFile ? state.editor.getValue() : "",
-             context_files };
-  } else {
-    // チェック済みファイルをコンテキストに同梱（Note の buildNotePayload と同じ扱い。
-    // 抽出失敗は tryJSON が alert してそのファイルだけ抜く）
-    const context_files = [];
-    for (const p of [...state.checkedFiles]) {
-      const r = await tryJSON("/api/file?path=" + encodeURIComponent(p));
-      if (r && r.content != null) context_files.push({ path: p, content: r.content });
-    }
-    body = { message: msg, session_id: state.sessionId, current_file: state.currentFile,
-             current_content: state.currentFile ? state.editor.getValue() : "",
-             selection: getSelection(), plan_first: codePlan };
-    if (context_files.length) body.context_files = context_files;
-  }
-
-  input.value = "";
-  const userEl = addMessage("user", msg);
-  // 変更バッジは直近ターンのもの。新しいターンを始めたら畳む。
-  if (state.changedPaths.size) { state.changedPaths.clear(); renderFileTree(); }
-
-  state.assistantEl = addMessage("assistant", "");
-  state.turnId = 0;         // turn イベントで埋まる（来なければ文脈編集は無いターン）
-  state.compacted = null;
-  // 削除は「1往復」が単位なので、アシスタントの吹き出しから相方のユーザー発言を辿れるようにする。
-  state.assistantEl._exchange = { userEl, userText: msg };
-  state.assistantUi = beginAssistantStream(state.assistantEl);
-  setStreaming(true);
-  state.abort = new AbortController();
-
-  let resp;
-  try {
-    resp = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: state.abort.signal,
-    });
-  } catch (e) {
-    finishStream();
-    addMessage("error", "送信失敗: " + e.message);
+  const command = msg.split(/\s/, 1)[0].toLowerCase();
+  if (Object.hasOwn(LOCAL_COMMANDS, command)) {
+    if (await runLocalCommand(msg)) input.value = "";
     return;
   }
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    finishStream();
-    addMessage("error", resp.status === 409
-      ? "エージェントは実行中です。"
-      : "⚠ " + (err.detail || `HTTP ${resp.status}`));
-    return;
-  }
-
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
+  const run = chatRuntime.begin();
+  if (!run) return;
+  let failure = "";
   try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const parts = buf.split("\n\n");
-      buf = parts.pop();
-      for (const part of parts) {
-        const line = part.trim();
-        if (!line.startsWith("data:")) continue;
-        let ev;
-        try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
-        // files_changed は開いているファイルの再読込を伴う。完了を待たないと
-        // ターン終了後も Monaco に変更前の内容が残ることがある。
+
+    // ローカル完結のスラッシュコマンド（/help・/undo 等）はここで処理して終わり。
+    // サーバへ送るコマンド（/compact・/copilot）は通常の送信経路に乗る。
+
+    const note = isNote();
+    const plan = isPlan();
+    // Code モード plan-first サブモード: このターンは「計画フェーズ」（読み取り専用で計画だけ出す）。
+    // 計画承認直後の実行フェーズ（approvePlan が planExecNext を立てる）は除外する。
+    const codePlan = isCode() && state.codeStyle === "plan" && !state.planExecNext;
+    state.planExecNext = false;
+    // 反映先の追跡は「送信時の選択範囲」。以降の編集にデコレーションで追随する。
+    const applyTarget = note ? trackApplyTarget() : null;
+    let body;
+    if (note) {
+      body = await buildNotePayload(msg, run.controller.signal);
+    } else if (plan) {
+      // PlanもCode/Noteと同じWorkspaceSnapshot/Worksetを使う。チェック済み本文は
+      // プロンプトへ貼らず、サーバ側の仮想バッファからread_fileで必要時に読む。
+      const context_files = [];
+      for (const p of [...state.checkedFiles]) {
+        const r = await jsonFetch("/api/file?path=" + encodeURIComponent(p), { signal: run.controller.signal });
+        if (r && r.content != null) context_files.push({ path: p, content: r.content });
+      }
+      body = { message: msg, session_id: state.sessionId, selection: getSelection(),
+               current_file: state.currentFile || "",
+               current_content: state.currentFile ? state.editor.getValue() : "",
+               context_files };
+    } else {
+      // チェック済みファイルをコンテキストに同梱（Note の buildNotePayload と同じ扱い。
+      // 抽出失敗は tryJSON が alert してそのファイルだけ抜く）
+      const context_files = [];
+      for (const p of [...state.checkedFiles]) {
+        const r = await jsonFetch("/api/file?path=" + encodeURIComponent(p), { signal: run.controller.signal });
+        if (r && r.content != null) context_files.push({ path: p, content: r.content });
+      }
+      body = { message: msg, session_id: state.sessionId, current_file: state.currentFile,
+               current_content: state.currentFile ? state.editor.getValue() : "",
+               selection: getSelection(), plan_first: codePlan };
+      if (context_files.length) body.context_files = context_files;
+    }
+
+    if (run.controller.signal.aborted || !chatRuntime.current(run)) return;
+    body.session_id = run.sessionId;
+    input.value = "";
+    const userEl = addMessage("user", msg);
+    // 変更バッジは直近ターンのもの。新しいターンを始めたら畳む。
+    if (state.changedPaths.size) { state.changedPaths.clear(); renderFileTree(); }
+
+    state.assistantEl = addMessage("assistant", "");
+    state.turnId = 0;         // turn イベントで埋まる（来なければ文脈編集は無いターン）
+    state.compacted = null;
+    // 削除は「1往復」が単位なので、アシスタントの吹き出しから相方のユーザー発言を辿れるようにする。
+    state.assistantEl._exchange = { userEl, userText: msg };
+    state.assistantUi = beginAssistantStream(state.assistantEl);
+
+
+    try {
+      const resp = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: run.controller.signal,
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${resp.status}`);
+      }
+      chatRuntime.phase(run, "running");
+      await consumeChatStream(resp, run, chatRuntime.current, async ev => {
+        if (!chatRuntime.current(run)) return;
+        if (ev.type === "approval") chatRuntime.phase(run, "approval");
         await handleEvent(ev);
+      });
+    } catch (e) {
+      if (!run.controller.signal.aborted) {
+        failure = e.message;
+        addToolStatus(state.assistantEl, "⚠️ 実行失敗: " + e.message);
       }
     }
+    if (!chatRuntime.current(run)) return;
+    const cancelled = run.controller.signal.aborted || run.outcome === "cancelled" || !!failure;
+    const assistantEl = state.assistantEl;  // finishStream が空箱を畳む前に確保
+    const turnId = state.turnId;
+    const visible = finishStream();
+    if (note) noteAfterTurn(assistantEl, msg, visible, applyTarget, cancelled);
+    else if ((plan || codePlan) && !cancelled) planAfterTurn(visible);
+    // Code モードの会話はターン確定ごとにサイドカーへ保存（再起動後の復元用）
+    if (isCode() && !cancelled) saveCodeTurn(msg, visible);
+    if (state.compacted && assistantEl?.isConnected) collapseToSummary(assistantEl, state.compacted);
+    else if (assistantEl?.isConnected) {
+      // 往復が確定してから削除ボタンを付ける（生成中に消せると文脈と表示がずれる）。
+      addDeleteButton(assistantEl, () => deleteExchange(assistantEl, turnId));
+      // Code モード: このターンの変更を巻き戻すボタン（スナップショットは直近10ターン分）
+      if (isCode() && turnId) addRollbackButton(assistantEl, () => rollbackTurn(turnId));
+    }
   } catch (e) {
-    if (state.abort?.signal.aborted) addToolStatus(state.assistantEl, "⏹ 中断しました。");
-    else addToolStatus(state.assistantEl, "⚠️ ストリーム中断: " + e.message);
+    if (!run.controller.signal.aborted) {
+      failure = e.message;
+      addMessage("error", e.message);
+    }
+  } finally {
+    await run.interruption;
+    if (chatRuntime.current(run)) {
+      if (state.assistantUi) finishStream();
+      $("approval").classList.add("hidden");
+      $("approval").innerHTML = "";
+      if (approvalPreviews.length) closeDiffPreview();
+      chatRuntime.finish(run, failure);
+    }
   }
-  const cancelled = !!state.abort?.signal.aborted;
-  const assistantEl = state.assistantEl;  // finishStream が空箱を畳む前に確保
-  const turnId = state.turnId;
-  const visible = finishStream();
-  if (note) noteAfterTurn(assistantEl, msg, visible, applyTarget, cancelled);
-  else if ((plan || codePlan) && !cancelled) planAfterTurn(visible);
-  // Code モードの会話はターン確定ごとにサイドカーへ保存（再起動後の復元用）
-  if (isCode() && !cancelled) saveCodeTurn(msg, visible);
-  if (state.compacted && assistantEl?.isConnected) collapseToSummary(assistantEl, state.compacted);
-  else if (assistantEl?.isConnected) {
-    // 往復が確定してから削除ボタンを付ける（生成中に消せると文脈と表示がずれる）。
-    addDeleteButton(assistantEl, () => deleteExchange(assistantEl, turnId));
-    // Code モード: このターンの変更を巻き戻すボタン（スナップショットは直近10ターン分）
-    if (isCode() && turnId) addRollbackButton(assistantEl, () => rollbackTurn(turnId));
-  }
+
 }
 
 /**
@@ -3278,29 +3313,14 @@ function finishStream() {
     state.assistantEl.remove();
     state.assistantEl = null;
   }
-  setStreaming(false);
+  state.assistantUi = null;
   return visible;  // Note モードのターン確定処理（履歴・差分反映）が使う
-}
-
-function setStreaming(on) {
-  state.streaming = on;
-  const btn = $("send-btn");
-  if (on) {
-    btn.textContent = "停止";
-    btn.classList.add("stop");
-    btn.title = "エージェントの実行を中断する";
-  } else {
-    btn.textContent = "送信";
-    btn.classList.remove("stop");
-    btn.title = "";
-    state.abort = null;
-    state.assistantUi = null;
-  }
 }
 
 // ---- 承認バー ----
 function renderApproval(ev) {
   const box = $("approval");
+  $("diff-approve-edit").disabled = false;
   box.innerHTML = "";
   box.classList.remove("hidden");
   const h = document.createElement("h4");
@@ -3376,15 +3396,43 @@ function renderApproval(ev) {
   scrollMessages();
 }
 
-async function resolveApproval(id, approve, override) {
-  $("approval").classList.add("hidden");
-  $("approval").innerHTML = "";
-  if (approvalPreviews.length) closeDiffPreview();  // 承認判断が済んだら差分ビューを閉じる
-  if (state.assistantEl) {
-    addToolStatus(state.assistantEl, approve ? "✓ 承認しました。" : "✗ 却下しました。");
+const pendingApprovals = new WeakSet();
+
+async function submitApproval(url, payload, message) {
+  const run = chatRuntime.active;
+  if (!run || chatRuntime.state.phase !== "approval") return;
+  const box = $("approval");
+  if (pendingApprovals.has(run)) return;
+  pendingApprovals.add(run);
+  const marker = box.firstChild;
+  const buttons = [...box.querySelectorAll("button"), $("diff-approve-edit")];
+  const disabled = buttons.map(button => button.disabled);
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    await postJSON(url, { ...payload, session_id: run.sessionId });
+    if (!chatRuntime.current(run) || run.controller.signal.aborted) return;
+    addToolStatus(state.assistantEl, message);
+    if (box.firstChild === marker) {
+      box.classList.add("hidden");
+      box.innerHTML = "";
+      if (approvalPreviews.length) closeDiffPreview();
+      chatRuntime.phase(run, "running");
+    }
+  } catch (e) {
+    if (chatRuntime.current(run) && !run.controller.signal.aborted) {
+      addToolStatus(state.assistantEl, e.message);
+    }
+  } finally {
+    pendingApprovals.delete(run);
+    if (chatRuntime.current(run) && (box.firstChild === marker || !box.firstChild)) {
+      buttons.forEach((button, index) => { button.disabled = disabled[index]; });
+    }
   }
-  await postJSON("/api/approve", { id, approve, override, session_id: state.sessionId })
-    .catch((e) => addToolStatus(state.assistantEl, "⚠️ 承認を送れませんでした: " + e.message));
+}
+
+async function resolveApproval(id, approve, override) {
+  return submitApproval("/api/approve", { id, approve, override },
+    approve ? "✓ 承認しました。" : "✗ 却下しました。");
 }
 
 // ---- 変更ファイル反映 ----
@@ -3403,10 +3451,16 @@ async function onFilesChanged(paths) {
 }
 
 async function interrupt() {
-  // Note / Plan セッションは SessionManager 管理外（単一セッション）。fetch の中断で
-  // SSE ジェネレータの finally が協調キャンセルを送るので、それに任せる。
-  if (isCode()) await postJSON("/api/interrupt", { session_id: state.sessionId }).catch(() => {});
-  if (state.abort) state.abort.abort();
+  const run = chatRuntime.stop();
+  if (!run) return;
+  if (isCode()) {
+    run.interruption = jsonFetch("/api/interrupt", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: run.sessionId }),
+      signal: AbortSignal.timeout(5000),
+    })
+      .catch((e) => { addMessage("error", e.message); });
+  }
   if (approvalPreviews.length) closeDiffPreview();
 }
 
@@ -3431,8 +3485,8 @@ async function rollbackTurn(turnId) {
   }
 }
 
-function newSession() {
-  if (state.streaming) { alert("⚠️ 実行中です。中断してから新しい会話を開始してください。"); return; }
+function newSession(switching) {
+  if (state.streaming && !(switching && chatRuntime.current(switching) && chatRuntime.state.phase === "switching")) { alert("⚠️ 実行中です。中断してから新しい会話を開始してください。"); return; }
   state.sessionId = newSessionId();
   $("messages").innerHTML = "";
   $("approval").classList.add("hidden");
@@ -3511,11 +3565,15 @@ async function openSessionsModal() {
 
 /** 保存済み会話を復元: チャット表示＋エンジン文脈（history_replace）をシード。 */
 async function restoreCodeSession(sid) {
+  const run = chatRuntime.begin("switching");
+  if (!run) return;
+  let failure = "";
   $("sessions-modal").classList.add("hidden");
   try {
     const r = await getJSON("/api/code-chat/session?session_id=" + encodeURIComponent(sid));
     const res = await postJSON("/api/code-chat/restore",
       { session_id: sid, messages: r.messages });
+    chatRuntime.finish(run);
     state.sessionId = sid;
     updateSessionInfo();
     $("messages").innerHTML = "";
@@ -3525,7 +3583,10 @@ async function restoreCodeSession(sid) {
       : "✓ 会話の表示を復元しました（このエンジンでは文脈の復元は未対応です）。");
     scrollMessages(true);
   } catch (e) {
+    failure = e.message;
     alert("⚠️ 会話を復元できませんでした: " + e.message);
+  } finally {
+    chatRuntime.finish(run, failure);
   }
 }
 
@@ -3751,12 +3812,7 @@ function showApprovalPreview(i) {
 /** 「✓ 修正して承認」: 右ペインの内容をそのまま書き込み、元ツール呼び出しは
     「完了済み」の案内付きで却下（エージェントは後続ステップへ進む）。 */
 async function resolveApprovalEdit(id, path, content) {
-  $("approval").classList.add("hidden");
-  $("approval").innerHTML = "";
-  closeDiffPreview();
-  if (state.assistantEl) addToolStatus(state.assistantEl, "✓ 修正して承認しました（編集内容を適用）。");
-  await postJSON("/api/approve-edit", { id, path, content, session_id: state.sessionId })
-    .catch((e) => addToolStatus(state.assistantEl, "⚠️ 修正内容を適用できませんでした: " + e.message));
+  return submitApproval("/api/approve-edit", { id, path, content }, "✓ 修正して承認しました（編集内容を適用）。");
 }
 
 // --- 実行計画ビュー オーバーレイ（Plan モード） -------------------------------
@@ -3864,45 +3920,58 @@ const chooseWorkspace = () => switchWorkspace($("root-input").value.trim());
 async function switchWorkspace(path) {
   if (!path) return;
   if (state.streaming) { alert("⚠️ 実行中は作業フォルダを切り替えられません。"); return; }
-  await flushAutosave();  // 切替後は別ワークスペース。保留中の保存はここで確定させる
-  if (state.dirty && !confirm("未保存の変更があります。破棄して作業フォルダを切り替えますか？")) return;
-  let r;
+  const run = chatRuntime.begin("switching");
+  if (!run) return;
+  let failure = "";
   try {
-    r = await postJSON("/api/workspace", { path });
+    await flushAutosave();  // 切替後は別ワークスペース。保留中の保存はここで確定させる
+    if (state.dirty && !confirm("未保存の変更があります。破棄して作業フォルダを切り替えますか？")) return;
+    let r;
+    try {
+      r = await postJSON("/api/workspace", { path });
+    } catch (e) {
+      failure = e.message;
+      alert("⚠️ フォルダ変更に失敗: " + e.message);
+      return;
+    }
+    closeRootModal();
+    // 前のワークスペースに紐づく状態をリセットする
+    state.currentFile = null;
+    state.baseMtime = null;
+    resetNavHistory();  // 別の木のパスを ◀ の行き先に残さない
+    clearSearch();      // 検索結果と置換の対象も前のワークスペースのもの
+    state.collapsedDirs.clear();
+    state.knownDirs.clear();  // 別ワークスペースの木なので「既定で閉じる」判定もやり直す
+    state.changedPaths.clear();
+    state.saveError = null;
+    state.editor.setValue("");
+    markClean();
+    renderSaveState();
+    $("current-file").textContent = "（ファイル未選択）";
+    updatePreviewAvailability();
+    clearNoteState();  // 付箋・参照・履歴・反映先は前ワークスペースのもの
+    await loadMode();  // モードはワークスペース随伴（last_mode）。切替先のものに追従する
+    applyModeUI();
+    await loadStatus();
+    await loadFileList();
+    if (isNote()) {
+      state.sessionId = newSessionId();
+      updateSessionInfo();
+      $("approval").classList.add("hidden");
+      state.assistantEl = null;
+      await loadHistory();  // Note の履歴もワークスペースに紐づく。切替先のものを読み直す
+    } else {
+      newSession(run);  // 新しい作業フォルダで新しい会話を開始
+    }
+    addMessage("system", "作業フォルダを変更: " + (r.workspace || path));
   } catch (e) {
-    alert("⚠️ フォルダ変更に失敗: " + e.message);
-    return;
+    failure = e.message;
+    alert(e.message);
+    return false;
+  } finally {
+    chatRuntime.finish(run, failure);
   }
-  closeRootModal();
-  // 前のワークスペースに紐づく状態をリセットする
-  state.currentFile = null;
-  state.baseMtime = null;
-  resetNavHistory();  // 別の木のパスを ◀ の行き先に残さない
-  clearSearch();      // 検索結果と置換の対象も前のワークスペースのもの
-  state.collapsedDirs.clear();
-  state.knownDirs.clear();  // 別ワークスペースの木なので「既定で閉じる」判定もやり直す
-  state.changedPaths.clear();
-  state.saveError = null;
-  state.editor.setValue("");
-  markClean();
-  renderSaveState();
-  $("current-file").textContent = "（ファイル未選択）";
-  updatePreviewAvailability();
-  clearNoteState();  // 付箋・参照・履歴・反映先は前ワークスペースのもの
-  await loadMode();  // モードはワークスペース随伴（last_mode）。切替先のものに追従する
-  applyModeUI();
-  await loadStatus();
-  await loadFileList();
-  if (isNote()) {
-    state.sessionId = newSessionId();
-    updateSessionInfo();
-    $("approval").classList.add("hidden");
-    state.assistantEl = null;
-    await loadHistory();  // Note の履歴もワークスペースに紐づく。切替先のものを読み直す
-  } else {
-    newSession();  // 新しい作業フォルダで新しい会話を開始
-  }
-  addMessage("system", "作業フォルダを変更: " + (r.workspace || path));
+
 }
 
 // URL のページを Markdown 化して web/ に保存（🌐+）。Note モード専用。

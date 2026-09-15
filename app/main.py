@@ -33,7 +33,11 @@ STATIC = BASE / "static"
 async def _lifespan(_app: FastAPI):
     """FastAPI推奨のlifespanで、プロセス共有エンジンを一度だけ初期化する。"""
     _startup()
-    yield
+    try:
+        yield
+    finally:
+        if _manager is not None:
+            _manager.clear()
 
 
 app = FastAPI(title="CodeWithPixie", lifespan=_lifespan)
@@ -75,13 +79,15 @@ class SessionManager:
 
     def drop(self, sid: str) -> None:
         with self._lock:
-            self._sessions.pop(sid, None)
+            session = self._sessions.pop(sid, None)
+            if session is not None:
+                session.close()
 
     def clear(self) -> None:
         """全セッションを協調キャンセルして破棄する（モード切替時のリセット用）。"""
         with self._lock:
             for s in self._sessions.values():
-                s.cancel()
+                s.close()
             self._sessions.clear()
 
     def count(self) -> int:
@@ -913,7 +919,7 @@ def _copilot_orchestrated(user_ask: str, req: ChatReq) -> StreamingResponse:
         sess = _require_manager().get_or_create(_valid_sid(req.session_id))
         approval_timeout = settings.approval_timeout
 
-    if not sess.busy.acquire(blocking=False):
+    if not _reserve_turn(sess):
         raise HTTPException(409, "このセッションは別のターンを実行中です。")
 
     compose = copilot_flow.build_compose_prompt(user_ask)
@@ -942,6 +948,19 @@ def _error_stream(text: str) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+def _reserve_turn(sess):
+    reserve = getattr(sess, "reserve_turn", None)
+    return reserve() if callable(reserve) else sess.busy.acquire(blocking=False)
+
+
+def _release_turn(sess):
+    release = getattr(sess, "release_turn", None)
+    if callable(release):
+        release()
+    else:
+        sess.busy.release()
+
+
 def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
     """1ターンを worker スレッドで実行し SSE へ変換する共通部（Code/Note 両モード）。
 
@@ -957,8 +976,11 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
     loop = asyncio.get_running_loop()
     turn_id = sess.begin_turn(label)
     sequence = [0]
+    outcome = {"status": "completed", "reason": "completed"}
 
     def emit(ev: dict) -> None:
+        if ev.get("type") == "error":
+            outcome.update(status="failed", reason=str(ev.get("text") or "error"))
         # worker スレッド → イベントループへ安全に受け渡し。
         if ev.get("type") == "__end__":
             loop.call_soon_threadsafe(q.put_nowait, ev)
@@ -970,15 +992,39 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
 
     def worker() -> None:
         try:
+            control = getattr(sess, "_control", None)
+            if control is not None:
+                control.check()
             # ⏪ ロールバック用のターン前スナップショット（Code の AgentSession のみ持つ。
             # worker スレッドで実行し、イベントループをブロックしない）。
             if turn_id and hasattr(sess, "take_turn_snapshot"):
                 sess.take_turn_snapshot(turn_id)
+            control = getattr(sess, "_control", None)
+            if control is not None:
+                control.check()
             start_turn(emit)
+        except BaseException as exc:
+            reason = getattr(exc, "reason", None)
+            outcome.update(status=("cancelled" if reason == "cancelled" else "limit_reached") if reason else "failed",
+                           reason=reason or f"{type(exc).__name__}: {exc}")
+            emit({"type": "status" if reason else "error", "text": outcome["reason"]})
         finally:
-            sess.end_turn()  # 中断・例外時も必ず閉じる（次ターンの境界がずれる）
-            emit({"type": "__end__"})
-            sess.busy.release()
+            result = getattr(sess, "outcome", {})
+            if result.get("status") in {"failed", "cancelled", "limit_reached"} and outcome["status"] == "completed":
+                outcome.update(result)
+            if getattr(sess, "_cancel", False) and outcome["status"] == "completed":
+                outcome.update(status="cancelled", reason="cancelled")
+            control = getattr(sess, "_control", None)
+            if control is not None:
+                outcome["usage"] = control.snapshot()
+            try:
+                sess.end_turn()
+            except Exception as exc:
+                emit({"type": "error", "text": f"履歴の確定に失敗しました: {exc}"})
+            finally:
+                # 新しい要求を受け付けられる状態にしてから完了を通知する。
+                _release_turn(sess)
+                emit({"type": "__end__"})
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -993,7 +1039,7 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
                 if ev.get("type") == "__end__":
                     done = True
                     yield _sse(engine_events.normalize_event(
-                        {"type": "done"}, turn_id=turn_id or None,
+                        {"type": "done", **outcome}, turn_id=turn_id or None,
                         sequence=sequence[0] + 1))
                     break
                 yield _sse(ev)
@@ -1038,10 +1084,10 @@ def _prepare_while_busy(sess, prepare):
     try:
         return prepare()
     except (TypeError, ValueError) as exc:
-        sess.busy.release()
+        _release_turn(sess)
         raise HTTPException(400, f"エディタ文脈が不正です: {exc}") from exc
     except Exception:
-        sess.busy.release()
+        _release_turn(sess)
         raise
 
 
@@ -1064,7 +1110,7 @@ def _note_chat(req: ChatReq) -> StreamingResponse:
         raise HTTPException(503, str(e))
     sess.set_copilot(settings.copilot_enabled)  # トグルを次ターンに反映（ask_copilot の提示可否）
     # Note は単一セッション直列。実行中なら 409（Code モードと同じフロント契約）。
-    if not sess.busy.acquire(blocking=False):
+    if not _reserve_turn(sess):
         raise HTTPException(409, "Note セッションは別のターンを実行中です。")
 
     # サーバ再起動後の初回ターン: サイドカー履歴（無ければフロント送付の履歴）で LLM 文脈を復元。
@@ -1099,7 +1145,7 @@ def _plan_chat(req: ChatReq) -> StreamingResponse:
         raise HTTPException(503, str(e))
     sess.set_copilot(settings.copilot_enabled)
     # Plan も単一セッション直列。実行中なら 409（他モードと同じフロント契約）。
-    if not sess.busy.acquire(blocking=False):
+    if not _reserve_turn(sess):
         raise HTTPException(409, "Plan セッションは別のターンを実行中です。")
 
     def prepare_plan_context():
@@ -1122,7 +1168,7 @@ def _compact_chat(focus: str, req: ChatReq) -> StreamingResponse:
     のがそこだけなので）。モードごとにセッションの取り方だけが違い、中身は共通。
     """
     sess, approval_timeout = _mode_session(req.session_id, create=True)
-    if not sess.busy.acquire(blocking=False):
+    if not _reserve_turn(sess):
         raise HTTPException(409, "このセッションは別のターンを実行中です。")
     # サーバ再起動後いきなり /compact した場合、エンジンの文脈はまだ空。畳む対象は
     # 画面に見えている会話なので、通常ターンと同じくサイドカー履歴で先に復元する。
@@ -1185,7 +1231,7 @@ async def api_chat(req: ChatReq):
     sess = manager.get_or_create(_valid_sid(req.session_id))
     sess.set_copilot(config.settings.copilot_enabled)  # トグルを次ターンに反映（ask_copilot の提示可否）
     # 同一セッションは直列（別セッションは並行可）。実行中なら 409。
-    if not sess.busy.acquire(blocking=False):
+    if not _reserve_turn(sess):
         raise HTTPException(409, "このセッションは別のターンを実行中です。")
 
     # Code モードでも Note/Plan と同じく、選択範囲だけでなく現在ファイルの未保存全文を

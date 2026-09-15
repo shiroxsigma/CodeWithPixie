@@ -108,7 +108,8 @@ def test_turn_id_is_streamed_first(sess):
     assert evs[0] == {"type": "turn", "id": 1, "schema_version": 1,
                       "turn_id": 1, "sequence": 0}
     assert evs[-1] == {"type": "done", "schema_version": 1,
-                       "turn_id": 1, "sequence": 2}
+                       "turn_id": 1, "sequence": 2,
+                       "status": "completed", "reason": "completed"}
 
 
 def test_turn_events_have_monotonic_sequence(sess):
