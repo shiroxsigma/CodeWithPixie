@@ -11,6 +11,7 @@ def test_phase_metadata():
     assert status_metadata("⏳ Prefill...") == {"category": "phase", "phase": "prefill"}
     assert status_metadata("✅ Prefill: 1.2s") == {"category": "phase", "phase": "prefill"}
     assert status_metadata("🧠 Thinking...") == {"category": "phase", "phase": "thinking"}
+    assert status_metadata("[System] Generating tool call...") == {"category": "phase", "phase": "generating"}
 
 
 def test_tool_and_result_metadata():

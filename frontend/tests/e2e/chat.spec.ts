@@ -59,6 +59,37 @@ test("unexpected EOF shows failure and the next turn can complete", async ({
   await expect(page.locator('[role="status"]')).toHaveText("完了");
 });
 
+test("tool argument generation replaces the thinking indicator", async ({
+  page,
+}) => {
+  await page.locator("#chat-input").fill("create project");
+  await page.locator("#send-btn").click();
+  await expect(page.locator('[role="status"]')).toHaveText("実行中");
+  await page.evaluate(() =>
+    (window as any).emitChat({ type: "status", phase: "thinking" }),
+  );
+  await expect(page.locator(".wait-text")).toContainText("思考中");
+  await page.evaluate(() =>
+    (window as any).emitChat({ type: "status", phase: "generating" }),
+  );
+  await expect(page.locator(".wait-text")).toContainText(
+    "ツール呼び出しを生成中",
+  );
+  // Older servers may omit the structured phase metadata.
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "status", phase: "thinking" });
+    (window as any).emitChat({
+      type: "status",
+      text: "[System] Generating tool call...",
+    });
+  });
+  await expect(page.locator(".wait-text")).toContainText(
+    "ツール呼び出しを生成中",
+  );
+  await page.evaluate(() => (window as any).emitChat({ type: "done" }));
+  await expect(page.locator('[role="status"]')).toHaveText("完了");
+});
+
 test("failed approval remains available for retry", async ({ page }) => {
   let attempts = 0;
   await page.route("**/api/approve", (route) => {

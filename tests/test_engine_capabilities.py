@@ -93,3 +93,36 @@ def test_public_context_policy_is_preferred_over_private_backend():
     engine = Engine()
     engine_adapter._apply_context_length(engine, {"context_length": 65536})
     assert engine.policies == [{"context_length": 65536}]
+
+
+def test_profile_passes_server_context_and_timeouts_to_core():
+    seen = {}
+
+    class Policy:
+        def __init__(self, **kwargs):
+            seen["policy"] = kwargs
+
+    class Profile:
+        def __init__(self, **kwargs):
+            seen["profile"] = kwargs
+
+    class Core:
+        ContextPolicy = Policy
+        AgentProfile = Profile
+
+        @staticmethod
+        def create_engine(server, workspace, profile=None):
+            seen["engine"] = (server, workspace, profile)
+            return object()
+
+    server = {
+        "context_length": 32768,
+        "overall_timeout": 600,
+        "read_idle_timeout": 120,
+    }
+    engine_adapter._create_profiled_engine(Core, server, ".", name="code")
+    assert seen["policy"] == {
+        "context_length": 32768,
+        "overall_timeout": 600.0,
+        "read_idle_timeout": 120.0,
+    }

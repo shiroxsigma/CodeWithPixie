@@ -411,6 +411,16 @@ def engine_capabilities() -> dict:
     return dict(_capabilities)
 
 
+def _server_timeout(server: dict, key: str, default: float) -> float:
+    """Ignore invalid local configuration values instead of breaking session creation."""
+    import math
+    try:
+        value = float(server.get(key))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
 def stream_timeout_sec(budget_sec) -> float:
     """思考許容時間に見合う LLM ストリーム打ち切り秒。
 
@@ -476,13 +486,18 @@ def _create_profiled_engine(core, server: dict, workspace: str, *,
     profile_type = getattr(core, "AgentProfile", None)
     if callable(profile_type):
         policy = None
-        try:
-            context_length = int(server.get("context_length") or 0)
-        except (TypeError, ValueError):
-            context_length = 0
+        policy_kwargs = {}
+        for key, cast in (("context_length", int), ("overall_timeout", float),
+                          ("read_idle_timeout", float)):
+            try:
+                value = cast(server.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                policy_kwargs[key] = value
         policy_type = getattr(core, "ContextPolicy", None)
-        if context_length > 0 and callable(policy_type):
-            policy = policy_type(context_length=context_length)
+        if policy_kwargs and callable(policy_type):
+            policy = policy_type(**policy_kwargs)
         profile = profile_type(
             name=name,
             tool_set=tool_set,
@@ -515,7 +530,8 @@ class _EngineStreamOps:
             llm_calls=settings.turn_max_llm_calls,
             tool_calls=settings.turn_max_tool_calls,
             think_seconds=think,
-            stream_timeout=stream_timeout_sec(think),
+            stream_timeout=max(stream_timeout_sec(think), getattr(self, "_server_overall_timeout", 0.0)),
+            read_idle_timeout=getattr(self, "_read_idle_timeout", 30.0),
         ))
 
     def reserve_turn(self):
@@ -871,12 +887,14 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     """1会話（セッション）分の埋め込みエンジン。pixie_core.Engine を1つ保持する。
 
     複数インスタンスを同一プロセスで並行実行できる（state_board は pixie_core 側で ContextVar
-    分離される）。ただし cwd（作業対象 workspace）はプロセス共有のため全セッション同一。
+    分離される）。作業対象 workspace は会話作成時に固定し、画面のフォルダ切替から分離する。
     """
 
     def __init__(self, core, server: dict, workspace):
         self._core = core
         self._CancelTurn = core.CancelTurn
+        self._read_idle_timeout = _server_timeout(server, "read_idle_timeout", 30.0)
+        self._server_overall_timeout = _server_timeout(server, "overall_timeout", 0.0)
         self._engine = _create_profiled_engine(
             core, server, str(workspace), name="code"
         )  # 自セッション専用の Engine
@@ -887,7 +905,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         ) | {"execute_python"}
         self.tool_count = self._engine.tool_count
         self.model_name = self._engine.model_name
-        self.workspace = getattr(self._engine, "workspace", None)  # このセッションの作業フォルダ
+        self.workspace = str(Path(getattr(self._engine, "workspace", None) or workspace).resolve())
         self.python_kernel = PythonKernel(self.workspace or workspace)
         self._init_workspace_context()
 
@@ -922,7 +940,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         self._approval_timeout = approval_timeout if approval_timeout and approval_timeout > 0 else None
 
-        before = files.snapshot_mtimes()
+        before = files.snapshot_mtimes(workspace=self.workspace)
         token = _ACTIVE_AGENT_SESSION.set(self)
         try:
             # ターンシーケンス(reset→user追加→run_graph)は pixie_core 側に集約済み。
@@ -941,7 +959,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             try:
                 _ACTIVE_AGENT_SESSION.reset(token)
                 self._emit_flush()
-                changed = files.diff_changed(before)
+                changed = files.diff_changed(before, workspace=self.workspace)
                 if changed:
                     emit_event({"type": "files_changed", "paths": changed})
             finally:
@@ -1102,7 +1120,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         """LLM ストリームの打ち切り秒（思考許容時間に追随させる）。API 1.5 未満では無視。"""
         setter = getattr(self._engine, "set_stream_timeout", None)
         if setter is not None:
-            setter(overall)
+            setter(max(overall, getattr(self, "_server_overall_timeout", 0.0)))
 
     def cancel(self) -> None:
         self.cancel_execution()
@@ -1130,7 +1148,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         total = 0
         # 枝刈り付きの共通走査（files.iter_text_files）を使う — rglob だと
         # node_modules 等の巨大ツリーを全走査して各ターンが固まるため。
-        for rel, p in files.iter_text_files():
+        for rel, p in files.iter_text_files(workspace=self.workspace):
             try:
                 if p.stat().st_size > _ROLLBACK_MAX_FILE_BYTES:
                     continue
@@ -1171,7 +1189,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         restored: list[str] = []
         for rel, data in snap.items():
             try:
-                p = files.safe_path(rel)
+                p = files.safe_path(rel, workspace=self.workspace)
                 if p.is_file() and p.read_bytes() == data:
                     continue  # 既に同じ内容（以降のターンで戻っている等）
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -1208,6 +1226,8 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     PROFILE_NAME = "note"
 
     def __init__(self, core, server: dict, workspace: str, copilot_enabled: bool):
+        self._read_idle_timeout = _server_timeout(server, "read_idle_timeout", 30.0)
+        self._server_overall_timeout = _server_timeout(server, "overall_timeout", 0.0)
         self._core = core
         self._CancelTurn = core.CancelTurn
         self._allowed = self._allowed_set(copilot_enabled)

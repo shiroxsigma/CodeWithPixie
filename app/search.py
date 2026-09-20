@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import config  # WORKSPACE を動的に参照する
 from .config import settings
-from .files import IGNORE_DIRS, MAX_BYTES, TEXT_EXTS, is_text, safe_path, write_file
+from .files import IGNORE_DIRS, MAX_BYTES, TEXT_EXTS, is_text, iter_text_files, safe_path, write_file
 
 #: ヒット行の前後に付ける行数。
 CONTEXT_LINES = 2
@@ -51,9 +51,10 @@ def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]
     for ext in TEXT_EXTS:
         globs += ["-g", f"*{ext}"]
     for d in IGNORE_DIRS:
-        globs += ["-g", f"!{d}/**"]
-    cmd = [settings.rg_path, "--json", "-s" if case_sensitive else "-i",
-           "--max-count", "5", *globs, query, str(config.WORKSPACE)]
+        globs += ["-g", f"!**/{d}/**"]
+    cmd = [settings.rg_path, "--json", "--fixed-strings", "-s" if case_sensitive else "-i",
+           "--max-count", "5", "--max-filesize", str(MAX_BYTES),
+           *globs, "--", query, str(config.WORKSPACE)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=15)
@@ -83,17 +84,16 @@ def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]
 
 def _search_python(query: str, max_results: int, case_sensitive: bool) -> list[dict]:
     q = query if case_sensitive else query.lower()
-    root = config.WORKSPACE
     results: list[dict] = []
-    for p in root.rglob("*"):
-        if any(part in IGNORE_DIRS for part in p.relative_to(root).parts):
-            continue
-        if not (p.is_file() and p.suffix.lower() in TEXT_EXTS):
+    for rel, p in iter_text_files():
+        if p.suffix.lower() not in TEXT_EXTS:
             continue
         try:
+            if p.stat().st_size > MAX_BYTES:
+                continue
             for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 if q in (line if case_sensitive else line.lower()):
-                    results.append({"path": p.relative_to(root).as_posix(), "line": i,
+                    results.append({"path": rel, "line": i,
                                     "text": line[:MAX_LINE_CHARS]})
                     if len(results) >= max_results:
                         return results

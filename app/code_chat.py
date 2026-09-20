@@ -10,7 +10,11 @@ Note モードの .pixie_chat.json と同じ発想だが、Code はセッショ�
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -28,21 +32,42 @@ MAX_MESSAGES = 400
 MAX_SESSIONS = 50
 TITLE_CHARS = 40
 
+# 同一プロセス内の別セッションからの更新も、読み取りから置換まで直列化する。
+_store_lock = threading.RLock()
+
 
 def _sidecar_path():
     return config.WORKSPACE / SIDECAR_NAME
 
 
-def load_store() -> dict:
-    try:
-        return json.loads(_sidecar_path().read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+def load_store(path: Path | None = None) -> dict:
+    path = path if path is not None else _sidecar_path()
+    with _store_lock:
+        try:
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
 
-def _save_store(data: dict) -> None:
-    _sidecar_path().write_text(
-        json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+def _save_store(data: dict, path: Path | None = None) -> None:
+    path = path if path is not None else _sidecar_path()
+    with _store_lock:
+        payload = json.dumps(data, ensure_ascii=False, indent=1) + "\n"
+        temporary = None
+        try:
+            # 同じディレクトリで作成し、Windowsでも閉じてから置換する。
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=path.name + ".", suffix=".tmp", delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 class LogReq(BaseModel):
@@ -59,26 +84,28 @@ def code_chat_log(req: LogReq):
         raise HTTPException(400, "session_id が不正です。")
     if not req.user.strip() and not req.assistant.strip():
         return {"ok": True}  # 空往復は保存しない
-    data = load_store()
-    entry = data.get(sid)
-    if entry is None:
-        entry = {"title": "", "updated_at": 0.0, "messages": []}
-        data[sid] = entry
-    if req.user.strip():
-        entry["messages"].append({"role": "user", "content": req.user})
-    if req.assistant.strip():
-        entry["messages"].append({"role": "assistant", "content": req.assistant})
-    entry["messages"] = entry["messages"][-MAX_MESSAGES:]
-    if not entry.get("title"):
-        first_user = next((m["content"] for m in entry["messages"] if m["role"] == "user"), "")
-        entry["title"] = first_user.replace("\n", " ").strip()[:TITLE_CHARS] or "（タイトルなし）"
-    entry["updated_at"] = time.time()
-    # セッション数の上限（updated_at の古い順に消す）
-    if len(data) > MAX_SESSIONS:
-        for old in sorted(data, key=lambda k: data[k].get("updated_at", 0))[:len(data) - MAX_SESSIONS]:
-            if old != sid:
-                del data[old]
-    _save_store(data)
+    path = _sidecar_path()
+    with _store_lock:
+        data = load_store(path)
+        entry = data.get(sid)
+        if entry is None:
+            entry = {"title": "", "updated_at": 0.0, "messages": []}
+            data[sid] = entry
+        if req.user.strip():
+            entry["messages"].append({"role": "user", "content": req.user})
+        if req.assistant.strip():
+            entry["messages"].append({"role": "assistant", "content": req.assistant})
+        entry["messages"] = entry["messages"][-MAX_MESSAGES:]
+        if not entry.get("title"):
+            first_user = next((m["content"] for m in entry["messages"] if m["role"] == "user"), "")
+            entry["title"] = first_user.replace("\n", " ").strip()[:TITLE_CHARS] or "（タイトルなし）"
+        entry["updated_at"] = time.time()
+        # セッション数の上限（updated_at の古い順に消す）
+        if len(data) > MAX_SESSIONS:
+            for old in sorted(data, key=lambda k: data[k].get("updated_at", 0))[:len(data) - MAX_SESSIONS]:
+                if old != sid:
+                    del data[old]
+        _save_store(data, path)
     return {"ok": True}
 
 
@@ -112,8 +139,10 @@ class DeleteReq(BaseModel):
 
 @router.post("/api/code-chat/delete")
 def code_chat_delete(req: DeleteReq):
-    data = load_store()
-    existed = data.pop(req.session_id.strip(), None) is not None
-    if existed:
-        _save_store(data)
+    path = _sidecar_path()
+    with _store_lock:
+        data = load_store(path)
+        existed = data.pop(req.session_id.strip(), None) is not None
+        if existed:
+            _save_store(data, path)
     return {"ok": existed}

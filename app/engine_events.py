@@ -16,6 +16,8 @@ def status_metadata(text: str) -> dict:
         return {"category": "phase", "phase": "prefill"}
     if "thinking..." in lower or value.startswith("🧠"):
         return {"category": "phase", "phase": "thinking"}
+    if "generating tool call" in lower:
+        return {"category": "phase", "phase": "generating"}
 
     tool = _TOOL_LINE.match(value)
     if tool:

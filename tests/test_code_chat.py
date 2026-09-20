@@ -1,5 +1,7 @@
 """Code モード会話の永続化（app/code_chat.py サイドカー + /api/code-chat/*）のテスト。"""
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -97,3 +99,113 @@ def test_restore_without_body_reads_sidecar(workspace, monkeypatch):
     r = client.post("/api/code-chat/restore", json={"session_id": "s-8"})
     assert r.json()["ok"] is True
     assert [m["content"] for m in seen["messages"]] == ["x", "y"]
+
+
+@pytest.mark.parametrize("second_action", ["log", "delete"])
+def test_concurrent_updates_preserve_both_changes(workspace, monkeypatch, second_action):
+    code_chat.code_chat_log(code_chat.LogReq(session_id="old", user="original"))
+    saving = threading.Event()
+    resume = threading.Event()
+    second_started = threading.Event()
+    second_loaded = threading.Event()
+    original_save = code_chat._save_store
+    original_load = code_chat.load_store
+
+    def paused_save(data, path=None):
+        if not saving.is_set():
+            saving.set()
+            assert resume.wait(5), "test did not release the first writer"
+        original_save(data, path)
+
+    def observed_load(path=None):
+        data = original_load(path)
+        if second_started.is_set():
+            second_loaded.set()
+        return data
+
+    def second_update():
+        second_started.set()
+        if second_action == "log":
+            return code_chat.code_chat_log(code_chat.LogReq(session_id="second", user="two"))
+        return code_chat.code_chat_delete(code_chat.DeleteReq(session_id="old"))
+
+    monkeypatch.setattr(code_chat, "_save_store", paused_save)
+    monkeypatch.setattr(code_chat, "load_store", observed_load)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(code_chat.code_chat_log, code_chat.LogReq(session_id="first", user="one"))
+        try:
+            assert saving.wait(5)
+            second = pool.submit(second_update)
+            assert second_started.wait(5)
+            # 先行更新が未確定の間、後続要求は古いJSONを読めない。
+            assert not second_loaded.wait(0.1)
+        finally:
+            resume.set()
+        assert first.result(timeout=5) == {"ok": True}
+        assert second.result(timeout=5) == {"ok": True}
+
+    data = original_load()
+    assert data["first"]["messages"] == [{"role": "user", "content": "one"}]
+    if second_action == "log":
+        assert set(data) == {"old", "first", "second"}
+        assert data["second"]["messages"] == [{"role": "user", "content": "two"}]
+    else:
+        assert set(data) == {"first"}
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "replace"])
+def test_failed_save_preserves_original_and_cleans_temporary(workspace, monkeypatch, failure_stage):
+    code_chat.code_chat_log(code_chat.LogReq(session_id="old", user="保存済み"))
+    path = workspace / code_chat.SIDECAR_NAME
+    original_bytes = path.read_bytes()
+
+    if failure_stage == "write":
+        original_temporary = code_chat.tempfile.NamedTemporaryFile
+
+        def broken_temporary(*args, **kwargs):
+            stream = original_temporary(*args, **kwargs)
+            original_write = stream.write
+
+            def partial_write(payload):
+                original_write(payload[:10])
+                raise OSError("simulated disk write failure")
+
+            stream.write = partial_write
+            return stream
+
+        monkeypatch.setattr(code_chat.tempfile, "NamedTemporaryFile", broken_temporary)
+    else:
+        def failed_replace(source, destination):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(code_chat.os, "replace", failed_replace)
+
+    with pytest.raises(OSError, match="simulated"):
+        code_chat.code_chat_log(code_chat.LogReq(session_id="new", user="追加"))
+
+    assert path.read_bytes() == original_bytes
+    assert set(code_chat.load_store()) == {"old"}
+    assert list(workspace.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("action", ["log", "delete"])
+def test_update_keeps_entry_workspace_after_switch(workspace, monkeypatch, action):
+    code_chat.code_chat_log(code_chat.LogReq(session_id="old", user="original"))
+    other_workspace = workspace / "other"
+    other_workspace.mkdir()
+    original_load = code_chat.load_store
+
+    def switching_load(path=None):
+        data = original_load(path)
+        monkeypatch.setattr(config, "WORKSPACE", other_workspace)
+        return data
+
+    monkeypatch.setattr(code_chat, "load_store", switching_load)
+    if action == "log":
+        code_chat.code_chat_log(code_chat.LogReq(session_id="new", user="new"))
+    else:
+        code_chat.code_chat_delete(code_chat.DeleteReq(session_id="old"))
+
+    data = original_load(workspace / code_chat.SIDECAR_NAME)
+    assert set(data) == ({"old", "new"} if action == "log" else set())
+    assert not (other_workspace / code_chat.SIDECAR_NAME).exists()

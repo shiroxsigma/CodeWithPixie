@@ -1,5 +1,7 @@
 # CodeWithPixie
 
+構成の評価・信頼性改善・今後の開発順序は [プロジェクト解析と改善計画](docs/PROJECT_REVIEW.md) を参照してください。
+
 NoteWithPixie(NWP) の Web UI（FastAPI + Monaco）に、AnythingWithPixie(AWP) の
 **自律コード修正エンジン**を載せたローカル Web アプリ。ブラウザで自然言語の指示を出すと、
 エージェント（AWP の ReAct ループ）がワークスペース内のファイルを自分で読み・検索し、

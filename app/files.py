@@ -2,7 +2,8 @@
 
 注意: これはフロントの「ファイルツリー表示 / エディタ読み書き」用の安全アクセス層。
 エージェント自身の書き込みは AWP のツール(write_file 等)が行い、こちらは通らない
-（AWP ツールは cwd=ワークスペースに chdir 済みという前提でサンドボックスされる）。
+（AWP ツールはエンジンに設定されたセッション別ワークスペースを使う）。
+バックアップ・変更検知は workspace 引数で対象を固定し、画面側のフォルダ切替から分離する。
 """
 from __future__ import annotations
 
@@ -112,9 +113,9 @@ def _read_bytes_win_shared(p: Path, limit: int | None = None) -> bytes:
         k32.CloseHandle(handle)
 
 
-def safe_path(rel: str) -> Path:
-    """相対パスを WORKSPACE 内の絶対パスに解決。外に出ようとしたら ValueError。"""
-    root = config.WORKSPACE
+def safe_path(rel: str, *, workspace: str | Path | None = None) -> Path:
+    """相対パスを指定 workspace（省略時は画面の WORKSPACE）内で解決する。"""
+    root = Path(workspace).resolve() if workspace is not None else config.WORKSPACE
     p = (root / rel).resolve()
     if p != root and root not in p.parents:
         raise ValueError(f"path escapes workspace: {rel}")
@@ -146,7 +147,7 @@ def is_text(rel: str) -> bool:
 MAX_LIST_ENTRIES = 20_000
 
 
-def iter_entries():
+def iter_entries(*, workspace: str | Path | None = None):
     """ワークスペース内のファイル/フォルダを (相対パス, os.DirEntry) で巡る。
 
     **走査時に** IGNORE_DIRS / ドット始まりディレクトリへは降りない（dirnames の
@@ -154,7 +155,7 @@ def iter_entries():
     一度全部辿るため、10万ファイル規模のツリーで致命的に遅かった（実測31秒→1.6秒）。
     scandir の DirEntry は is_dir/is_file/stat がキャッシュされる（追加 syscall 回避）。
     """
-    root = config.WORKSPACE
+    root = Path(workspace).resolve() if workspace is not None else config.WORKSPACE
     for dirpath, dirnames, _ in os.walk(root):
         # 降りないディレクトリをその場で捨てる（os.walk は dirnames の変更に従う）
         dirnames[:] = [d for d in dirnames
@@ -173,10 +174,10 @@ def iter_entries():
             yield os.path.relpath(e.path, root).replace(os.sep, "/"), e
 
 
-def iter_text_files():
+def iter_text_files(*, workspace: str | Path | None = None):
     """ワークスペース内のテキストファイルを (相対パス, Path) で巡る
     （mtime スナップショット・ロールバック用。枝刈り付きの共通走査を使う）。"""
-    for rel, e in iter_entries():
+    for rel, e in iter_entries(workspace=workspace):
         if e.is_file() and is_text(rel):
             yield rel, Path(e.path)
 
@@ -316,11 +317,11 @@ def write_file(rel: str, content: str) -> None:
     p.write_text(content, encoding="utf-8")
 
 
-def snapshot_mtimes() -> dict[str, float]:
+def snapshot_mtimes(*, workspace: str | Path | None = None) -> dict[str, float]:
     """ワークスペース内テキストファイルの (相対パス -> mtime) を撮る。変更検知用。
     枝刈り付きの共通走査を使う（各ターンで呼ばれるので、巨大ツリー全走査は許容できない）。"""
     snap: dict[str, float] = {}
-    for rel, e in iter_text_files():
+    for rel, e in iter_text_files(workspace=workspace):
         try:
             snap[rel] = e.stat().st_mtime
         except OSError:
@@ -328,8 +329,8 @@ def snapshot_mtimes() -> dict[str, float]:
     return snap
 
 
-def diff_changed(before: dict[str, float]) -> list[str]:
+def diff_changed(before: dict[str, float], *, workspace: str | Path | None = None) -> list[str]:
     """before スナップショット以降に新規/変更されたファイルの相対パスを返す。"""
-    after = snapshot_mtimes()
+    after = snapshot_mtimes(workspace=workspace)
     changed = [rel for rel, mt in after.items() if before.get(rel) != mt]
     return sorted(changed)

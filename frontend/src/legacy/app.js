@@ -93,6 +93,12 @@ const isNote = () => state.mode === "note";
 const isPlan = () => state.mode === "plan";
 const isCode = () => state.mode === "code";
 
+let workspaceGeneration = 0;
+let fileOpenGeneration = 0;
+let workspaceSwitching = false;
+let replacementRunning = false;
+let replacementWriting = false;
+
 // 拡張子 → Monaco 言語 ID
 const LANG = {
   py: "python", pyi: "python", js: "javascript", jsx: "javascript", mjs: "javascript",
@@ -480,8 +486,9 @@ function mergeDirListing(dir, r) {
 
 /** 指定ディレクトリの直下をサーバから取得してマージ（遅延読み込みの1単位）。 */
 async function fetchDir(dir) {
+  const workspace = workspaceGeneration;
   const r = await tryJSON("/api/files/list?path=" + encodeURIComponent(dir || ""));
-  if (!r) return false;
+  if (!r || workspace !== workspaceGeneration) return false;
   mergeDirListing(dir, r);
   return true;
 }
@@ -497,11 +504,12 @@ function removeTreeEntry(p) {
 }
 
 async function loadFileList() {
+  const workspace = workspaceGeneration;
   // ルート直下だけ取得（root 表示もここから）。24万ファイルのワークスペースでも
   // 一瞬。深い階層はフォルダ展開のクリック時に fetchDir で取得する。
   state.treeTruncated = false;
   const r = await tryJSON("/api/files/list?path=");
-  if (!r) return;
+  if (!r || workspace !== workspaceGeneration) return;
   renderRootPath(r.root);
   mergeDirListing("", r);
   // すでに展開済みのフォルダは再取得して内容を最新化する
@@ -849,14 +857,22 @@ async function openWithOS(path) {
     @param force  未保存の破棄確認と自動保存 flush を飛ばす（エージェント変更の再読込など）
     @param nav    履歴の積み方: "push"（既定）/ "none"（◀▶ 自身の移動・同じファイルの再読込） */
 async function openFile(path, force, nav = "push") {
+  if (workspaceSwitching) return;
+  const request = ++fileOpenGeneration;
+  const workspace = workspaceGeneration;
+  const model = state.editor.getModel();
+  const version = model.getVersionId();
+  const current = () => request === fileOpenGeneration && workspace === workspaceGeneration
+    && !workspaceSwitching && state.editor.getModel() === model && model.getVersionId() === version;
   // force はエージェント変更の再読込など「捨てると決めた」経路なので flush しない。
   if (!force) await flushAutosave();
+  if (!current()) return;
   // Note モードで flush してもまだ dirty なら、それは保存に失敗している。
-  if (state.dirty && !force && path !== state.currentFile) {
+  if (state.dirty && !force) {
     if (!confirm("未保存の変更があります。破棄して開きますか？")) return;
   }
   const r = await tryJSON("/api/file?path=" + encodeURIComponent(path));
-  if (!r) return;  // 読めなかったら現在の内容を壊さずに留まる
+  if (!r || !current()) return;  // 古い応答で新しい選択や入力を上書きしない。
   // 履歴は「実際に開けた」後に積む。読めなかったファイルを ◀ の行き先にしない。
   if (nav === "push" && state.currentFile && state.currentFile !== path) {
     state.navBack.push(state.currentFile);
@@ -882,6 +898,7 @@ async function openFile(path, force, nav = "push") {
   renderNavState();
   renderPreview();  // setValue でも更新はされるが、150ms 待たずに新ファイルを映す
   await revealInTree(path);  // 既定は閉じた木なので、開いたファイルの祖先だけ開いて見せる
+  if (request !== fileOpenGeneration || workspace !== workspaceGeneration) return;
   renderFileTree();
   if (isNote()) { await loadNotes(); await loadRefs(); }  // 付箋・関連ファイルはノートに随伴
 }
@@ -927,9 +944,10 @@ function renderSaveState(transient) {
 }
 
 async function saveFile() {
+  if (replacementWriting || workspaceSwitching) return false;
   // 進行中の保存があれば、その完了を待ってから判断する。
   while (state.savePromise) await state.savePromise;
-  if (!state.currentFile) return false;
+  if (!state.currentFile || workspaceSwitching) return false;
   state.savePromise = doSave();
   try {
     return await state.savePromise;
@@ -1035,6 +1053,7 @@ let autosaveTimer = null;
 
 function scheduleAutosave() {
   clearTimeout(autosaveTimer);
+  if (replacementRunning || workspaceSwitching) return;
   if (!isNote()) return;
   if (state.conflictDeclined) return;  // 上書きしないと決めた。勝手に書きに行かない
   if (!state.currentFile || !state.dirty) return;
@@ -1049,6 +1068,7 @@ function scheduleAutosave() {
     タブ離脱の直前に呼ぶ。Code モードでは自動保存自体が無いので何もしない。 */
 async function flushAutosave() {
   clearTimeout(autosaveTimer);
+  if (replacementRunning) return;
   if (!isNote()) return;
   if (state.conflictDeclined) return;  // 見送った衝突を、切替やフォーカス移動で蒸し返さない
   if (state.currentFile && state.dirty) await saveFile();
@@ -2168,15 +2188,20 @@ function revealDiagramSource(at) {
 // 置換の対象は**この検索でヒットしたファイル**に限る。件数上限で一覧から溢れたファイルまで
 // 巻き込まないため（サーバ側も paths を明示的に受け取る契約にしてある）。
 let searchTimer = null;
+let searchGeneration = 0;
 let searchHitPaths = [];  // 直近の検索でヒットしたファイル（重複なし・置換の対象）
 
 function onSearch() {
   clearTimeout(searchTimer);
+  searchGeneration++;
+  searchHitPaths = [];
+  updateReplaceStatus();
   searchTimer = setTimeout(() => runSearch($("file-search").value), 250);
 }
 
 /** 検索欄と結果・置換パネルを初期状態へ戻す（作業フォルダ切替時など）。 */
 function clearSearch() {
+  searchGeneration++;
   clearTimeout(searchTimer);
   $("file-search").value = "";
   searchHitPaths = [];
@@ -2190,6 +2215,11 @@ function clearSearch() {
 }
 
 async function runSearch(q) {
+  const request = ++searchGeneration;
+  const workspace = workspaceGeneration;
+  const caseSensitive = $("search-case").checked;
+  searchHitPaths = [];
+  updateReplaceStatus();
   const box = $("search-results");
   const list = $("file-list");
   if (!q.trim()) {
@@ -2200,9 +2230,10 @@ async function runSearch(q) {
     list.classList.remove("hidden");
     return;
   }
-  const params = new URLSearchParams({ q, case: $("search-case").checked ? "true" : "false" });
+  const params = new URLSearchParams({ q, case: caseSensitive ? "true" : "false" });
   const r = await tryJSON("/api/search?" + params);
-  if (!r) return;
+  if (!r || request !== searchGeneration || workspace !== workspaceGeneration
+    || q !== $("file-search").value || caseSensitive !== $("search-case").checked) return;
   searchHitPaths = [...new Set(r.results.map((h) => h.path))];
   box.innerHTML = "";
   for (const hit of r.results) box.appendChild(buildSearchHit(hit));
@@ -2255,49 +2286,86 @@ function toggleReplaceBar() {
 function updateReplaceStatus(text) {
   $("replace-status").textContent = text !== undefined ? text
     : `対象: ヒットした ${searchHitPaths.length} ファイル`;
-  const none = !searchHitPaths.length;
+  const none = !searchHitPaths.length || replacementRunning;
   $("replace-preview-btn").disabled = none;
   $("replace-run-btn").disabled = none;
 }
 
 /** 置換を実行（dry=true ならプレビューのみ・1バイトも書かない）。 */
 async function runReplace(dry) {
+  if (replacementRunning || workspaceSwitching) return;
   const query = $("file-search").value;
   const replace = $("replace-input").value;
+  const paths = [...searchHitPaths];
+  const caseSensitive = $("search-case").checked;
+  const workspace = workspaceGeneration;
+  const searched = searchGeneration;
   if (!query.trim() || !searchHitPaths.length) return;
   if (!dry) {
     const ok = confirm(
       `${searchHitPaths.length} ファイルの「${query}」を「${replace}」に置き換えます。\n\n` +
       `置換前の内容は 🕰 履歴 に残るので元に戻せます。実行しますか？`);
     if (!ok) return;
-    await flushAutosave();  // 手元の未保存分を先に確定させる（置換結果と混ざらないように）
   }
-  updateReplaceStatus(dry ? "確認中…" : "置換中…");
-  let r;
+  replacementRunning = true;
+  clearTimeout(autosaveTimer);
   try {
-    r = await postJSON("/api/search/replace", {
-      query, replace, paths: searchHitPaths,
-      case: $("search-case").checked, dry_run: dry,
-    });
-  } catch (e) {
-    updateReplaceStatus("⚠️ " + e.message);
-    return;
+    if (!dry && paths.includes(state.currentFile)) {
+      const path = state.currentFile;
+      const saved = !state.dirty || await saveFile();
+      if (!saved || state.dirty || state.currentFile !== path) {
+        updateReplaceStatus("⚠️ 未保存の編集を保存できないため、置換を中止しました。");
+        return;
+      }
+    }
+    if (workspace !== workspaceGeneration || searched !== searchGeneration) {
+      updateReplaceStatus("検索対象が変わったため、置換を中止しました。");
+      return;
+    }
+    const openedPath = state.currentFile;
+    const model = state.editor.getModel();
+    const version = model.getVersionId();
+    updateReplaceStatus(dry ? "確認中…" : "置換中…");
+    let r;
+    try {
+      replacementWriting = !dry;
+      r = await postJSON("/api/search/replace", {
+        query, replace, paths,
+        case: caseSensitive, dry_run: dry,
+      });
+    } catch (e) {
+      updateReplaceStatus("⚠️ " + e.message);
+      return;
+    }
+    renderReplacePreview(r);
+    const done = r.total === 0 ? "置き換わる箇所がありません"
+      : dry ? `${r.changed_files} ファイル / ${r.total} 箇所が置き換わります`
+        : `✓ ${r.changed_files} ファイル / ${r.total} 箇所を置換しました（🕰 履歴 から戻せます）`;
+    if (dry) { updateReplaceStatus(done); return; }
+    // 開いているファイルが書き換わったら、エディタの内容とディスクがずれる。
+    const changed = r.files.map((f) => f.path);
+    if (state.currentFile && changed.includes(state.currentFile)) {
+      if (!state.dirty && state.currentFile === openedPath && state.editor.getModel() === model
+        && model.getVersionId() === version) {
+        await openFile(state.currentFile, true, "none");
+      }
+      if (state.dirty) {
+        state.conflictDeclined = true;
+        state.saveError = new ApiError("ディスクを置換しました。処理中の編集は保持しています。保存前に履歴で変更を確認してください。", 409);
+        renderSaveState();
+      }
+    }
+    await runSearch($("file-search").value);  // 置換後の状態で検索し直す
+    // 検索し直すと状態表示が「対象: N ファイル」に戻ってしまう。何をしたのかの
+    // 報告が一瞬で消えると実行できたのか分からないので、ここで出し直す
+    // （#replace-preview は runSearch では消えないのでそのまま残る）。
+    updateReplaceStatus(done);
+  } finally {
+    replacementWriting = false;
+    replacementRunning = false;
+    updateReplaceStatus($("replace-status").textContent);
+    scheduleAutosave();
   }
-  renderReplacePreview(r);
-  const done = r.total === 0 ? "置き換わる箇所がありません"
-    : dry ? `${r.changed_files} ファイル / ${r.total} 箇所が置き換わります`
-      : `✓ ${r.changed_files} ファイル / ${r.total} 箇所を置換しました（🕰 履歴 から戻せます）`;
-  if (dry) { updateReplaceStatus(done); return; }
-  // 開いているファイルが書き換わったら、エディタの内容とディスクがずれる。
-  const changed = r.files.map((f) => f.path);
-  if (state.currentFile && changed.includes(state.currentFile)) {
-    await openFile(state.currentFile, true, "none");
-  }
-  await runSearch($("file-search").value);  // 置換後の状態で検索し直す
-  // 検索し直すと状態表示が「対象: N ファイル」に戻ってしまう。何をしたのかの
-  // 報告が一瞬で消えると実行できたのか分からないので、ここで出し直す
-  // （#replace-preview は runSearch では消えないのでそのまま残る）。
-  updateReplaceStatus(done);
 }
 
 function renderReplacePreview(r) {
@@ -2688,6 +2756,7 @@ async function insertImage(file) {
 const PHASE_LABEL = {
   prefill: (sec) => `応答を待っています（prefill 中… ${sec}s）`,
   thinking: (sec) => `思考中… ${sec}s`,
+  generating: (sec) => `ツール呼び出しを生成中… ${sec}s`,
   tool: (sec) => `ツールを実行中… ${sec}s`,
   verify: (sec) => `結果を検証中… ${sec}s`,
 };
@@ -2775,6 +2844,7 @@ function beginAssistantStream(el) {
 // ログ枠に積むと "⏳ Prefill... / ✅ Prefill: 8.4s / 🧠 Thinking..." が毎ステップ流れて
 // 肝心のツール実行行が埋もれるので、待機インジケータのフェーズ表示に振り替える。
 const PHASE_HINTS = [
+  ["generating", ["Generating tool call"]],
   ["thinking", ["🧠", "Thinking..."]],
   ["prefill", ["⏳", "Prefill"]],
 ];
@@ -3454,11 +3524,24 @@ async function interrupt() {
   const run = chatRuntime.stop();
   if (!run) return;
   if (isCode()) {
-    run.interruption = jsonFetch("/api/interrupt", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: run.sessionId }),
-      signal: AbortSignal.timeout(5000),
-    })
+    run.interruption = (async () => {
+      let stopped = false;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const result = await jsonFetch("/api/interrupt", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: run.sessionId }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!chatRuntime.current(run)) return;
+        if (result.stopped !== false) { stopped = true; break; }
+      }
+      // The aborted reader cannot receive the final files_changed event.
+      await loadFileList();
+      if (chatRuntime.current(run) && state.currentFile && !state.dirty) {
+        await openFile(state.currentFile, true, "none");
+      }
+      if (!stopped) addMessage("error", "停止を要求しましたが、処理の終了をまだ確認できません。ファイルの状態を確認してください。");
+    })()
       .catch((e) => { addMessage("error", e.message); });
   }
   if (approvalPreviews.length) closeDiffPreview();
@@ -3919,13 +4002,23 @@ const chooseWorkspace = () => switchWorkspace($("root-input").value.trim());
     入力欄ではなく引数でパスを受ける。 */
 async function switchWorkspace(path) {
   if (!path) return;
+  if (replacementRunning) { alert("⚠️ 置換が完了してから作業フォルダを切り替えてください。"); return; }
   if (state.streaming) { alert("⚠️ 実行中は作業フォルダを切り替えられません。"); return; }
   const run = chatRuntime.begin("switching");
   if (!run) return;
   let failure = "";
+  let editorReadOnly;
   try {
+    // Code mode has no autosave, but a manual save can still be in flight.
+    while (state.savePromise) await state.savePromise;
     await flushAutosave();  // 切替後は別ワークスペース。保留中の保存はここで確定させる
     if (state.dirty && !confirm("未保存の変更があります。破棄して作業フォルダを切り替えますか？")) return;
+    workspaceSwitching = true;
+    editorReadOnly = state.editor.getOption(state.monaco.editor.EditorOption.readOnly);
+    state.editor.updateOptions({ readOnly: true });
+    workspaceGeneration++;
+    fileOpenGeneration++;
+    searchGeneration++;
     let r;
     try {
       r = await postJSON("/api/workspace", { path });
@@ -3969,6 +4062,8 @@ async function switchWorkspace(path) {
     alert(e.message);
     return false;
   } finally {
+    workspaceSwitching = false;
+    if (editorReadOnly !== undefined) state.editor.updateOptions({ readOnly: editorReadOnly });
     chatRuntime.finish(run, failure);
   }
 

@@ -7,6 +7,7 @@
   - dry_run では1バイトも書かない。実行時は旧内容がローカル履歴に残る
   - 対象は呼び出し側が渡した paths だけ（一覧に出ていないファイルを巻き込まない）
 """
+import shutil
 import sys
 from pathlib import Path
 
@@ -27,6 +28,58 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WORKSPACE", tmp_path.resolve())
     monkeypatch.setattr(settings, "history_enabled", True)
     return tmp_path.resolve()
+
+
+@pytest.fixture(params=["python", "rg"])
+def search_backend(request, monkeypatch):
+    if request.param == "python":
+        monkeypatch.setattr(search, "_rg_available", lambda: False)
+    else:
+        executable = shutil.which(settings.rg_path)
+        if executable is None:
+            pytest.skip("ripgrep is not installed")
+        monkeypatch.setattr(settings, "rg_path", executable)
+        monkeypatch.setattr(search, "_rg_available", lambda: True)
+
+        def unexpected_fallback(*args, **kwargs):
+            pytest.fail("ripgrep search unexpectedly fell back to Python")
+
+        monkeypatch.setattr(search, "_search_python", unexpected_fallback)
+
+
+@pytest.mark.parametrize("query,other", [
+    ("a.b", "axb"),
+    ("a(b", "ab"),
+    ("--help", "help"),
+])
+@pytest.mark.parametrize("case_sensitive", [False, True])
+def test_search_treats_query_literally(workspace, search_backend, query, other,
+                                     case_sensitive):
+    (workspace / "literal.md").write_text(f"{other}\n{query}\n", encoding="utf-8")
+    hits = search.search(query, case_sensitive=case_sensitive)
+    assert [(hit["path"], hit["line"], hit["text"]) for hit in hits] == [
+        ("literal.md", 2, query),
+    ]
+    preview = search.replace_in_files(query, "replacement", ["literal.md"],
+                                      case_sensitive=case_sensitive)
+    assert preview["total"] == 1
+    assert preview["files"][0]["samples"][0]["line"] == 2
+
+
+def test_search_skips_files_over_size_limit(workspace, search_backend, monkeypatch):
+    monkeypatch.setattr(search, "MAX_BYTES", 32)
+    (workspace / "boundary.md").write_text("TARGET" + "x" * 26, encoding="utf-8")
+    (workspace / "large.md").write_text("TARGET" + "x" * 27, encoding="utf-8")
+    assert [hit["path"] for hit in search.search("TARGET")] == ["boundary.md"]
+
+
+def test_search_skips_ignored_directories(workspace, search_backend):
+    (workspace / "visible.md").write_text("TARGET", encoding="utf-8")
+    for directory in ("node_modules", ".git", ".hidden"):
+        nested = workspace / directory / "nested"
+        nested.mkdir(parents=True)
+        (nested / "ignored.md").write_text("TARGET", encoding="utf-8")
+    assert [hit["path"] for hit in search.search("TARGET")] == ["visible.md"]
 
 
 # --- 前後行 -------------------------------------------------------------------

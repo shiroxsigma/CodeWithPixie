@@ -1332,7 +1332,12 @@ def api_interrupt(req: InterruptReq):
     if sess is None:
         raise HTTPException(404, "session not found")
     sess.cancel()
-    return {"ok": True}
+    # A cancellation request can arrive while a tool is still writing. Let the
+    # client refresh files only after that worker releases its turn reservation.
+    stopped = sess.busy.acquire(timeout=3.0)
+    if stopped:
+        sess.busy.release()
+    return {"ok": True, "stopped": stopped}
 
 
 # --- 会話文脈の節約（往復の削除 / 残量の確認 / まるごとリセット） -----------------

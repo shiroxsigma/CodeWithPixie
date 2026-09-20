@@ -20,6 +20,7 @@ def make_sess():
     sess = engine_adapter.AgentSession.__new__(engine_adapter.AgentSession)
     sess._snapshots = {}
     sess._changesets_by_turn = {}
+    sess.workspace = str(config.WORKSPACE)
     return sess
 
 
@@ -51,6 +52,41 @@ def test_rollback_skips_unchanged(workspace):
     sess = make_sess()
     sess.take_turn_snapshot(1)
     assert sess.rollback(1) == []  # 変わっていないファイルは戻し対象外
+
+
+@pytest.mark.parametrize("switch_before_snapshot", [False, True])
+def test_rollback_stays_in_session_workspace(workspace, monkeypatch, switch_before_snapshot):
+    original = workspace / "original"
+    other = workspace / "other"
+    original.mkdir()
+    other.mkdir()
+    (original / "same.py").write_text("original before", encoding="utf-8")
+    (other / "same.py").write_text("other untouched", encoding="utf-8")
+    monkeypatch.setattr(config, "WORKSPACE", original)
+    sess = make_sess()
+    if switch_before_snapshot:
+        monkeypatch.setattr(config, "WORKSPACE", other)
+    sess.take_turn_snapshot(1)
+    (original / "same.py").write_text("original after", encoding="utf-8")
+    monkeypatch.setattr(config, "WORKSPACE", other)
+
+    assert sess.rollback(1) == ["same.py"]
+    assert (original / "same.py").read_text(encoding="utf-8") == "original before"
+    assert (other / "same.py").read_text(encoding="utf-8") == "other untouched"
+    assert config.WORKSPACE == other
+
+
+def test_rollback_rejects_paths_outside_session_workspace(workspace):
+    original = workspace / "original"
+    original.mkdir()
+    outside = workspace / "outside.py"
+    outside.write_text("untouched", encoding="utf-8")
+    sess = make_sess()
+    sess.workspace = str(original)
+    sess._snapshots[1] = {"../outside.py": b"must not be written"}
+
+    assert sess.rollback(1) == []
+    assert outside.read_text(encoding="utf-8") == "untouched"
 
 
 def test_rollback_unknown_turn(workspace):

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +46,26 @@ def test_multiple_phases_share_one_llm_budget(session, monkeypatch):
     assert session._control.snapshot()["llm_calls"] == 1
 
 
+@pytest.mark.parametrize("switch_during_turn", [False, True])
+def test_file_changes_follow_session_workspace(session, tmp_path, monkeypatch, switch_during_turn):
+    original = Path(session.workspace)
+    other = tmp_path.parent / (tmp_path.name + "_other")
+    other.mkdir()
+    monkeypatch.setattr(engine_adapter.config, "WORKSPACE", original if switch_during_turn else other)
+
+    def run(*args, **kwargs):
+        (original / "session.py").write_text("session change", encoding="utf-8")
+        (other / "unrelated.py").write_text("other change", encoding="utf-8")
+        monkeypatch.setattr(engine_adapter.config, "WORKSPACE", other)
+
+    monkeypatch.setattr(session._engine, "run_turn_events", run)
+    events = []
+    session.run_turn("edit", events.append)
+    changed = [event["paths"] for event in events if event["type"] == "files_changed"]
+    assert changed == [["session.py"]]
+    assert engine_adapter.config.WORKSPACE == other
+
+
 def test_settings_change_does_not_change_active_turn(session, monkeypatch):
     monkeypatch.setattr(settings, "think_budget_sec", 90)
     monkeypatch.setattr(settings, "turn_max_llm_calls", 5)
@@ -60,6 +81,35 @@ def test_settings_change_does_not_change_active_turn(session, monkeypatch):
     assert session.reserve_turn()
     assert session._control.limits.think_seconds == 300
     assert session._control.limits.llm_calls == 10
+
+
+def test_server_read_idle_timeout_is_used_by_turn_control(session):
+    session._read_idle_timeout = 120.0
+    assert session.reserve_turn()
+    assert session._control.limits.read_idle_timeout == 120.0
+
+
+@pytest.mark.parametrize("kind", ["code", "note"])
+def test_server_timeout_survives_session_creation_and_think_budget_updates(tmp_path, monkeypatch, kind):
+    core = engine_adapter.bootstrap(engine_adapter.config.AWP_SRC)
+    server = {"base_url": "http://127.0.0.1:1", "model": "test",
+              "overall_timeout": 600, "read_idle_timeout": 120}
+    monkeypatch.setattr(settings, "think_budget_sec", 60)
+    if kind == "code":
+        value = engine_adapter.AgentSession(core, server, str(tmp_path))
+    else:
+        value = engine_adapter.NoteSession(core, server, str(tmp_path), False)
+    try:
+        assert value._engine.context.llm.overall_timeout == 600
+        assert value._new_control().limits.stream_timeout == 600
+        value.set_stream_timeout(engine_adapter.stream_timeout_sec(30))
+        assert value._engine.context.llm.overall_timeout == 600
+        assert value._engine.context.llm.read_idle_timeout == 120
+        value.set_stream_timeout(engine_adapter.stream_timeout_sec(700))
+        assert value._engine.context.llm.overall_timeout == 760
+    finally:
+        if kind == "code":
+            value.close()
 
 
 def test_approval_wait_obeys_turn_deadline(session, monkeypatch):
@@ -105,3 +155,40 @@ def test_cleanup_failure_still_reports_failure_and_releases_lock():
     events = asyncio.run(run())
     assert events[-1]["status"] == "failed"
     assert not session.busy.locked()
+
+
+def test_interrupt_waits_for_committed_file_before_reporting_stopped(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    cancelled = threading.Event()
+    busy = threading.Lock()
+    busy.acquire()
+    target = tmp_path / "committed.txt"
+    session = SimpleNamespace(busy=busy, cancel=cancelled.set)
+    monkeypatch.setattr(main, "_require_manager", lambda: SimpleNamespace(get=lambda sid: session))
+
+    def worker():
+        assert cancelled.wait(2)
+        target.write_text("committed", encoding="utf-8")
+        busy.release()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        assert main.api_interrupt(main.InterruptReq(session_id="test")) == {"ok": True, "stopped": True}
+        assert target.read_text(encoding="utf-8") == "committed"
+        assert not busy.locked()
+    finally:
+        thread.join(timeout=2)
+
+
+def test_interrupt_reports_pending_when_worker_does_not_stop(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    busy = Mock()
+    busy.acquire.return_value = False
+    session = SimpleNamespace(busy=busy, cancel=Mock())
+    monkeypatch.setattr(main, "_require_manager", lambda: SimpleNamespace(get=lambda sid: session))
+    assert main.api_interrupt(main.InterruptReq(session_id="test")) == {"ok": True, "stopped": False}
+    session.cancel.assert_called_once()
+    busy.acquire.assert_called_once_with(timeout=3.0)
+    busy.release.assert_not_called()
