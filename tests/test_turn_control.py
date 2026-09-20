@@ -89,6 +89,40 @@ def test_server_read_idle_timeout_is_used_by_turn_control(session):
     assert session._control.limits.read_idle_timeout == 120.0
 
 
+@pytest.mark.parametrize("decision", ["approve", "reject", "conflict", "edited_approval"])
+def test_committed_changes_are_notified_before_the_turn_finishes(session, decision):
+    target = Path(session.workspace) / "edited.txt"
+    target.write_text("before", encoding="utf-8")
+    events = []
+    assert session.reserve_turn()
+    session._approval_timeout = 1
+
+    def emit(event):
+        events.append(event)
+        if event["type"] == "approval":
+            if decision == "conflict":
+                target.write_text("external edit", encoding="utf-8")
+            session.resolve_approval(event["id"], decision != "reject")
+        if event["type"] == "files_changed":
+            # A refresh can start immediately; the file must already be committed.
+            assert target.read_text(encoding="utf-8") == "after"
+            assert session.busy.locked()
+
+    session._emit_event = emit
+    if decision == "edited_approval":
+        assert session.apply_approval_edit(str(target), "after")["applied"]
+    else:
+        session._approve([{"function": {"name": "write_file", "arguments": json.dumps({
+            "path": str(target), "content": "after",
+        })}}], "")
+    notifications = [event for event in events if event["type"] == "files_changed"]
+    if decision in {"approve", "edited_approval"}:
+        assert notifications == [{"type": "files_changed", "paths": ["edited.txt"]}]
+    else:
+        assert notifications == []
+        assert target.read_text(encoding="utf-8") == ("external edit" if decision == "conflict" else "before")
+
+
 @pytest.mark.parametrize("kind", ["code", "note"])
 def test_server_timeout_survives_session_creation_and_think_budget_updates(tmp_path, monkeypatch, kind):
     core = engine_adapter.bootstrap(engine_adapter.config.AWP_SRC)

@@ -4074,7 +4074,7 @@ const Sl = { id: "split" }, Cl = { id: "right-pane" }, Tl = { id: "chat" }, El =
   }
 });
 dl(Rl).mount("#app");
-oi(() => import("./app-CHwJMGkN.js"));
+oi(() => import("./app-8SAsLj9B.js"));
 export {
   Dl as a,
   wl as c

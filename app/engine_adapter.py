@@ -1057,6 +1057,8 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
                     self._remember_changeset(result["id"])
                     self._emit_event({"type": "status", "text":
                                       f"ChangeSet {result['id']} を一括適用しました（{len(paths)}ファイル）"})
+                    if paths:
+                        self._emit_event({"type": "files_changed", "paths": paths})
                     return ([], "ChangeSetで承認済みの変更を一括適用しました: "
                             + ", ".join(paths)
                             + "。同じ編集を繰り返さず、必要な検証へ進んでください。")
@@ -1085,6 +1087,9 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         result = self._engine.apply_changeset(spec)
         if result.get("applied"):
             self._remember_changeset(result["id"])
+            paths = [item["path"] for item in result.get("changes", [])]
+            if paths and callable(getattr(self, "_emit_event", None)):
+                self._emit_event({"type": "files_changed", "paths": paths})
         return result
 
     # ---- 承認の解決（async エンドポイントから呼ぶ。Lock は取らない: 自己デッドロック回避） ----

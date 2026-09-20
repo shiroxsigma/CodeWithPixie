@@ -3508,14 +3508,17 @@ async function resolveApproval(id, approve, override) {
 // ---- 変更ファイル反映 ----
 async function onFilesChanged(paths) {
   addToolStatus(state.assistantEl, "変更されたファイル: " + paths.join(", "));
-  state.changedPaths = new Set(paths);
+  for (const path of paths) state.changedPaths.add(path);
   await loadFileList();
-  // 開いているファイルが変更された場合はライブ再読込（未保存なら確認）。
+  // Applied edits arrive during generation as well as at turn completion.
+  // Never interrupt the stream with a discard dialog or replace a dirty buffer.
   if (state.currentFile && paths.includes(state.currentFile)) {
     if (!state.dirty) {
       await openFile(state.currentFile, true);
-    } else if (confirm(`${state.currentFile} がエージェントに変更されました。エディタの未保存分を破棄して再読込しますか？`)) {
-      await openFile(state.currentFile, true);
+    } else {
+      state.conflictDeclined = true;
+      state.saveError = new ApiError("エージェントがファイルを更新しました。未保存の編集は保持しています。保存前に変更を確認してください。", 409);
+      renderSaveState();
     }
   }
 }
