@@ -10,6 +10,8 @@ import sys
 import threading
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -23,7 +25,7 @@ client = TestClient(app, base_url="http://127.0.0.1")
 # --- set_plan_phase / フェーズ関数（エンジン不要） ---
 
 def test_set_plan_phase_toggles_fixed_tool_set():
-    """on → PLAN_TOOLS 固定、off → None（code_mode の既定ツール一式へ戻る）。"""
+    """Plan is read-only; returning to Code restores command execution."""
     class Ctx:
         fixed_tool_set = "SENTINEL"
 
@@ -35,7 +37,56 @@ def test_set_plan_phase_toggles_fixed_tool_set():
     sess.set_plan_phase(True)
     assert Engine.context.fixed_tool_set == frozenset(engine_adapter.PLAN_TOOLS)
     sess.set_plan_phase(False)
-    assert Engine.context.fixed_tool_set is None
+    assert Engine.context.fixed_tool_set == engine_adapter.CODE_TOOLS
+
+
+@pytest.fixture
+def real_code_session(tmp_path):
+    core = engine_adapter.bootstrap(engine_adapter.config.AWP_SRC)
+    sess = engine_adapter.AgentSession(
+        core, {"base_url": "http://127.0.0.1:1", "model": "test"}, str(tmp_path))
+    yield sess
+    sess.close()
+
+
+def test_code_profile_retains_core_tools_and_enables_commands(real_code_session):
+    from pixie_core.config import CODE_TOOL_SET
+    from pixie_core.tools import registry_to_openai_tools
+    engine = real_code_session._engine
+    assert CODE_TOOL_SET <= engine_adapter.CODE_TOOLS
+    assert "run_command" in engine.profile.tool_set
+    assert engine.profile.tool_set == engine_adapter.CODE_TOOLS
+    assert engine.context.fixed_tool_set == engine_adapter.CODE_TOOLS
+    assert engine.context.code_mode is True
+    assert engine.profile.system_suffix == engine_adapter.CODE_SYSTEM_SUFFIX
+    schemas = registry_to_openai_tools(sorted(engine.profile.tool_set))
+    assert {schema["function"]["name"] for schema in schemas} == engine_adapter.CODE_TOOLS
+
+
+@pytest.mark.parametrize("copilot", [False, True])
+def test_real_code_profile_restores_commands_after_plan(real_code_session, copilot):
+    sess = real_code_session
+    suffix = sess._engine.profile.system_suffix
+    sess.set_copilot(copilot)
+    extra = {"ask_copilot"} if copilot else set()
+    assert sess._engine.profile.tool_set == engine_adapter.CODE_TOOLS | extra
+    sess.set_plan_phase(True)
+    assert sess._engine.profile.tool_set == engine_adapter.PLAN_TOOLS | extra
+    assert sess._engine.profile.system_suffix == suffix
+    assert "run_command" not in sess._engine.context.fixed_tool_set
+    # Toggling the pack during planning must preserve the read-only phase.
+    sess.set_copilot(not copilot)
+    assert "run_command" not in sess._engine.context.fixed_tool_set
+    sess.set_copilot(copilot)
+    sess.set_plan_phase(False)
+    assert sess._engine.profile.tool_set == engine_adapter.CODE_TOOLS | extra
+    assert "run_command" in sess._engine.context.fixed_tool_set
+    sess.set_copilot(not copilot)
+    assert "run_command" in sess._engine.context.fixed_tool_set
+    assert ("ask_copilot" in sess._engine.profile.tool_set) is (not copilot)
+    assert sess._engine.profile.system_suffix == suffix
+    assert sess._engine.profile.name == "code"
+    assert sess._engine.context.code_mode is True
 
 
 def test_plan_prompt_contract():

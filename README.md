@@ -391,6 +391,13 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 3. `AppContext` を「実行設定(core)」と「UI 機能(app)」に分離。
 4. write の**物理サンドボックス**（現状はworkspace限定＋承認のみ）、権限 allowlist。
 
+## 実モデルでの継続検証
+
+`.venv/Scripts/python.exe scripts/evaluate_cwp.py --cases 3` で、現在選択中のモデルに
+3つのPythonプロジェクトを作成・編集させ、最終編集後のテスト実行と正常終了まで検証する。
+試験用CWP・作業フォルダを分離し、ログと各段階の生成物を保存する。
+手順・合格条件・結果は [実モデル評価](docs/REAL_MODEL_EVALUATION.md) を参照。
+
 ## AWP 依存メモ
 - 参照境界: `../AnythingWithPixie/src/pixie_core/`。
 - CWP は起動時に`pixie_core.API_VERSION`とツール登録数を検証し、**1.12以上を必須**とする。

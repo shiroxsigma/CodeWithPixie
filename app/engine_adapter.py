@@ -23,6 +23,7 @@ import re
 import sys
 import threading
 import uuid
+import xml.etree.ElementTree as ET
 from contextvars import ContextVar
 
 from pathlib import Path
@@ -32,6 +33,25 @@ from .python_kernel import KernelError, PythonKernel
 from .config import settings
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+_TOOL_MARKUP_ONLY = re.compile(
+    r"(?:\s*</?(?:tool_call|function|parameter)(?:=[^<>]*)?\s*/?>?\s*)+"
+)
+
+
+def _incomplete_tool_markup(text) -> bool:
+    """Recognize only a bare, broken tool-envelope response, never prose/code."""
+    if not isinstance(text, str) or not re.search(r"</?tool_call(?:\s|>)", text):
+        return False
+    if not _TOOL_MARKUP_ONLY.fullmatch(text):
+        return False
+    try:
+        # Wrapping also accepts multiple valid XML fragments without rejecting
+        # them merely because they have more than one root element.
+        ET.fromstring("<response>" + text + "</response>")
+    except ET.ParseError:
+        return True
+    return False
 
 # pixie_core はツール実行時にもターンの ContextVar を引き継ぐ。これによりグローバルに
 # 登録されたツールから、実行中の会話専用カーネルへ安全にルーティングできる。
@@ -178,6 +198,30 @@ NOTE_SYSTEM_SUFFIX = (
 - 各ターンの終わりに「次はどのセクションを埋めるか」を1行で示す。
 """
 )
+
+
+#: CWP Code mode explicitly includes test/build command execution. The core's
+#: default Code profile omits run_command; retain its 22 other tools here.
+CODE_TOOLS = frozenset({
+    "map_codebase", "analyze_file", "get_code_outline", "research_code_paths",
+    "read_symbol", "read_file", "grep_search",
+    "search_and_replace", "replace_lines", "write_file", "write_sections",
+    "replace_markdown_section", "insert_after_markdown_heading", "update_markdown_frontmatter",
+    "detect_dead_code", "gather_project_info", "get_file_stats",
+    "view_tree", "get_cwd", "list_directory", "update_state",
+    "delegate_research", "run_command",
+})
+
+
+#: Keep small coding tasks focused while retaining verification and Plan restrictions.
+CODE_SYSTEM_SUFFIX = """
+# CWP の実装・編集手順
+- 明確で小規模な依頼は、必要なファイルと影響範囲を確認したら、すぐ編集ツールで実装する。
+- 思考内でコード全文を転記したり、行数を手計算したり、同じ仮説を繰り返し検討しない。未解決の点は必要なツールで確認する。
+- 行数などの形式制約は get_file_stats 等で実測し、テスト前に整える。
+- 最終変更後に指定されたテストと必要な検証を実行する。失敗は修正して再検証し、成功後は変更内容と検証結果を短く報告する。未実行・未解決の検証を成功扱いしない。
+- Plan・計画フェーズでは読み取り専用を維持し、調査と実行計画の提示だけを行う。実装とコマンド実行は計画フェーズ終了後に行う。
+"""
 
 
 #: Plan モードで LLM に提示する調査系ツール。pixie_core.READONLY_TOOLS（副作用なしと
@@ -566,13 +610,26 @@ class _EngineStreamOps:
             self._emit(value.get("text", ""), end=value.get("end", ""),
                        flush=bool(value.get("flush", False)))
         elif event_type == "turn_completed":
-            reason = value.get("metrics", {}).get("exit_reason", "")
-            if reason.startswith(("llm_connection_error", "empty_response", "loop_force_exit")) or reason == "final_answer_acceptance_unresolved":
-                self.outcome = {"status": "failed", "reason": reason}
-            elif reason.startswith(("max_tool_calls", "iteration_limit", "continuation_limit")):
-                self.outcome = {"status": "limit_reached", "reason": reason}
-            elif reason.startswith("user_rejected"):
-                self.outcome = {"status": "cancelled", "reason": reason}
+            metrics = value.get("metrics") or {}
+            raw_reason = metrics.get("exit_reason")
+            reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
+            reason_code = reason.split(maxsplit=1)[0] if reason else ""
+            # turn_completed means the engine returned, not that the task passed.
+            # Explicit success codes also prevent future/unknown abnormal exits
+            # from retaining the optimistic outcome installed by reserve_turn().
+            if reason_code in {"completed", "final_answer", "final_answer_simple_direct"}:
+                status = "completed"
+            elif reason_code in {
+                "max_tool_calls_reached", "max_tool_calls_reached_with_final",
+                "iteration_limit", "continuation_limit", "thinking_timeout",
+                "turn_timeout", "llm_calls_limit", "tool_calls_limit",
+            }:
+                status = "limit_reached"
+            elif reason_code in {"user_rejected", "cancelled"}:
+                status = "cancelled"
+            else:
+                status = "failed"
+            self.outcome = {"status": status, "reason": reason or "missing_exit_reason"}
             self._emit_event({"type": "turn_metrics", "metrics": value.get("metrics", {})})
 
     def _run_engine_stream(self, user_text: str, *, interactive_fn,
@@ -585,20 +642,27 @@ class _EngineStreamOps:
                 control.cancel()
         options = {"control": control} if control is not None else {}
         if callable(runner):
-            return runner(
+            result = runner(
                 user_text,
                 event_fn=self._on_engine_event,
                 interactive_fn=interactive_fn,
                 show_thinking=show_thinking,
                 **options,
             )
-        return self._engine.run_turn(
-            user_text,
-            output_fn=self._emit,
-            interactive_fn=interactive_fn,
-            show_thinking=show_thinking,
-            **options,
-        )
+        else:
+            result = self._engine.run_turn(
+                user_text,
+                output_fn=self._emit,
+                interactive_fn=interactive_fn,
+                show_thinking=show_thinking,
+                **options,
+            )
+        if (getattr(self, "outcome", {}).get("status", "completed") == "completed"
+                and _incomplete_tool_markup(result)):
+            self.outcome = {"status": "failed", "reason": "incomplete_tool_markup"}
+            self._emit_event({"type": "error", "text":
+                "モデルの応答が未完成のツール呼び出し断片だけだったため、完了を確認できませんでした。"})
+        return result
 
     def _replace_profile(self, *, tool_set, active_packs) -> None:
         """Keep the public profile synchronized with runtime UI toggles."""
@@ -896,7 +960,8 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         self._read_idle_timeout = _server_timeout(server, "read_idle_timeout", 30.0)
         self._server_overall_timeout = _server_timeout(server, "overall_timeout", 0.0)
         self._engine = _create_profiled_engine(
-            core, server, str(workspace), name="code"
+            core, server, str(workspace), name="code", tool_set=CODE_TOOLS,
+            system_suffix=CODE_SYSTEM_SUFFIX,
         )  # 自セッション専用の Engine
         self.set_stream_timeout(stream_timeout_sec(settings.think_budget_sec))
 
@@ -1102,23 +1167,31 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
 
     def set_copilot(self, enabled: bool) -> None:
         """このセッションで ask_copilot ツールの提示を on/off する（context.active_packs 経由）。"""
+        # Fixed tool profiles do not automatically include active pack tools.
+        tool_set = self._engine.context.fixed_tool_set
+        tool_set = CODE_TOOLS if tool_set is None else frozenset(tool_set)
+        tool_set = (tool_set | {"ask_copilot"}) if enabled else (tool_set - {"ask_copilot"})
         self._replace_profile(
-            tool_set=self._engine.context.fixed_tool_set,
+            tool_set=frozenset(tool_set),
             active_packs={"copilot"} if enabled else set(),
         )
 
     def set_plan_phase(self, on: bool) -> None:
         """Code モードの plan-first サブモード: on の間だけ提示ツールを読み取り専用
-        （PLAN_TOOLS）に制限し、off で通常の Code ツール一式に戻す（fixed_tool_set=None
-        → pixie_core の code_mode 既定）。ターン境界での変更は pixie_core がサポートする
+        （PLAN_TOOLS）に制限し、off でコマンド実行を含む CODE_TOOLS に戻す。
+        ターン境界での変更は pixie_core がサポートする
         方法（set_copilot の active_packs 変更と同じ契約）。
 
         計画フェーズのターンはこの制限下で ```plan フェンスの計画だけを出し、承認後
         フロントが計画を次の指示として送り直すことで、フルツールの通常ターンに移る。
         """
+        active_packs = getattr(self._engine.context, "active_packs", set())
+        tool_set = PLAN_TOOLS if on else CODE_TOOLS
+        if "copilot" in active_packs:
+            tool_set = tool_set | {"ask_copilot"}
         self._replace_profile(
-            tool_set=frozenset(PLAN_TOOLS) if on else None,
-            active_packs=getattr(self._engine.context, "active_packs", set()),
+            tool_set=frozenset(tool_set),
+            active_packs=active_packs,
         )
 
     def set_stream_timeout(self, overall: float) -> None:
