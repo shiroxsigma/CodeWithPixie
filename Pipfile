@@ -4,6 +4,7 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
+anythingpixie = {file = "https://github.com/shiroxsigma/AnythingWithPixie/archive/5c904da6443d080261a0848b44d74225de0db02c.zip"}
 fastapi = "*"
 "uvicorn" = {extras = ["standard"], version = "*"}
 pydantic-settings = "*"

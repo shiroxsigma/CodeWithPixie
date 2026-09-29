@@ -217,9 +217,13 @@ def run(args):
     run_dir.mkdir(parents=True)
     # Prevent generated projects from inheriting the product's pytest settings.
     (run_dir / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-    core_src = app_config.AWP_SRC
+    from app.core_loader import core_source
+    core_src = core_source(app_config.AWP_SRC)
     snapshot = run_dir / "engine" / "src"
-    shutil.copytree(core_src, snapshot, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # Copy the engine only, never the whole site-packages directory. Installed
+    # packages and source checkouts share this layout; hashes identify the build.
+    shutil.copytree(core_src / "pixie_core", snapshot / "pixie_core",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     app_snapshot = run_dir / "cwp"
     shutil.copytree(ROOT / "app", app_snapshot / "app", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     (app_snapshot / "static").mkdir()  # HTTP API evaluation does not serve UI assets.
@@ -231,7 +235,13 @@ def run(args):
                  "servers": [server], "active_server": 0}
     runtime_config = app_snapshot / "config.json"
     dump(runtime_config, effective)
-    manifest = {"engine_revision": subprocess.check_output(["git", "-C", str(core_src.parent), "rev-parse", "HEAD"], text=True).strip(),
+    engine_revision = "installed-package"
+    if core_src.name == "src" and (core_src.parent / ".git").exists():
+        revision = subprocess.run(["git", "-C", str(core_src.parent), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True)
+        if revision.returncode == 0:
+            engine_revision = revision.stdout.strip()
+    manifest = {"engine_revision": engine_revision,
                 "cwp_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                 "engine_source_hashes": hashes(snapshot), "cwp_source_hashes": hashes(app_snapshot / "app"),
                 "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -240,7 +250,7 @@ def run(args):
                 "server": {k: server.get(k) for k in ("name", "base_url", "model", "context_length", "overall_timeout", "read_idle_timeout")},
                 "think_budget_sec": effective["think_budget_sec"], "turn_timeout_sec": args.timeout,
                 "turn_max_llm_calls": effective["turn_max_llm_calls"], "turn_max_tool_calls": effective["turn_max_tool_calls"],
-                "cases": CASES[:args.cases], "engine_source": "frozen working tree, including pre-existing uncommitted changes"}
+                "cases": CASES[:args.cases], "engine_source": "frozen pixie_core package; identified by source hashes"}
     dump(run_dir / "manifest.json", manifest)
     env = {**{k: v for k, v in os.environ.items() if not k.startswith("CWP_")},
            "CWP_PORT": str(args.port), "CWP_EVAL_RECEIPTS": str(run_dir / "receipts"),

@@ -8,6 +8,7 @@
 // モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code /
 //   mode-plan で出し分け。
 import { chatRuntime, consumeChatStream } from "../chat/runtime";
+import { setConnectionIssue, setControllerReady, setEditorContext, showView, workspaceView } from "../ui/view";
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
 import {
   available as mdAvailable, pngBackground, renderInto, renderPlain, resetDiagramZoom,
@@ -199,12 +200,21 @@ async function init() {
   // mermaid 図の直接編集（✏️ 編集ボタン → 編集モード。ソース変化→再描画で再入場）
   setDiagramEditor(openDiagramEditor);
   setOnDiagramRendered(onDiagramRendered);
-  await loadMode();
-  applyModeUI();
-  await loadStatus();
-  await loadFileList();
-  if (isNote()) await loadHistory();
-  bindUI();
+  try {
+    await loadMode();
+    applyModeUI();
+    await loadStatus();
+    await loadFileList();
+    if (isNote()) await loadHistory();
+  } catch (e) {
+    setConnectionIssue(e.message || "初期化中に問題が発生しました。設定を確認してください。");
+  }
+  try {
+    bindUI();
+    setControllerReady();
+  } catch (e) {
+    setConnectionIssue(e.message || "画面を準備できませんでした。設定を確認してください。");
+  }
 }
 
 // ---- モード（統合シェル: 📝 Note / 🛠 Code） ---------------------------------
@@ -273,19 +283,13 @@ function applyCopilotVisibility() {
   if (bar) bar.classList.toggle("hidden", !on);
   const ctl = $("settings-copilot-controls");
   if (ctl) ctl.classList.toggle("hidden", !on);
-  // placeholder もここで決める。/copilot は Copilot 連携がオンのときだけ通る経路なので、
-  // オフのまま案内すると「書いてもエラーになる使い方」を教えることになる。
-  // モードとトグルの両方で文言が変わるため、applyModeUI からもここを通す。
-  const hint = on
-    ? "\n（先頭に /copilot と書くと、これまでの調査をまとめて Copilot に質問し、回答を反映します。"
-      + "/copilot_simple ならローカル LLM を経由せず、そのまま直接質問）"
-    : "";
+  // 会話の入口では短い案内に留める。詳しい操作は /help にまとめる。
   const PLACEHOLDER = {
-    note: "例）左の選択部分を、チェックした資料を参考にもう少し技術的な表現に。",
-    plan: "例）設定画面にダークモードの切替を足したい。まず調べて実行計画を立てて。",
-    code: "例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。",
+    note: "文章について相談したいことを入力…",
+    plan: "進め方を相談したいことを入力…",
+    code: "相談したいこと、調べたいこと、変更したいことを入力…",
   };
-  $("chat-input").placeholder = PLACEHOLDER[state.mode] + hint + "\n（/help でコマンド一覧）";
+  $("chat-input").placeholder = PLACEHOLDER[state.mode];
 }
 
 /** Note モード固有の一時状態を捨てる（モード切替・ワークスペース切替時）。 */
@@ -438,14 +442,18 @@ async function clearHistory() {
 async function loadStatus() {
   try {
     const s = await getJSON("/api/status");
-    $("model-name").textContent = s.ready ? (s.model || "(unset)") : "起動失敗";
+    setConnectionIssue(s.ready ? "" : (s.error || "エンジンを起動できませんでした。設定を確認してください。"));
+    const model = s.ready ? (s.model || "(未設定)") : "起動失敗";
+    $("model-name").textContent = model.split(/[\\/]/).pop() || model;
+    $("model-name").title = model;
     if (!s.ready) {
       $("agent-status").textContent = "  ⚠ " + (s.error || "engine not ready");
       return;
     }
-    $("agent-status").textContent = `  ・${s.tools} tools`;
+    $("agent-status").textContent = "";
     renderRootPath(s.workspace);
-  } catch {
+  } catch (e) {
+    setConnectionIssue(e.message || "状態を取得できませんでした。設定を確認してください。");
     $("model-name").textContent = "接続不可";
   }
 }
@@ -789,7 +797,7 @@ async function moveEntry(entry, dst) {
   };
   if (state.currentFile) {
     const np = remap(state.currentFile);
-    if (np !== state.currentFile) { state.currentFile = np; $("current-file").textContent = np; }
+    if (np !== state.currentFile) { state.currentFile = np; $("current-file").textContent = np; setEditorContext(np, state.dirty); }
   }
   state.checkedFiles = new Set([...state.checkedFiles].map(remap));  // Note のチェックを追従
   remapNavHistory(remap);  // ◀▶ と 🕘 の行き先も新しいパスへ
@@ -894,6 +902,7 @@ async function openFile(path, force, nav = "push") {
   markClean();
   renderSaveState();
   $("current-file").textContent = path;
+  if (!force) showView("editor");
   updatePreviewAvailability();
   renderNavState();
   renderPreview();  // setValue でも更新はされるが、150ms 待たずに新ファイルを映す
@@ -924,6 +933,7 @@ function refreshDirty() {
 /** 保存インジケータの唯一の描画点。state から表示を決める。 */
 function renderSaveState(transient) {
   const el = $("save-state");
+  setEditorContext(state.currentFile, state.dirty);
   clearTimeout(saveStateTimer);
   el.classList.remove("save-error");
   el.title = "";
@@ -3072,6 +3082,7 @@ async function clearConversation() {
 }
 
 async function sendChat() {
+  if (!workspaceView.ready) return;
   if (state.streaming) return;
   const input = $("chat-input");
   const msg = input.value.trim();
@@ -3821,6 +3832,7 @@ let approvalPreviews = [];  // 承認で表示中のプレビュー [{path, befo
 let approvalEditInfo = null;  // 「修正して承認」が有効なとき {id, path}
 
 function openDiffPreview(base, proposed, onApply, label, opts = {}) {
+  showView("editor");
   const m = state.monaco;
   $("diff-label").textContent = label || "差分プレビュー：左＝現在 ／ 右＝提案（右は編集して調整可）";
   $("diff-overlay").classList.remove("hidden");
@@ -3906,6 +3918,7 @@ async function resolveApprovalEdit(id, path, content) {
 // ここで承認するまでファイルは1字も変わらない（＝この画面が唯一の実行への入口）。
 
 function openPlanView(planText) {
+  showView("editor");
   state.planText = planText;
   renderInto($("plan-body"), planText);   // 計画は Markdown（番号付きリスト）で書かせている
   $("plan-label").textContent = "実行計画（承認するまでファイルは変更されません）";

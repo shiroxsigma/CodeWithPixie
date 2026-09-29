@@ -13,10 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import config, engine_adapter, note_prompts  # noqa: E402
 
 _AWP_SRC = config.AWP_SRC
-needs_awp = pytest.mark.skipif(
-    not (_AWP_SRC / "pixie_core" / "_api.py").exists(),
-    reason=f"AnythingWithPixie が見つからない: {_AWP_SRC}",
-)
 
 
 # --- 静的 suffix（エンジン不要） ---
@@ -154,7 +150,6 @@ def test_guard_cancel_short_circuits():
 
 # --- bootstrap 依存（AWP が隣にある場合のみ） ---
 
-@needs_awp
 def test_bootstrap_and_note_tools_registered():
     core = engine_adapter.bootstrap(_AWP_SRC)
     ver = tuple(int(x) for x in core.API_VERSION.split(".")[:2])
@@ -179,7 +174,6 @@ def test_bootstrap_and_note_tools_registered():
     assert got == set(names)
 
 
-@needs_awp
 def test_note_tools_execute_through_real_dispatcher(tmp_path, monkeypatch):
     """本物の pixie_core ディスパッチで Note ツールが実行まで届くことの回帰テスト。
     旧実装（**kwargs ラッパ）では「必要な引数 'kwargs' が不足しています。」が
@@ -193,7 +187,6 @@ def test_note_tools_execute_through_real_dispatcher(tmp_path, monkeypatch):
     assert "memo.md:1" in execute_builtin_tool("grep_workspace", {"query": "hello"})
 
 
-@needs_awp
 def test_note_session_engine_profile(tmp_path):
     engine_adapter.bootstrap(_AWP_SRC)
     session = engine_adapter.NoteSession(

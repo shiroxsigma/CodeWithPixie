@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { chatRuntime } from "../chat/runtime";
+import { toggleChatFiles, workspaceView } from "../ui/view";
 
 const { state: chat, busy } = chatRuntime;
 const phaseLabel = computed(
@@ -18,6 +19,21 @@ const phaseLabel = computed(
       failed: "失敗",
     })[chat.phase],
 );
+
+const examples = [
+  "このプロジェクトの構成を教えて",
+  "変更したい機能の実装場所を探して",
+  "小さな改善を一緒に進めたい",
+];
+
+function useExample(text: string) {
+  const input = document.getElementById(
+    "chat-input",
+  ) as HTMLTextAreaElement | null;
+  if (!input) return;
+  if (!input.value.trim()) input.value = text;
+  input.focus();
+}
 </script>
 
 <template>
@@ -207,6 +223,15 @@ const phaseLabel = computed(
         <div class="section-head">
           <span>チャット</span>
           <span class="fm-actions">
+            <button
+              id="chat-files-btn"
+              type="button"
+              :aria-expanded="workspaceView.filesOpen"
+              aria-controls="filemgr"
+              @click="toggleChatFiles"
+            >
+              ファイルを探す
+            </button>
             <span
               id="session-info"
               class="hint code-only"
@@ -235,8 +260,31 @@ const phaseLabel = computed(
             </button>
           </span>
         </div>
+        <div id="chat-welcome">
+          <div class="welcome-mark" aria-hidden="true">✦</div>
+          <p class="welcome-eyebrow">CODE WITH PIXIE</p>
+          <h1>何から始めましょうか。</h1>
+          <p class="welcome-copy">
+            考えを整理するところから、ファイルを直すところまで。<br />やりたいことを、そのまま話してください。
+          </p>
+          <div class="welcome-examples" aria-label="依頼の例">
+            <button
+              v-for="example in examples"
+              :key="example"
+              type="button"
+              @click="useExample(example)"
+            >
+              {{ example }}<span aria-hidden="true">↗</span>
+            </button>
+          </div>
+        </div>
         <div id="messages"></div>
-        <div id="approval" class="hidden code-only"></div>
+        <div
+          id="approval"
+          class="hidden code-only"
+          role="region"
+          aria-label="承認が必要な操作"
+        ></div>
         <div id="composer">
           <!-- 選択テキスト添付は両モード共通（Code でも「この関数を直して」が効く） -->
           <div id="chip-bar">
@@ -244,8 +292,9 @@ const phaseLabel = computed(
           </div>
           <textarea
             id="chat-input"
+            aria-label="メッセージ"
             rows="3"
-            placeholder="例）src/foo.py に入力値を検証する関数を追加して。テストも書いて実行して確認して。"
+            placeholder="相談したいこと、調べたいこと、変更したいことを入力…"
           ></textarea>
           <div class="composer-actions">
             <span class="hint">Ctrl+Enter で送信</span>
@@ -256,11 +305,13 @@ const phaseLabel = computed(
               id="send-btn"
               :class="{ stop: busy }"
               :disabled="
-                chat.phase === 'stopping' || chat.phase === 'switching'
+                !workspaceView.ready ||
+                chat.phase === 'stopping' ||
+                chat.phase === 'switching'
               "
               :title="busy ? 'エージェントの実行を中断する' : ''"
             >
-              {{ busy ? "停止" : "送信" }}
+              {{ !workspaceView.ready ? "準備中" : busy ? "停止" : "送信" }}
             </button>
           </div>
           <!-- Copilot 取り込みバー（Note モード専用。設定モーダル側の #copilot-* とは別 id） -->

@@ -32,9 +32,65 @@ test.beforeEach(async ({ page }) => {
     route.fulfill({ json: { ok: true } }),
   );
   await page.goto("/");
-  await expect(page.locator("#editor .monaco-editor")).toBeVisible({
+  await expect(page.locator("#editor .monaco-editor")).toBeAttached({
     timeout: 15_000,
   });
+  await expect(page.locator("#chat-welcome")).toBeVisible();
+});
+
+test("switching views preserves the running conversation and composer", async ({
+  page,
+}) => {
+  await page.locator("#chat-input").fill("first");
+  await page.locator("#send-btn").click();
+  await expect(page.locator('[role="status"]')).toHaveText("実行中");
+  const original = page.locator("#messages");
+  await page.locator("#view-editor-btn").click();
+  await expect(page.locator("#editor .monaco-editor")).toBeVisible();
+  await page.locator("#view-chat-btn").click();
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "token", text: "still running" });
+    (window as any).emitChat({ type: "done" });
+  });
+  await expect(original).toContainText("still running");
+  await expect(page.locator('[role="status"]')).toHaveText("完了");
+  await page.locator("#chat-input").fill("draft");
+  await page.locator("#view-editor-btn").click();
+  await page.locator("#view-chat-btn").click();
+  await expect(page.locator("#chat-input")).toHaveValue("draft");
+});
+
+test("mobile approval keeps the diff and decision controls together", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 780 });
+  let decision: boolean | undefined;
+  await page.route("**/api/approve", (route) => {
+    decision = route.request().postDataJSON().approve;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.locator("#chat-input").fill("change a file");
+  await page.locator("#send-btn").click();
+  await page.evaluate(() =>
+    (window as any).emitChat({
+      type: "approval",
+      id: "mobile-approval",
+      calls: [
+        {
+          name: "write_file",
+          args: { path: "demo.txt" },
+          needs_approval: true,
+          preview: { path: "demo.txt", before: "before", after: "after" },
+        },
+      ],
+    }),
+  );
+  await expect(page.locator("#diff-overlay")).toBeVisible();
+  await expect(page.locator("#approval .btn-reject")).toBeVisible();
+  await expect(page.locator("#send-btn")).toBeVisible();
+  await page.locator("#approval .btn-reject").click();
+  await expect.poll(() => decision).toBe(false);
+  await page.evaluate(() => (window as any).emitChat({ type: "done" }));
 });
 
 test("unexpected EOF shows failure and the next turn can complete", async ({

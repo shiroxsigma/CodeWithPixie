@@ -27,10 +27,6 @@ from app import config, engine_adapter, main, mode  # noqa: E402
 client = TestClient(main.app, base_url="http://127.0.0.1")
 
 _AWP_SRC = config.AWP_SRC
-needs_awp = pytest.mark.skipif(
-    not (_AWP_SRC / "pixie_core" / "_api.py").exists(),
-    reason=f"AnythingWithPixie が見つからない: {_AWP_SRC}",
-)
 
 
 @pytest.fixture()
@@ -105,7 +101,6 @@ def test_plan_system_suffix_asks_for_fenced_numbered_plan():
     assert "計画モード" in sfx
 
 
-@needs_awp
 def test_plan_tools_are_subset_of_core_readonly():
     """PLAN_TOOLS が pixie_core の読み取り専用集合に収まり、破壊的集合と交わらないこと。
 
@@ -115,7 +110,6 @@ def test_plan_tools_are_subset_of_core_readonly():
     assert not engine_adapter.PLAN_TOOLS.intersection(core.DESTRUCTIVE_TOOLS)
 
 
-@needs_awp
 def test_plan_session_engine_profile(tmp_path):
     """エンジンに固定ツールプロファイルとして渡っていること（提示の実体）。"""
     engine_adapter.bootstrap(_AWP_SRC)

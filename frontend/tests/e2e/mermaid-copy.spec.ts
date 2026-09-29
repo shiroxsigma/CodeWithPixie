@@ -30,6 +30,7 @@ test("Mermaid の白背景コピーは白い PNG をクリップボードへ書�
 
   try {
     await page.goto("/");
+    await page.locator("#view-editor-btn").click();
     await expect(page.locator("#editor .monaco-editor")).toBeVisible({
       timeout: 15_000,
     });

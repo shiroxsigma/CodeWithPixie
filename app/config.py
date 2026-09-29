@@ -2,7 +2,7 @@
 
 優先順位: 環境変数 > .env > config.json > デフォルト値。
 
-CodeWithPixie は AnythingWithPixie (AWP) のエンジンを sys.path 経由で読み込み、
+CodeWithPixie は AnythingWithPixie (AWP) の共通パッケージを読み込み、
 Web(FastAPI) から自律コード修正エージェントとして駆動する。LLM 接続は AWP の
 LMStudioBackend が担うため、本アプリは接続先(servers)とワークスペースだけを持つ。
 """
@@ -50,9 +50,9 @@ class Settings(BaseSettings):
             file_secret_settings,
         )
 
-    # --- AnythingWithPixie エンジンの所在（sys.path に前置される） ---
-    # 相対パスはプロジェクトルート基準で解決する。
-    awp_src: str = "../AnythingWithPixie/src"
+    # --- 任意の開発用AWP src。空ならインストール済み共通エンジンを利用 ---
+    # 明示した相対パスはプロジェクトルート基準で解決する。
+    awp_src: str = ""
 
     # --- エージェントが作業する対象フォルダ（サンドボックス兼 cwd） ---
     # 起動時にこの下へ os.chdir する。AWP の永続状態(.pixie_notes/)もここに作られる。
@@ -126,7 +126,7 @@ def _resolve(raw: str) -> Path:
 WORKSPACE = _resolve(settings.workspace_root)
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
-AWP_SRC = _resolve(settings.awp_src)
+AWP_SRC = _resolve(settings.awp_src) if settings.awp_src.strip() else None
 
 
 def _read_config_json() -> dict:

@@ -2,8 +2,8 @@
 
 Phase 2 以降: AWP 内部（engine/main/registry/...）へは直接触れず、AWP が公開する
 **単一の安定境界 `pixie_core`** だけに依存する。これにより AWP の内部変更に対して
-CWP が静かに壊れるリスク（監査 Fable の Major）を解消する。AWP/src を sys.path に
-前置してから `import pixie_core` する、その1点だけが AWP との接点。
+CWP が静かに壊れるリスク（監査 Fable の Major）を解消する。通常はインストール済み
+`pixie_core`、開発時だけ明示したAWP/srcを使う。解決処理は core_loader に集約する。
 
 このファイルの責務（Web 固有・pixie_core には持ち込まない部分）:
 - 出力(output_fn)を端末制御文字除去のうえ token/status の SSE イベントへ分類（監査 F2）。
@@ -31,6 +31,7 @@ from pathlib import Path
 from . import config, files, note_prompts, note_tools, patch
 from .python_kernel import KernelError, PythonKernel
 from .config import settings
+from .core_loader import load_core
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -368,8 +369,8 @@ _capabilities: dict = {}
 HISTORY_API = False
 
 
-def bootstrap(awp_src):
-    """AWP/src を sys.path に前置し、公開境界 pixie_core を読み込む（プロセス1回）。
+def bootstrap(awp_src=None):
+    """公開パッケージ pixie_core を読み込む（任意の開発用src指定可、プロセス1回）。
 
     マルチセッションでは複数の AgentSession を作るが、AWP モジュールの import と stdout の
     utf-8 化はプロセス共有の1回で済む。pixie_core.API_VERSION の互換性もここで検証する。
@@ -377,10 +378,6 @@ def bootstrap(awp_src):
     global _core, _capabilities
     if _core is not None:
         return _core
-
-    awp_src = str(awp_src)
-    if awp_src not in sys.path:
-        sys.path.insert(0, awp_src)
 
     # engine 内の output_fn を通さない直書き print が cp932 コンソールで
     # UnicodeEncodeError を投げると worker スレッドのターンが例外死する（監査指摘）。
@@ -390,7 +387,7 @@ def bootstrap(awp_src):
         except Exception:
             pass
 
-    import pixie_core  # AWP との唯一の接点
+    pixie_core = load_core(awp_src)
 
     ver = str(getattr(pixie_core, "API_VERSION", ""))
     # 1.12+ が必須: ターン制御と中断可能なLLM通信を使うため。

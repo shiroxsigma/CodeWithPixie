@@ -1,5 +1,54 @@
+<script setup lang="ts">
+import { workspaceView, showView } from "../ui/view";
+
+function openSettings() {
+  document.getElementById("settings-btn")?.click();
+}
+</script>
+
 <template>
   <div class="brand">CodeWithPixie</div>
+  <nav class="view-switch" aria-label="表示切替">
+    <button
+      id="view-chat-btn"
+      type="button"
+      :aria-current="workspaceView.current === 'chat' ? 'page' : undefined"
+      :class="{ active: workspaceView.current === 'chat' }"
+      @click="showView('chat')"
+    >
+      会話
+    </button>
+    <button
+      id="view-editor-btn"
+      type="button"
+      :aria-current="workspaceView.current === 'editor' ? 'page' : undefined"
+      :class="{ active: workspaceView.current === 'editor' }"
+      @click="showView('editor')"
+    >
+      編集
+    </button>
+  </nav>
+  <button id="edit-context-btn" type="button" @click="showView('editor')">
+    <span class="edit-context-label">{{
+      workspaceView.currentFile || "編集画面を開く"
+    }}</span>
+    <span
+      v-if="workspaceView.dirty"
+      class="unsaved-dot"
+      aria-label="未保存の変更あり"
+      >● 未保存</span
+    >
+    <span aria-hidden="true">↗</span>
+  </button>
+  <button
+    v-if="workspaceView.connectionIssue"
+    id="connection-issue-btn"
+    type="button"
+    :title="workspaceView.connectionIssue"
+    @click="openSettings"
+  >
+    接続を確認してください
+  </button>
   <button id="mode-btn" title="モード切替">…</button>
   <button
     id="code-style-btn"

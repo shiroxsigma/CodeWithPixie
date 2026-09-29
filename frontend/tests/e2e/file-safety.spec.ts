@@ -64,6 +64,7 @@ async function setup(page: Page, mode = "code") {
     dialog.message().includes("別の場所") ? dialog.dismiss() : dialog.accept(),
   );
   await page.goto("/");
+  await page.locator("#view-editor-btn").click();
   await expect(page.locator('#file-list li[data-path="a.txt"]')).toBeVisible();
   await expect(page.locator("#editor .monaco-editor")).toBeVisible();
   return { disk, calls };
@@ -85,6 +86,19 @@ async function open(page: Page, path = "a.txt") {
   await page.locator(`#file-list li[data-path="${path}"] .fname`).click();
   await expect(page.locator("#current-file")).toHaveText(path);
 }
+
+test("chat and editor views keep the unsaved file buffer", async ({ page }) => {
+  await setup(page);
+  await open(page);
+  await edit(page, "draft change");
+  await expect(page.locator("#save-state")).toContainText("未保存");
+  await page.locator("#view-chat-btn").click();
+  await expect(page.locator("#edit-context-btn")).toContainText("a.txt");
+  await expect(page.locator("#edit-context-btn")).toContainText("未保存");
+  await page.locator("#edit-context-btn").click();
+  await expect(page.locator("#editor .monaco-editor")).toBeVisible();
+  expect(await editorText(page)).toBe("draft change");
+});
 
 async function prepareReplace(page: Page) {
   await page.locator("#file-search").fill("old");
@@ -329,36 +343,64 @@ test("Code workspace switch waits for an in-flight manual save", async ({
 });
 
 for (const dirty of [false, true]) {
-  test(`applied edits appear before generation ends and ${dirty ? "preserve dirty" : "refresh clean"} buffers`, async ({ page }) => {
+  test(`applied edits appear before generation ends and ${dirty ? "preserve dirty" : "refresh clean"} buffers`, async ({
+    page,
+  }) => {
     await page.addInitScript(() => {
       localStorage.setItem("pixie.codeStyle", "normal");
       const original = window.fetch.bind(window);
-      window.fetch = async (input, init) => input === "/api/chat"
-        ? new Response(new ReadableStream({
-            start(controller) {
-              (window as any).emitTestEvent = (event: object) => controller.enqueue(
-                new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
-              (window as any).endTestStream = () => controller.close();
-            },
-          }), { headers: { "Content-Type": "text/event-stream" } })
-        : original(input, init);
+      window.fetch = async (input, init) =>
+        input === "/api/chat"
+          ? new Response(
+              new ReadableStream({
+                start(controller) {
+                  (window as any).emitTestEvent = (event: object) =>
+                    controller.enqueue(
+                      new TextEncoder().encode(
+                        `data: ${JSON.stringify(event)}\n\n`,
+                      ),
+                    );
+                  (window as any).endTestStream = () => controller.close();
+                },
+              }),
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          : original(input, init);
     });
     const { disk } = await setup(page);
     const dialogs: string[] = [];
-    page.on("dialog", dialog => dialogs.push(dialog.message()));
+    page.on("dialog", (dialog) => dialogs.push(dialog.message()));
     await open(page);
     if (dirty) await edit(page, "my unsaved edits");
     await page.locator("#chat-input").fill("edit then verify");
     await page.locator("#send-btn").click();
     await expect(page.locator('[role="status"]')).toHaveText("実行中");
     disk["a.txt"] = "committed during generation";
-    await page.evaluate(() => (window as any).emitTestEvent({ type: "files_changed", paths: ["a.txt"] }));
-    await expect.poll(() => editorText(page)).toBe(dirty ? "my unsaved edits" : disk["a.txt"]);
-    await expect(page.locator('#file-list li[data-path="a.txt"]')).toHaveClass(/changed/);
+    await page.evaluate(() =>
+      (window as any).emitTestEvent({
+        type: "files_changed",
+        paths: ["a.txt"],
+      }),
+    );
+    await expect
+      .poll(() => editorText(page))
+      .toBe(dirty ? "my unsaved edits" : disk["a.txt"]);
+    await expect(page.locator('#file-list li[data-path="a.txt"]')).toHaveClass(
+      /changed/,
+    );
     disk["new.txt"] = "created during generation";
-    await page.evaluate(() => (window as any).emitTestEvent({ type: "files_changed", paths: ["new.txt"] }));
-    await expect(page.locator('#file-list li[data-path="new.txt"]')).toHaveClass(/changed/);
-    await expect(page.locator('#file-list li[data-path="a.txt"]')).toHaveClass(/changed/);
+    await page.evaluate(() =>
+      (window as any).emitTestEvent({
+        type: "files_changed",
+        paths: ["new.txt"],
+      }),
+    );
+    await expect(
+      page.locator('#file-list li[data-path="new.txt"]'),
+    ).toHaveClass(/changed/);
+    await expect(page.locator('#file-list li[data-path="a.txt"]')).toHaveClass(
+      /changed/,
+    );
     await expect(page.locator('[role="status"]')).toHaveText("実行中");
     expect(dialogs).toEqual([]);
     await page.evaluate(() => {

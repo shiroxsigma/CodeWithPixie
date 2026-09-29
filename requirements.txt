@@ -1,4 +1,6 @@
 fastapi
+# Shared AWP engine; immutable source revision, no sibling checkout required.
+anythingpixie @ https://github.com/shiroxsigma/AnythingWithPixie/archive/5c904da6443d080261a0848b44d74225de0db02c.zip
 uvicorn[standard]
 pydantic-settings
 python-dotenv

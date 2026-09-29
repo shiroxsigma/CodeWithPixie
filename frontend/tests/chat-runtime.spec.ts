@@ -7,6 +7,7 @@ import {
   consumeChatStream,
 } from "../src/chat/runtime";
 import WorkspaceShell from "../src/components/WorkspaceShell.vue";
+import { setControllerReady, workspaceView } from "../src/ui/view";
 
 function setup() {
   const runtime = createChatRuntime();
@@ -61,7 +62,11 @@ describe("chat lifecycle", () => {
 
   it("renders Vue controls from lifecycle state", async () => {
     chatRuntime.select("ui");
+    workspaceView.ready = false;
     const wrapper = mount(WorkspaceShell);
+    expect(wrapper.get("#send-btn").attributes("disabled")).toBeDefined();
+    expect(wrapper.get("#send-btn").text()).toBe("準備中");
+    setControllerReady();
     const run = chatRuntime.begin()!;
     await nextTick();
     expect(wrapper.get("#send-btn").text()).toBe("停止");

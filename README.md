@@ -1,5 +1,21 @@
 # CodeWithPixie
 
+AWP の共通エンジンを使い、会話から調査・編集・検証へ進むローカルWebアプリです。
+起動時は **会話** を表示し、必要なときに **編集** へ切り替えます。表示を切り替えても、
+進行中の応答・会話・入力中の文章・未保存のエディタ内容を保持します。
+Code / Note / Plan は作業モードであり、会話／編集の表示切替とは別です。
+
+- **会話**: 依頼例、入力欄、保存済み会話、折りたたみ式のファイル検索。
+- **編集**: Monaco、ファイル一覧、Markdownプレビュー、差分確認。ファイルを開く操作や
+  差分・計画の確認から移動できます。エージェントによる背景の再読込では表示を変えません。
+- 狭い画面でも会話／編集を切り替えられます。ファイルパネルは `Esc` で閉じられます。
+
+`setup.bat` でWebの依存と版を固定した共通エンジンを導入できます。
+AWPの兄弟ディレクトリは通常配布では不要です。開発中のAWPを使う場合は
+`CWP_AWP_SRC` または `config.json` の `awp_src` にその `src` を指定します。
+未指定ならインストール済み `pixie_core` を使い、未インストールの開発環境だけ
+兄弟ディレクトリへフォールバックします。
+
 構成の評価・信頼性改善・今後の開発順序は [プロジェクト解析と改善計画](docs/PROJECT_REVIEW.md) を参照してください。
 
 NoteWithPixie(NWP) の Web UI（FastAPI + Monaco）に、AnythingWithPixie(AWP) の
@@ -19,8 +35,8 @@ AnythingWithPixie/src/pixie_core/     ← AWP のコア engine 群を収めた�
 NoteWithPixie（安全・読取専用の Web エディタ）  … 不変
 ```
 
-- **CWP は AWP 内部に直接触れず、公開境界 `pixie_core` だけに依存**する。接点は
-  「AWP/src を sys.path に前置して `import pixie_core` する」1点のみ（`app/engine_adapter.py`）。
+- **CWP は公開境界 `pixie_core` だけに依存**する。`app/core_loader.py` で
+  インストール済みパッケージまたは明示した開発用ソースを解決する。
 - `pixie_core` は engine/tools/state/registry/config 等14モジュールを収めた **`src/pixie_core/` パッケージ**。
   `AgentProfile` / `ContextPolicy` / `create_engine()` / `Engine.run_turn_events()` /
   `Engine.get_turn_metrics()` / `CancelTurn` / 履歴編集 / WorkspaceSnapshot / Workset /
@@ -93,7 +109,7 @@ LAN起動時は画面とAPIのすべてを16文字以上の共有トークンで
 
 | キー | 既定 | 説明 |
 |---|---|---|
-| `awp_src` | `../AnythingWithPixie/src` | AWP エンジンの場所（sys.path に前置） |
+| `awp_src` | 空 | 開発用AWPの `src` を明示する場合だけ指定。通常はインストール済みコアを使用 |
 | `workspace_root` | `./workspace` | エージェントの作業対象＝cwd＝サンドボックス |
 | `servers[]` | LM Studio 単一 | AWP と同形式の接続先リスト（先頭を使用） |
 | `host` / `port` | `127.0.0.1` / `8770` | ローカルバインド |
@@ -399,7 +415,7 @@ index は後からずれ、別の往復を消してしまうため。ターン I
 手順・合格条件・結果は [実モデル評価](docs/REAL_MODEL_EVALUATION.md) を参照。
 
 ## AWP 依存メモ
-- 参照境界: `../AnythingWithPixie/src/pixie_core/`。
+- 参照境界: インストール済み `pixie_core` の公開API（開発時は `awp_src` で指定可能）。
 - CWP は起動時に`pixie_core.API_VERSION`とツール登録数を検証し、**1.12以上を必須**とする。
 - `/api/status`はバージョン番号に加えて、公開メソッドから検出した`capabilities`を返す。
   WorkspaceSnapshot / Workset / ChangeSet / 履歴 / AgentProfile / ContextPolicy / 型付きイベント /
@@ -409,5 +425,6 @@ index は後からずれ、別の往復を消してしまうため。ターン I
   API 1.11ではターン完了時に`turn_metrics`も配信し、LLM呼出数・ツール回数・終了理由を表示する。
   API 1.12では依頼単位の`TurnControl`を追加し、LLM通信の中断、依頼全体の期限、LLM・ツール呼出上限を
   複数フェーズで共有する。SSEの`done.status`はcompleted / failed / cancelled / limit_reachedを区別する。
-- `.github/workflows/test.yml`はAWPもチェックアウトし、Python 3.12 / 3.13で統合テストを実行する。
+- `.github/workflows/test.yml`はAWPのソースをチェックアウトせず、固定した配布パッケージで
+  Python 3.12 / 3.13の統合テストを実行する。
 - AWP を更新して境界 API を変えた場合は `pixie_core.API_VERSION` を上げ、本 README も更新すること。

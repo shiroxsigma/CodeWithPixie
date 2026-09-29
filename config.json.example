@@ -1,5 +1,5 @@
 {
-  "awp_src": "../AnythingWithPixie/src",
+  "awp_src": "",
   "workspace_root": "./workspace",
   "host": "127.0.0.1",
   "port": 8771,
