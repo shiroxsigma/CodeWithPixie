@@ -75,7 +75,7 @@ def build_workset_user_text(user_msg: str, selection: str, workset: dict | None,
                             selection_max_chars: int = 8000) -> str:
     """WorkspaceSnapshot/Workset 前提の動的ユーザーテキストを組み立てる。
 
-    ワークスペース内の本文はプロンプトへ複製せず、必要時に read_file で取得させる。
+    ワークスペース内は質問の識別子に一致する短い抜粋だけ同梱し、全文は必要時に取得させる。
     WorkspaceSnapshot に載せられない外部参照の抽出テキストだけは、従来どおり予算内で
     同梱する。最後に必ず本題を置き、小型モデルで指示が前置きに埋もれるのを防ぐ。
     """
@@ -89,15 +89,34 @@ def build_workset_user_text(user_msg: str, selection: str, workset: dict | None,
 
     if workset and workset.get("items"):
         rows = []
+        excerpt_budget = 6000
         for item in workset["items"]:
             source = "未保存バッファ" if item.get("buffer") else "ディスク"
             rows.append(
                 f"- `{item['path']}` ({item.get('role', 'pinned')}, "
                 f"{item.get('lines', 0)}行/{item.get('chars', 0)}文字, {source})"
             )
+            matches = item.get("query_match_lines", [])
+            if matches:
+                rows.append("  質問の識別子の一致行（最大12件）: "
+                            + ", ".join(str(n) for n in matches[:12]))
+            for symbol in item.get("query_symbols", [])[:8]:
+                rows.append(f"  一致を含む関数・クラス: {symbol['name']} L{symbol['range'][0]}–L{symbol['range'][1]}"
+                            "（条件全体は read_symbol または read_file で確認）")
+            excerpt_rows = []
+            for entry in item.get("query_excerpt", [])[:36]:
+                line = f"  L{entry['line']}: {str(entry['text'])[:240]}"
+                if len(line) > excerpt_budget:
+                    break
+                excerpt_rows.append(line)
+                excerpt_budget -= len(line)
+            if excerpt_rows:
+                rows.append("  一致箇所の抜粋（部分的な資料。処理全体は必要範囲を読む）:\n"
+                            + "\n".join(excerpt_rows))
         parts.append(
             "# Workset（選択・ピン留め済み）\n" + "\n".join(rows)
             + "\n必要な本文・範囲だけ read_file で取得する。全ファイルの先読みは不要。"
+            + "質問の識別子が一致する依存先は優先して調べ、共通処理の条件分岐を確認する。"
         )
     if workset and workset.get("omitted"):
         omitted = ", ".join(

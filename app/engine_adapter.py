@@ -217,6 +217,9 @@ CODE_TOOLS = frozenset({
 #: Keep small coding tasks focused while retaining verification and Plan restrictions.
 CODE_SYSTEM_SUFFIX = """
 # CWP の実装・編集手順
+- コードの処理を説明する質問では、対象ファイルの一致箇所だけで結論にしない。呼び出される関数の実装まで追い、共通処理・既定の分岐と特定条件だけの処理を区別する。
+- 列や属性の有無を問われたら、その存在を判定する条件式と両分岐を確認する。対象ファイル内に判定がなければ、依存先も検索する。変数が後続処理へ渡されるかは呼出引数で確認し、未確認の用途を断定しない。
+- 抜粋だけで条件全体を断定せず、一致を含む関数を読み、外側の条件（半径・件数・設定値など）と無効時の動作も最終回答に含める。
 - 明確で小規模な依頼は、必要なファイルと影響範囲を確認したら、すぐ編集ツールで実装する。
 - 思考内でコード全文を転記したり、行数を手計算したり、同じ仮説を繰り返し検討しない。未解決の点は必要なツールで確認する。
 - 行数などの形式制約は get_file_stats 等で実測し、テスト前に整える。
@@ -936,11 +939,35 @@ class _WorkspaceContextOps:
         self._engine.set_workspace_snapshot({"buffers": buffers})
 
     def build_workset(self, task: str, current_file: str, pinned_paths: list[str]) -> dict:
-        """本文を複製せず、選択・ピン留め・関連候補の構造だけを作る。"""
+        """Build current context, resolving explicit follow-ups from live history."""
+        contextual_task = task
+        inherited_paths = []
+        if re.search(r"そのように|その通り|それを|その変更|前回の|さっきの|続けて|引き続き", task):
+            history_tail = getattr(self._engine, "history_tail", None)
+            history = history_tail(0) if callable(history_tail) else []
+            for message in reversed(history):
+                for call in message.get("tool_calls", []):
+                    function = call.get("function", {})
+                    if function.get("name") not in {"read_file", "read_symbol", "search_and_replace", "replace_lines", "write_file"}:
+                        continue
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    path = arguments.get("path") if isinstance(arguments, dict) else None
+                    if isinstance(path, str) and path not in inherited_paths and len(inherited_paths) < 8:
+                        inherited_paths.append(path)
+                if message.get("role") == "user":
+                    previous = message.get("content", "")
+                    if not isinstance(previous, str) or previous.startswith("【システム"):
+                        continue
+                    previous = previous.rsplit("# 指示\n", 1)[-1]
+                    contextual_task = previous[-4000:] + "\n追加指示: " + task
+                    break
         return self._engine.build_workset({
-            "task": task,
+            "task": contextual_task,
             "selected_path": current_file or None,
-            "pinned_paths": pinned_paths,
+            "pinned_paths": list(dict.fromkeys([*pinned_paths, *inherited_paths])),
         })
 
 
