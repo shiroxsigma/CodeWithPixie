@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import config, engine_adapter, note_prompts  # noqa: E402
+from app import config, engine_adapter, note_prompts, search  # noqa: E402
 
 _AWP_SRC = config.AWP_SRC
 
@@ -213,3 +213,93 @@ def test_note_session_engine_profile(tmp_path):
     workset = session.build_workset("直して", "memo.md", [])
     target = next(item for item in workset["items"] if item["path"] == "memo.md")
     assert target["buffer"] is True and target["chars"] == len("unsaved\n")
+
+
+@pytest.mark.parametrize("python_search_fallback", [False, True])
+def test_note_session_tools_use_its_workspace_not_ui_workspace(
+        tmp_path, monkeypatch, python_search_fallback):
+    """A NoteSession's four extension tools share the core read_file root."""
+    from pixie_core import paths
+    from pixie_core.tools import execute_builtin_tool
+
+    ui_root = tmp_path / "ui"
+    note_root = tmp_path / "note"
+    ui_root.mkdir()
+    note_root.mkdir()
+    (ui_root / "README.md").write_text("ui-only 482731\n", encoding="utf-8")
+    (note_root / "value.txt").write_text("value=482731\n", encoding="utf-8")
+    (note_root / "flow.md").write_text(
+        "```mermaid\n%% id: note-flow\nflowchart TD\n    A --> B\n```\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "WORKSPACE", ui_root.resolve())
+    if python_search_fallback:
+        monkeypatch.setattr(search, "_rg_available", lambda: False)
+    core = engine_adapter.bootstrap(_AWP_SRC)
+    session = engine_adapter.NoteSession(
+        core, {"base_url": "http://localhost:1/v1", "model": "test"},
+        str(note_root), copilot_enabled=False,
+    )
+
+    token = paths.bind_workspace(str(session.workspace))
+    try:
+        calls = {
+            "list_workspace": {},
+            "read_note": {"path": str(note_root / "value.txt")},
+            "grep_workspace": {"query": "482731"},
+            "describe_flows": {"path": str(note_root / "flow.md")},
+            "read_file": {"path": str(note_root / "value.txt")},
+        }
+        results = {name: execute_builtin_tool(name, args) for name, args in calls.items()}
+        assert "value.txt (" in results["list_workspace"]
+        assert "README.md" not in results["list_workspace"]
+        assert results["read_note"] == "value=482731\n"
+        assert results["grep_workspace"] == "value.txt:1: value=482731"
+        assert "note-flow" in results["describe_flows"]
+        assert "value=482731" in results["read_file"]
+        assert execute_builtin_tool("read_note", {"path": str(ui_root / "README.md")}).startswith("エラー:")
+    finally:
+        paths.reset_workspace(token)
+
+
+def test_note_tools_keep_parallel_session_roots_separate(tmp_path, monkeypatch):
+    """ContextVar roots must remain independent across concurrent tool calls."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from pixie_core import paths
+    from pixie_core.tools import execute_builtin_tool
+
+    ui_root = tmp_path / "ui"
+    ui_root.mkdir()
+    (ui_root / "value.txt").write_text("ui-only\n", encoding="utf-8")
+    monkeypatch.setattr(config, "WORKSPACE", ui_root.resolve())
+    core = engine_adapter.bootstrap(_AWP_SRC)
+    sessions = []
+    for index in (1, 2):
+        root = tmp_path / f"note{index}"
+        root.mkdir()
+        (root / "value.txt").write_text(f"session={index}\n", encoding="utf-8")
+        sessions.append(engine_adapter.NoteSession(
+            core, {"base_url": "http://localhost:1/v1", "model": "test"},
+            str(root), copilot_enabled=False,
+        ))
+    barrier = Barrier(2)
+
+    def run(session):
+        token = paths.bind_workspace(str(session.workspace))
+        try:
+            barrier.wait(timeout=5)
+            return {
+                "list": execute_builtin_tool("list_workspace", {}),
+                "read": execute_builtin_tool("read_note", {"path": "value.txt"}),
+                "grep": execute_builtin_tool("grep_workspace", {"query": "session="}),
+            }
+        finally:
+            paths.reset_workspace(token)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(run, sessions))
+    for index, result in enumerate(results, 1):
+        assert "value.txt (" in result["list"]
+        assert result["read"] == f"session={index}\n"
+        assert result["grep"] == f"value.txt:1: session={index}"

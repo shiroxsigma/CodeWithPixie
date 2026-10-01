@@ -31,22 +31,25 @@ MAX_LINE_CHARS = 200
 MAX_SAMPLES = 3
 
 
-def search(query: str, max_results: int = 50, case_sensitive: bool = False) -> list[dict]:
+def search(query: str, max_results: int = 50, case_sensitive: bool = False,
+           *, workspace: str | Path | None = None) -> list[dict]:
     """クエリにマッチした行を {path, line, text, before, after} のリストで返す。"""
     if not query.strip():
         return []
+    root = Path(workspace).resolve() if workspace is not None else config.WORKSPACE
     if _rg_available():
-        hits = _search_rg(query, max_results, case_sensitive)
+        hits = _search_rg(query, max_results, case_sensitive, root)
     else:
-        hits = _search_python(query, max_results, case_sensitive)
-    return _attach_context(hits)
+        hits = _search_python(query, max_results, case_sensitive, root)
+    return _attach_context(hits, root)
 
 
 def _rg_available() -> bool:
     return shutil.which(settings.rg_path) is not None
 
 
-def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]:
+def _search_rg(query: str, max_results: int, case_sensitive: bool,
+               workspace: Path) -> list[dict]:
     globs: list[str] = []
     for ext in TEXT_EXTS:
         globs += ["-g", f"*{ext}"]
@@ -54,12 +57,12 @@ def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]
         globs += ["-g", f"!**/{d}/**"]
     cmd = [settings.rg_path, "--json", "--fixed-strings", "-s" if case_sensitive else "-i",
            "--max-count", "5", "--max-filesize", str(MAX_BYTES),
-           *globs, "--", query, str(config.WORKSPACE)]
+           *globs, "--", query, str(workspace)]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=15)
     except (subprocess.TimeoutExpired, OSError):
-        return _search_python(query, max_results, case_sensitive)
+        return _search_python(query, max_results, case_sensitive, workspace)
 
     results: list[dict] = []
     for line in proc.stdout.splitlines():
@@ -71,7 +74,7 @@ def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]
             continue
         data = obj["data"]
         path = data["path"]["text"]
-        rel = _rel(path)
+        rel = _rel(path, workspace)
         results.append({
             "path": rel,
             "line": data["line_number"],
@@ -82,10 +85,11 @@ def _search_rg(query: str, max_results: int, case_sensitive: bool) -> list[dict]
     return results
 
 
-def _search_python(query: str, max_results: int, case_sensitive: bool) -> list[dict]:
+def _search_python(query: str, max_results: int, case_sensitive: bool,
+                   workspace: Path) -> list[dict]:
     q = query if case_sensitive else query.lower()
     results: list[dict] = []
-    for rel, p in iter_text_files():
+    for rel, p in iter_text_files(workspace=workspace):
         if p.suffix.lower() not in TEXT_EXTS:
             continue
         try:
@@ -102,7 +106,7 @@ def _search_python(query: str, max_results: int, case_sensitive: bool) -> list[d
     return results
 
 
-def _attach_context(hits: list[dict]) -> list[dict]:
+def _attach_context(hits: list[dict], workspace: Path) -> list[dict]:
     """各ヒットに前後 CONTEXT_LINES 行を足す。同じファイルは1回だけ読む。"""
     if not hits:
         return hits
@@ -110,7 +114,7 @@ def _attach_context(hits: list[dict]) -> list[dict]:
     for hit in hits:
         rel = hit["path"]
         if rel not in cache:
-            cache[rel] = _read_lines(rel)
+            cache[rel] = _read_lines(rel, workspace)
         lines = cache[rel]
         if lines is None:
             hit["before"], hit["after"] = [], []
@@ -121,9 +125,9 @@ def _attach_context(hits: list[dict]) -> list[dict]:
     return hits
 
 
-def _read_lines(rel: str) -> list[str] | None:
+def _read_lines(rel: str, workspace: Path) -> list[str] | None:
     try:
-        p = safe_path(rel)
+        p = safe_path(rel, workspace=workspace)
         if not p.is_file() or p.stat().st_size > MAX_BYTES:
             return None
         return p.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -131,9 +135,9 @@ def _read_lines(rel: str) -> list[str] | None:
         return None
 
 
-def _rel(abs_path: str) -> str:
+def _rel(abs_path: str, workspace: Path) -> str:
     try:
-        return Path(abs_path).resolve().relative_to(config.WORKSPACE).as_posix()
+        return Path(abs_path).resolve().relative_to(workspace).as_posix()
     except ValueError:
         return abs_path
 

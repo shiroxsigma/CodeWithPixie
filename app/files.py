@@ -222,7 +222,7 @@ def list_dir(rel: str = "") -> dict:
     return {"files": out, "truncated": truncated}
 
 
-def list_files() -> dict:
+def list_files(*, workspace: str | Path | None = None) -> dict:
     """ワークスペース内のファイルとフォルダをフラットリストで返す（type 付き）。
 
     拡張子でフィルタしない: .png や .pdf も一覧に出す（エディタでは開けないので
@@ -231,7 +231,7 @@ def list_files() -> dict:
     """
     out: list[dict] = []
     truncated = False
-    for rel, e in iter_entries():
+    for rel, e in iter_entries(workspace=workspace):
         if e.is_dir():
             out.append({"path": rel, "type": "dir"})
         elif e.is_file():
@@ -282,8 +282,8 @@ def delete(rel: str) -> None:
         p.unlink()
 
 
-def read_file(rel: str) -> str:
-    p = safe_path(rel)
+def read_file(rel: str, *, workspace: str | Path | None = None) -> str:
+    p = safe_path(rel, workspace=workspace)
     if not p.is_file():
         raise FileNotFoundError(rel)
     if p.stat().st_size > MAX_BYTES:

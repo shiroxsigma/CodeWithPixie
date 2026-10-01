@@ -19,6 +19,7 @@ NWP 版との差分:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from . import copilot, extract, files, mdflow, search
 from .config import settings
@@ -128,11 +129,11 @@ def _require(args: dict, key: str) -> str:
     return str(v)
 
 
-def _read_note(rel: str) -> str:
+def _read_note(rel: str, *, workspace: str | Path | None = None) -> str:
     """ワークスペース内ファイルの本文を返す。Office 系（pptx/docx/xlsx/pdf）は
     Markdown へテキスト抽出する。抽出不可・サイズ超過は ValueError →
     execute_sync() が「エラー: …」文字列に変換する。"""
-    p = files.safe_path(rel)
+    p = files.safe_path(rel, workspace=workspace)
     if p.suffix.lower() in extract.SUPPORTED_EXTS:
         if not p.is_file():
             raise FileNotFoundError(rel)
@@ -146,7 +147,7 @@ def _read_note(rel: str) -> str:
         raise ValueError(
             f"この形式（{p.suffix or '拡張子なし'}）はテキストとして読めません。"
         )
-    return files.read_file(rel)
+    return files.read_file(rel, workspace=workspace)
 
 
 def _format_entry(f: dict) -> str:
@@ -156,26 +157,26 @@ def _format_entry(f: dict) -> str:
     return f"{f['path']} ({f['size']} bytes)"
 
 
-def execute_sync(name: str, args: dict) -> str:
+def execute_sync(name: str, args: dict, *, workspace: str | Path | None = None) -> str:
     """ツールを実行して結果文字列を返す（同期コア）。失敗も例外でなく文字列で返し、LLM に自己修正させる。
 
     pixie_core エンジンはツールを worker スレッドから同期呼び出しするため同期が正。
     subprocess.run 等のブロッキング呼び出しも worker スレッド上なのでそのまま使える。"""
     try:
         if name == "list_workspace":
-            items = files.list_files()["files"]  # truncated はツール結果では無視（agent は read/grep で辿れる）
+            items = files.list_files(workspace=workspace)["files"]  # truncated はツール結果では無視（agent は read/grep で辿れる）
             if not items:
                 return "（ワークスペースは空です）"
             return _truncate("\n".join(_format_entry(f) for f in items))
         if name == "read_note":
-            return _truncate(_read_note(_require(args, "path")))
+            return _truncate(_read_note(_require(args, "path"), workspace=workspace))
         if name == "grep_workspace":
-            hits = search.search(_require(args, "query"))
+            hits = search.search(_require(args, "query"), workspace=workspace)
             if not hits:
                 return "（マッチなし）"
             return _truncate("\n".join(f"{h['path']}:{h['line']}: {h['text']}" for h in hits))
         if name == "describe_flows":
-            return _truncate(mdflow.describe(_read_note(_require(args, "path"))))
+            return _truncate(mdflow.describe(_read_note(_require(args, "path"), workspace=workspace)))
         if name == "ask_copilot":
             if not settings.copilot_enabled:
                 return "エラー: Copilot モードがオフです。設定でオンにしてください。"

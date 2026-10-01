@@ -802,7 +802,9 @@ def _register_note_tools(pixie_core) -> None:
     """
     def make_impl(tool_name: str, properties: dict):
         def impl(**kwargs):  # noqa: ANN003 - AWP ツールは動的引数
-            return note_tools.execute_sync(tool_name, kwargs)
+            workspace = pixie_core.get_workspace() if callable(
+                getattr(pixie_core, "get_workspace", None)) else None
+            return note_tools.execute_sync(tool_name, kwargs, workspace=workspace)
         # pixie_core のツールディスパッチ（tools.py の _execute_builtin_tool）は登録関数の
         # 署名を inspect して引数を検証する。**kwargs だけの関数だと唯一の仮引数 "kwargs" が
         # 「必要な引数」扱いになり、あらゆる呼び出しが「Error: 必要な引数 'kwargs' が不足
