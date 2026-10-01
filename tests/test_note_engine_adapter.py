@@ -182,9 +182,14 @@ def test_note_tools_execute_through_real_dispatcher(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WORKSPACE", tmp_path.resolve())
     (tmp_path / "memo.md").write_text("# hello\n", encoding="utf-8")
 
+    from pixie_core import paths
     from pixie_core.tools import execute_builtin_tool
-    assert "# hello" in execute_builtin_tool("read_note", {"path": "memo.md"})
-    assert "memo.md:1" in execute_builtin_tool("grep_workspace", {"query": "hello"})
+    token = paths.bind_workspace(str(tmp_path))
+    try:
+        assert "# hello" in execute_builtin_tool("read_note", {"path": "memo.md"})
+        assert "memo.md:1" in execute_builtin_tool("grep_workspace", {"query": "hello"})
+    finally:
+        paths.reset_workspace(token)
 
 
 def test_note_session_engine_profile(tmp_path):

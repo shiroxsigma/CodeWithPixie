@@ -16,6 +16,7 @@ CWP が静かに壊れるリスク（監査 Fable の Major）を解消する。
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import inspect
 import json
 import os
@@ -32,7 +33,7 @@ from . import config, files, note_prompts, note_tools, patch
 from .python_kernel import KernelError, PythonKernel
 from .config import settings
 from .core_loader import load_core
-from . import model_compat
+from . import model_compat, qwen_concise_guard
 from .qwen_read_guard import QwenReadGuard
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -1410,11 +1411,17 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         self._emit_event = emit_event
         self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         try:
-            self._run_engine_stream(
-                user_text,
-                interactive_fn=self._guard,
-                show_thinking=settings.show_thinking,
+            concise_scope = (
+                qwen_concise_guard.note_turn(self._core, self._engine.state, self.workspace)
+                if self.PROFILE_NAME == "note" and model_compat.is_qwen36(self.model_name)
+                else nullcontext()
             )
+            with concise_scope:
+                self._run_engine_stream(
+                    user_text,
+                    interactive_fn=self._guard,
+                    show_thinking=settings.show_thinking,
+                )
         except getattr(self._core, "TurnStopped", self._CancelTurn) as exc:
             reason = getattr(exc, "reason", "cancelled")
             self.outcome = {"status": "cancelled" if reason == "cancelled" else "limit_reached", "reason": reason}
