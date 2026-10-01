@@ -129,7 +129,7 @@ LAN起動時は画面とAPIのすべてを16文字以上の共有トークンで
 |---|---|---|
 | `awp_src` | 空 | 開発用AWPの `src` を明示する場合だけ指定。通常はインストール済みコアを使用 |
 | `workspace_root` | `./workspace` | エージェントの作業対象＝cwd＝サンドボックス |
-| `servers[]` | LM Studio 単一 | AWP と同形式の接続先リスト（先頭を使用） |
+| `servers[]` / `active_server` | LM Studio 単一 / `0` | OpenAI 互換サーバの接続先リストと使用する接続先の番号 |
 | `host` / `port` | `127.0.0.1` / `8770` | ローカルバインド |
 | `approval_timeout` | `0`（無期限） | 承認待ちのタイムアウト秒 |
 | `history_enabled` | `true` | 保存前の内容を `.pixie_history/` に退避（🕰 履歴） |

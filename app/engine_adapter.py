@@ -33,6 +33,7 @@ from .python_kernel import KernelError, PythonKernel
 from .config import settings
 from .core_loader import load_core
 from . import model_compat
+from .qwen_read_guard import QwenReadGuard
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -646,6 +647,18 @@ class _EngineStreamOps:
             if control is not None and getattr(self, "_cancel", False):
                 control.cancel()
         options = {"control": control} if control is not None else {}
+        if (callable(interactive_fn)
+                and model_compat.is_qwen36(getattr(self, "model_name", ""))):
+            read_guard = QwenReadGuard(self._engine)
+            original_interactive = interactive_fn
+
+            def interactive_with_read_guard(tool_calls, content):
+                approved, override = original_interactive(tool_calls, content)
+                if override or not approved:
+                    return approved, override
+                return read_guard.filter_calls(approved, _tc_name, _tc_args)
+
+            interactive_fn = interactive_with_read_guard
         if callable(runner):
             result = runner(
                 user_text,
