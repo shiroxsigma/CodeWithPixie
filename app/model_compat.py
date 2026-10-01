@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from functools import wraps
 from importlib import import_module
+import json
+import re
 
 
 # Qwen's published settings for thinking mode on precise coding tasks:
@@ -22,6 +24,38 @@ QWEN36_CODING_PROFILE = {
 
 def is_qwen36(model: object) -> bool:
     return "qwen3.6" in str(model or "").lower()
+
+
+def _has_visible_answer(content_parts: list[str]) -> bool:
+    """Match pixie_core's handling of inline Qwen <think> content."""
+    content = "".join(content_parts)
+    content = re.sub(r"<think[^>]*>?.*?</think[^>]*>?", "", content, flags=re.DOTALL)
+    content = re.sub(r"<think[^>]*>.*$", "", content, flags=re.DOTALL)
+    return bool(content.strip())
+
+
+def _complete_tool_calls(chunks: list[dict]) -> bool:
+    """Validate accumulated native calls before allowing the core to execute them."""
+    calls = {}
+    for chunk in chunks:
+        for choice in chunk.get("choices", []):
+            for call in (choice.get("delta") or {}).get("tool_calls") or []:
+                parts = calls.setdefault(call["index"], {"name": "", "arguments": ""})
+                function = call.get("function") or {}
+                parts["name"] += function.get("name") or ""
+                parts["arguments"] += function.get("arguments") or ""
+    if not calls:
+        return False
+    for parts in calls.values():
+        if not parts["name"]:
+            return False
+        try:
+            arguments = json.loads(parts["arguments"])
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(arguments, dict):
+            return False
+    return True
 
 
 def prepare_server(server: dict) -> dict:
@@ -68,6 +102,87 @@ def configure_engine(engine, server: dict) -> None:
                 max_tokens = 8192
             # Leave at least half the generation room for an answer or tool call.
             kwargs["thinking_budget_tokens"] = min(2048, max(1, max_tokens // 2))
-        return completion(*args, **kwargs)
+        # A reasoning-only length stop otherwise enters pixie_core's generic
+        # continuation loop, which can repeat the same empty answer eight times.
+        for attempt in range(2):
+            content_parts = []
+            forwarded_content_parts = []
+            saw_tool_calls = False
+            buffered_tool_chunks = []
+            truncated_without_answer = False
+            truncated_tool_call = False
+            tool_finish_reason = None
+            response = completion(*args, **kwargs)
+            try:
+                for chunk in response:
+                    if not isinstance(chunk, dict) or chunk.get("__llm_error__"):
+                        yield chunk
+                        return
+                    for choice in chunk.get("choices", []):
+                        delta = choice.get("delta") or {}
+                        if delta.get("content"):
+                            content_parts.append(delta["content"])
+                        saw_tool_calls = saw_tool_calls or bool(delta.get("tool_calls"))
+                        if saw_tool_calls and choice.get("finish_reason"):
+                            tool_finish_reason = choice["finish_reason"]
+                        if choice.get("finish_reason") == "length":
+                            # Even syntactically complete JSON is not a completed
+                            # tool call when the server reports token exhaustion.
+                            # pixie_core would otherwise execute partial arguments.
+                            truncated_tool_call = saw_tool_calls
+                            truncated_without_answer = (
+                                not saw_tool_calls and not _has_visible_answer(content_parts)
+                            )
+                    if saw_tool_calls:
+                        # Do not expose a partial call to pixie_core. Its stream
+                        # accumulator has no reset operation for a retry.
+                        buffered_tool_chunks.append(chunk)
+                    elif not truncated_without_answer:
+                        yield chunk
+                        forwarded_content_parts.extend(
+                            (choice.get("delta") or {}).get("content") or ""
+                            for choice in chunk.get("choices", [])
+                        )
+                    if truncated_without_answer or truncated_tool_call:
+                        break
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+
+            if truncated_tool_call:
+                if (attempt == 0 and not _has_visible_answer(forwarded_content_parts)
+                        and kwargs["thinking_budget_tokens"] != 1
+                        and getattr(backend, "_thinking_budget_supported", None) is not False):
+                    kwargs = {**kwargs, "thinking_budget_tokens": 1}
+                    continue
+                reason = ("Qwen3.6 のツール呼び出しが生成上限で中断されたため、実行しませんでした。"
+                          "出力上限を増やすか再試行してください。")
+                yield {"choices": [{"delta": {"content": f"\n(API Error: {reason})"},
+                                     "finish_reason": "error"}],
+                       "__llm_error__": reason}
+                return
+            if saw_tool_calls:
+                if tool_finish_reason not in {"tool_calls", "stop"} or not _complete_tool_calls(buffered_tool_chunks):
+                    reason = "Qwen3.6 から不完全なツール呼び出しが返されたため、実行しませんでした。"
+                    yield {"choices": [{"delta": {"content": f"\n(API Error: {reason})"},
+                                         "finish_reason": "error"}],
+                           "__llm_error__": reason}
+                    return
+                yield from buffered_tool_chunks
+                return
+            if not truncated_without_answer:
+                return
+            if (attempt == 0 and kwargs["thinking_budget_tokens"] != 1
+                    and getattr(backend, "_thinking_budget_supported", None) is not False):
+                kwargs = {**kwargs, "thinking_budget_tokens": 1}
+                continue
+
+            reason = ("Qwen3.6 が回答やツール呼び出しを出す前に生成上限に達しました。"
+                      "サーバーの推論予算設定を確認してください。")
+            yield {"choices": [{"delta": {"content": f"\n(API Error: {reason})"},
+                                 "finish_reason": "error"}],
+                   "__llm_error__": reason}
+            return
 
     backend.create_chat_completion = bounded_completion

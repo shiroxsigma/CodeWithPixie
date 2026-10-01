@@ -33,6 +33,10 @@ def make_engine(core, model, workspace, **server_overrides):
     )
 
 
+def _chunk(delta, finish_reason=None):
+    return {"choices": [{"delta": delta, "finish_reason": finish_reason}]}
+
+
 @pytest.mark.parametrize("model", [
     QWEN_MODEL,
     "huihui-qwen3.6-35b-a3b-claude-4.7-opus-abliterated-mtp",
@@ -153,6 +157,160 @@ def test_qwen_thinking_budget_is_bounded_unless_explicit(
     ))
 
     assert calls[0]["thinking_budget_tokens"] == expected
+
+
+@pytest.mark.parametrize("recovered, finish_reason", [
+    (_chunk({"content": "The answer is 42."}), "stop"),
+    (_chunk({"tool_calls": [{
+        "index": 0,
+        "id": "call_read",
+        "type": "function",
+        "function": {"name": "read_file", "arguments": '{"path":"config.txt"}'},
+    }]}), "tool_calls"),
+])
+def test_qwen_recovers_once_from_reasoning_only_length(
+    core, tmp_path, monkeypatch, recovered, finish_reason,
+):
+    from pixie_core.llm_client import LMStudioBackend
+
+    calls = []
+    responses = [
+        [_chunk({"reasoning_content": "Still thinking."}), _chunk({}, "length")],
+        [recovered, _chunk({}, finish_reason)],
+    ]
+
+    def completion(self, messages, **kwargs):
+        index = len(calls)
+        calls.append(dict(kwargs))
+        yield from responses[index]
+
+    monkeypatch.setattr(LMStudioBackend, "create_chat_completion", completion)
+    agent = make_engine(core, QWEN_MODEL, tmp_path / "qwen")
+    result = list(agent.context.llm.create_chat_completion(
+        [{"role": "user", "content": "Read config.txt and answer."}],
+        max_tokens=400,
+    ))
+
+    assert len(calls) == 2
+    assert calls[0]["thinking_budget_tokens"] == 200
+    assert calls[1]["thinking_budget_tokens"] == 1
+    assert recovered in result
+    assert result[-1]["choices"][0]["finish_reason"] == finish_reason
+    assert not any(chunk["choices"][0]["finish_reason"] == "length" for chunk in result)
+
+
+def test_qwen_reasoning_only_length_twice_becomes_llm_error(
+    core, tmp_path, monkeypatch,
+):
+    from pixie_core.llm_client import LMStudioBackend
+
+    calls = []
+
+    def completion(self, messages, **kwargs):
+        calls.append(dict(kwargs))
+        yield _chunk({"reasoning_content": "Still thinking."})
+        yield _chunk({}, "length")
+
+    monkeypatch.setattr(LMStudioBackend, "create_chat_completion", completion)
+    agent = make_engine(core, QWEN_MODEL, tmp_path / "qwen")
+    result = list(agent.context.llm.create_chat_completion(
+        [{"role": "user", "content": "Answer briefly."}],
+        max_tokens=400,
+    ))
+
+    assert len(calls) == 2
+    assert calls[1]["thinking_budget_tokens"] == 1
+    assert result[-1]["choices"][0]["finish_reason"] == "error"
+    assert result[-1].get("__llm_error__")
+
+
+def test_qwen_partial_content_at_length_is_not_retried(
+    core, tmp_path, monkeypatch,
+):
+    from pixie_core.llm_client import LMStudioBackend
+
+    calls = []
+    response = [_chunk({"reasoning_content": "Thinking."}),
+                _chunk({"content": "Partial answer"}), _chunk({}, "length")]
+
+    def completion(self, messages, **kwargs):
+        calls.append(dict(kwargs))
+        yield from response
+
+    monkeypatch.setattr(LMStudioBackend, "create_chat_completion", completion)
+    agent = make_engine(core, QWEN_MODEL, tmp_path / "qwen")
+    result = list(agent.context.llm.create_chat_completion(
+        [{"role": "user", "content": "Explain this."}],
+        max_tokens=400,
+    ))
+
+    assert calls and len(calls) == 1
+    assert result == response
+
+
+def test_qwen_reasoning_only_recovery_reaches_node_plan_final_answer(
+    core, tmp_path, monkeypatch,
+):
+    from pixie_core import engine as core_engine
+    from pixie_core.llm_client import LMStudioBackend
+
+    calls = []
+
+    def completion(self, messages, **kwargs):
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            yield _chunk({"reasoning_content": "Thinking without an answer."})
+            yield _chunk({}, "length")
+        else:
+            yield _chunk({"content": "The value is 42."})
+            yield _chunk({}, "stop")
+
+    monkeypatch.setattr(LMStudioBackend, "create_chat_completion", completion)
+    agent = make_engine(core, QWEN_MODEL, tmp_path / "qwen")
+    agent.state.chat_history.add("user", "What is the value?")
+    content, tool_calls = core_engine.node_plan(
+        agent.context,
+        agent.state,
+        show_thinking=False,
+        output_fn=lambda *args, **kwargs: None,
+        system_msg_builder=lambda *args, **kwargs: "Answer the user.",
+    )
+
+    assert len(calls) == 2
+    assert calls[1]["thinking_budget_tokens"] == 1
+    assert content == "The value is 42."
+    assert tool_calls is None
+    assert agent.state.phase != "NEEDS_CONTINUATION"
+    assert agent.state.llm_error is None
+
+
+def test_qwen_second_reasoning_only_failure_reaches_node_plan_error(
+    core, tmp_path, monkeypatch,
+):
+    from pixie_core import engine as core_engine
+    from pixie_core.llm_client import LMStudioBackend
+
+    calls = []
+
+    def completion(self, messages, **kwargs):
+        calls.append(dict(kwargs))
+        yield _chunk({"reasoning_content": "Still thinking."})
+        yield _chunk({}, "length")
+
+    monkeypatch.setattr(LMStudioBackend, "create_chat_completion", completion)
+    agent = make_engine(core, QWEN_MODEL, tmp_path / "qwen")
+    agent.state.chat_history.add("user", "What is the value?")
+    core_engine.node_plan(
+        agent.context,
+        agent.state,
+        show_thinking=False,
+        output_fn=lambda *args, **kwargs: None,
+        system_msg_builder=lambda *args, **kwargs: "Answer the user.",
+    )
+
+    assert len(calls) == 2
+    assert agent.state.llm_error
+    assert agent.state.phase != "NEEDS_CONTINUATION"
 
 
 @pytest.mark.parametrize("model, override, expected", [
