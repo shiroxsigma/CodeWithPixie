@@ -32,6 +32,7 @@ from . import config, files, note_prompts, note_tools, patch
 from .python_kernel import KernelError, PythonKernel
 from .config import settings
 from .core_loader import load_core
+from . import model_compat
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -406,6 +407,8 @@ def bootstrap(awp_src=None):
     if pixie_core.tool_count() <= 0:  # 起動スモーク
         raise RuntimeError("pixie_core: ツールが1つも登録されていません")
 
+    model_compat.install_sampling_profile(pixie_core)
+
     _register_copilot_tool(pixie_core)
     _register_note_tools(pixie_core)
     _register_python_tools(pixie_core)
@@ -527,6 +530,7 @@ def _create_profiled_engine(core, server: dict, workspace: str, *,
                             name: str, tool_set=None, system_suffix: str = "",
                             active_packs=()):
     """Create an engine through API 1.11 profiles, with an API 1.10 fallback."""
+    server = model_compat.prepare_server(server)
     profile_type = getattr(core, "AgentProfile", None)
     if callable(profile_type):
         policy = None
@@ -558,6 +562,7 @@ def _create_profiled_engine(core, server: dict, workspace: str, *,
             kwargs["system_suffix"] = system_suffix
         engine = core.create_engine(server, str(workspace), **kwargs)
         _apply_context_length(engine, server)
+    model_compat.configure_engine(engine, server)
     return engine
 
 
@@ -981,7 +986,8 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     def __init__(self, core, server: dict, workspace):
         self._core = core
         self._CancelTurn = core.CancelTurn
-        self._read_idle_timeout = _server_timeout(server, "read_idle_timeout", 30.0)
+        self._read_idle_timeout = _server_timeout(
+            model_compat.prepare_server(server), "read_idle_timeout", 30.0)
         self._server_overall_timeout = _server_timeout(server, "overall_timeout", 0.0)
         self._engine = _create_profiled_engine(
             core, server, str(workspace), name="code", tool_set=CODE_TOOLS,
@@ -1328,7 +1334,8 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     PROFILE_NAME = "note"
 
     def __init__(self, core, server: dict, workspace: str, copilot_enabled: bool):
-        self._read_idle_timeout = _server_timeout(server, "read_idle_timeout", 30.0)
+        self._read_idle_timeout = _server_timeout(
+            model_compat.prepare_server(server), "read_idle_timeout", 30.0)
         self._server_overall_timeout = _server_timeout(server, "overall_timeout", 0.0)
         self._core = core
         self._CancelTurn = core.CancelTurn

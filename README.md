@@ -59,11 +59,29 @@ npm run build
 変更前の確認には `npm run typecheck`、`npm test`、`npm run format:check` を使います。
 `static/vue/` はViteの生成物なので、直接編集しないでください。
 
-前提: **LM Studio** で OpenAI 互換サーバを起動しモデルをロード（例 `http://localhost:1234/v1`）。
+前提: **LM Studio** または **llama.cpp** の OpenAI 互換サーバを起動しモデルをロード
+（例 `http://localhost:1234/v1`）。
 
 Python環境と必要パッケージをまとめて準備する場合は、`setup.bat`を実行してください。
 初回の`run.bat`または`start-phone.bat`でも、未セットアップなら自動的に実行されます。
-コード編集用途なので function calling 対応のコーダー系モデル推奨（qwen2.5-coder 等）。
+コード編集用途なので function calling 対応のモデルを推奨します。
+
+Qwen3.6-35B-A3B を `http://127.0.0.1:8136/v1` で動かす場合は、`config.json` の
+`servers` に次の接続先を追加できます。`model` は `/v1/models` が返す ID と一致させてください。
+設定画面からサーバを切り替えられます。
+
+```json
+{
+  "name": "Qwen3.6 35B-A3B (llama.cpp)",
+  "base_url": "http://127.0.0.1:8136/v1",
+  "api_key": "local",
+  "model": "qwen3.6-35b-a3b"
+}
+```
+
+Qwen3.6 はコード作業向けの生成設定、推論のトークン上限、ネイティブのツール結果を
+自動で適用します。大きい入力の処理に備えて応答待ちを既定 120 秒にします。
+`read_idle_timeout` を接続先へ明示すると、その秒数を優先します。
 
 ```bat
 :: 1) 依存インストール（pipenv, in-project venv）
