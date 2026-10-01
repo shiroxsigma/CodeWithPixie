@@ -104,6 +104,7 @@ def configure_engine(engine, server: dict) -> None:
             kwargs["thinking_budget_tokens"] = min(2048, max(1, max_tokens // 2))
         # A reasoning-only length stop otherwise enters pixie_core's generic
         # continuation loop, which can repeat the same empty answer eight times.
+        forwarded_any_chunk = False
         for attempt in range(2):
             content_parts = []
             forwarded_content_parts = []
@@ -136,9 +137,15 @@ def configure_engine(engine, server: dict) -> None:
                     if saw_tool_calls:
                         # Do not expose a partial call to pixie_core. Its stream
                         # accumulator has no reset operation for a retry.
+                        if not forwarded_any_chunk:
+                            # A tool-only stream must still end core's prefill
+                            # timer when the first server chunk arrives.
+                            yield {"choices": [{"delta": {}, "finish_reason": None}]}
+                            forwarded_any_chunk = True
                         buffered_tool_chunks.append(chunk)
                     elif not truncated_without_answer:
                         yield chunk
+                        forwarded_any_chunk = True
                         forwarded_content_parts.extend(
                             (choice.get("delta") or {}).get("content") or ""
                             for choice in chunk.get("choices", [])

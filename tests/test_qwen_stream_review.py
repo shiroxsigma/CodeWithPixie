@@ -127,7 +127,8 @@ def test_tool_retry_forwards_only_completed_second_attempt():
 
     assert len(calls) == 2
     assert calls[1]["thinking_budget_tokens"] == 1
-    assert len(result) == 3
+    assert len(result) == 4
+    assert result[0] == {"choices": [{"delta": {}, "finish_reason": None}]}
     tool_chunks = [choice["delta"]["tool_calls"]
                    for chunk in result for choice in chunk["choices"]
                    if choice.get("delta", {}).get("tool_calls")]
@@ -137,6 +138,27 @@ def test_tool_retry_forwards_only_completed_second_attempt():
     assert "".join(chunk[0]["function"]["arguments"] for chunk in tool_chunks) == '{"path":"config.txt"}'
     assert result[-1]["choices"][0]["finish_reason"] == "tool_calls"
     assert not any(chunk.get("__llm_error__") for chunk in result)
+
+
+def test_tool_only_success_marks_prefill_before_releasing_completed_call():
+    response = [
+        {"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "call_read", "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path":"config.txt"}'},
+        }]}, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+
+    def completion(messages, **kwargs):
+        yield from response
+
+    wrapped = _wrapped_qwen_completion(completion)
+    result = list(wrapped([{"role": "user", "content": "Read config.txt"}], max_tokens=400))
+
+    assert result == [
+        {"choices": [{"delta": {}, "finish_reason": None}]},
+        *response,
+    ]
 
 
 def test_incomplete_tool_call_at_stop_is_rejected():
@@ -150,9 +172,10 @@ def test_incomplete_tool_call_at_stop_is_rejected():
     wrapped = _wrapped_qwen_completion(completion)
     result = list(wrapped([{"role": "user", "content": "Read config.txt"}], max_tokens=400))
 
-    assert len(result) == 1
-    assert result[0]["choices"][0]["finish_reason"] == "error"
-    assert result[0].get("__llm_error__")
+    assert result[0] == {"choices": [{"delta": {}, "finish_reason": None}]}
+    assert len(result) == 2
+    assert result[1]["choices"][0]["finish_reason"] == "error"
+    assert result[1].get("__llm_error__")
 
 
 def test_visible_preface_prevents_tool_retry_and_duplicate_text():
