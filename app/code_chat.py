@@ -36,8 +36,29 @@ TITLE_CHARS = 40
 _store_lock = threading.RLock()
 
 
-def _sidecar_path():
-    return config.WORKSPACE / SIDECAR_NAME
+workspace_for_session = lambda sid: config.WORKSPACE
+forget_session = lambda sid: None
+
+
+def _sidecar_path(session_id=""):
+    return Path(workspace_for_session(session_id)) / SIDECAR_NAME
+
+
+def remember_session(session_id: str, workspace, title: str, checkpoint: str) -> None:
+    """Expose checkpoints even if the browser never saved a completed turn."""
+    path = Path(workspace) / SIDECAR_NAME
+    with _store_lock:
+        data = load_store(path)
+        entry = data.setdefault(session_id, {"title": "", "messages": []})
+        if not entry.get("title"):
+            entry["title"] = title.replace("\n", " ").strip()[:TITLE_CHARS] or "保存された作業"
+        entry["checkpoint"] = checkpoint
+        entry["updated_at"] = time.time()
+        if len(data) > MAX_SESSIONS:
+            for old in sorted(data, key=lambda key: data[key].get("updated_at", 0))[:len(data) - MAX_SESSIONS]:
+                if old != session_id:
+                    del data[old]
+        _save_store(data, path)
 
 
 def load_store(path: Path | None = None) -> dict:
@@ -84,7 +105,7 @@ def code_chat_log(req: LogReq):
         raise HTTPException(400, "session_id が不正です。")
     if not req.user.strip() and not req.assistant.strip():
         return {"ok": True}  # 空往復は保存しない
-    path = _sidecar_path()
+    path = _sidecar_path(sid)
     with _store_lock:
         data = load_store(path)
         entry = data.get(sid)
@@ -126,11 +147,13 @@ def code_chat_sessions():
 @router.get("/api/code-chat/session")
 def code_chat_session(session_id: str):
     """1会話のメッセージ列（表示の復元用）。"""
-    entry = load_store().get(session_id.strip())
+    entry = load_store(_sidecar_path(session_id.strip())).get(session_id.strip())
     if entry is None:
         raise HTTPException(404, "会話が見つかりません。")
     return {"session_id": session_id, "title": entry.get("title", ""),
-            "messages": entry.get("messages") or []}
+            "messages": entry.get("messages") or ([{
+                "role": "assistant", "content": "保存された作業記録\n\n" + entry["checkpoint"]
+            }] if entry.get("checkpoint") else [])}
 
 
 class DeleteReq(BaseModel):
@@ -139,10 +162,13 @@ class DeleteReq(BaseModel):
 
 @router.post("/api/code-chat/delete")
 def code_chat_delete(req: DeleteReq):
-    path = _sidecar_path()
+    path = _sidecar_path(req.session_id.strip())
+    forget_session(req.session_id.strip())
     with _store_lock:
         data = load_store(path)
         existed = data.pop(req.session_id.strip(), None) is not None
         if existed:
             _save_store(data, path)
+            from .session_memory import SessionMemory
+            SessionMemory(path.parent, req.session_id.strip()).clear()
     return {"ok": existed}

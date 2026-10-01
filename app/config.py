@@ -110,6 +110,8 @@ class Settings(BaseSettings):
     turn_timeout_sec: float = Field(default=600.0, gt=0, allow_inf_nan=False)
     turn_max_llm_calls: int = Field(default=32, gt=0)
     turn_max_tool_calls: int = Field(default=100, gt=0)
+    autonomous_recovery_rounds: int = Field(default=2, ge=0, le=4)
+    session_context_max_chars: int = Field(default=30000, ge=12000, le=200000)
 
 
 settings = Settings()

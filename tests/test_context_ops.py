@@ -150,6 +150,47 @@ def test_delete_unknown_turn_reports_failure(sess):
     assert r.json()["ok"] is False and r.json()["removed"] == 0
 
 
+def test_delete_during_execution_preserves_turn_and_history(sess):
+    _chat("残す依頼")
+    before = list(sess._engine.messages)
+    sess.busy.acquire()
+    try:
+        r = client.post("/api/chat/turn/delete", json={"session_id": "s1", "turn_id": 1})
+        assert r.status_code == 409
+        assert sess._engine.messages == before
+        assert sess.turns[0]["id"] == 1
+    finally:
+        sess.busy.release()
+
+
+def test_current_turn_handles_survive_history_trim_during_execution(sess):
+    old = [{"role": "user", "content": f"old {index}"} for index in range(30)]
+    sess._engine.messages = list(old)
+    turn_id = sess.begin_turn("new task")
+    current = [{"role": "user", "content": "new task"},
+               {"role": "assistant", "content": "new answer"}]
+    sess._engine.messages = old[-8:] + current
+    sess.end_turn()
+    assert sess.turns[-1]["handles"] == current
+    assert sess.drop_turn(turn_id) == 2
+    assert sess._engine.messages == old[-8:]
+
+
+def test_old_masked_tool_observation_does_not_become_current_turn(sess):
+    old_call = {"role": "assistant", "tool_calls": [{"id": "old-call"}]}
+    old_tool = {"role": "tool", "tool_call_id": "old-call", "content": "old result"}
+    sess._engine.messages = [old_call, old_tool]
+    turn_id = sess.begin_turn("new task")
+    masked = {**old_tool, "content": "observation masked"}
+    current = [{"role": "user", "content": "new task"},
+               {"role": "assistant", "content": "new answer"}]
+    sess._engine.messages = [old_call, masked, *current]
+    sess.end_turn()
+    assert sess.turns[-1]["handles"] == current
+    assert sess.drop_turn(turn_id) == 2
+    assert sess._engine.messages == [old_call, masked]
+
+
 def test_delete_without_session_is_success_with_nothing_removed(monkeypatch):
     """セッションが既に無いなら、消したい文脈も無い＝ユーザーから見れば成功。"""
     monkeypatch.setattr(main, "_manager", _FakeManager(None))

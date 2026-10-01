@@ -106,6 +106,28 @@ def run(sess, *, focus: str, emit, approval_timeout: float = 0.0) -> None:
         emit({"type": "status", "text": "まだ畳むほどの会話がありません。"})
         return
 
+    memory = getattr(sess, "_memory", None)
+    if memory is not None:
+        # Code checkpoints already distinguish actual requests from observations.
+        # No additional model generation or executable tools are needed to compact.
+        sess._save_memory()
+        summary = memory.summary()
+        if focus.strip():
+            summary += "\n\n次の作業で重視する観点（ユーザー指定）: " + focus.strip()[:1000]
+        if not summary:
+            emit({"type": "error", "text": "保存済みの作業記録がありません。履歴はそのままにしました。"})
+            return
+        sess.replace_history([{"role": "user", "content": summary},
+                              {"role": "assistant", "content": "記録された依頼と制約を引き継ぎます。"}])
+        after = sess.history_stats()
+        saved = before["chars"] - after["chars"]
+        emit({"type": "token", "text": f"### 会話の文脈を整理しました\n\n{summary}\n"})
+        emit({"type": "status", "text":
+            f"元の依頼・調査・変更・実行の記録を保持しました（{before['messages']}件 → {after['messages']}件）。"})
+        emit({"type": "compacted", "summary": summary,
+              "before": before["messages"], "after": after["messages"], "saved_chars": saved})
+        return
+
     emit({"type": "status",
           "text": f"/compact: これまでの会話（{before['messages']}件・"
                   f"約 {before['chars']:,} 文字）を要約しています…"})

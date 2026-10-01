@@ -7,6 +7,7 @@ LLM は呼ばない。ツール呼び出しのChangeSet変換と、承認イベ�
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -59,9 +60,18 @@ class _ApprovalHarness:
     抜ける（タイムアウト→却下の経路）が、approval イベントはその前に発行済み。"""
     _approve = engine_adapter.AgentSession._approve
     _remember_changeset = engine_adapter.AgentSession._remember_changeset
+    _apply_approved_changeset = engine_adapter.AgentSession._apply_approved_changeset
+
+    def _save_memory(self, **kwargs):
+        pass
+
+    def ensure_turn_snapshot(self):
+        pass
 
     def __init__(self, required, approve=False):
         self._cancel = False
+        from app.autonomy import AutonomousRun
+        self._autonomous_run = AutonomousRun(engine_adapter.config.WORKSPACE)
         self._approval_required = required
         self._approval_id = 0
         self._pending_id = 0
@@ -119,8 +129,11 @@ def test_approved_file_batch_is_applied_once_as_changeset():
     h = _ApprovalHarness({"write_file"})
     # _approveがwaitへ入った後に相関ID付き承認を返す。
     def approve():
-        while h._pending_id == 0:
-            pass
+        deadline = time.monotonic() + 3
+        while h._pending_id == 0 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        if h._pending_id == 0:
+            return
         h._approval_decision = {"id": h._pending_id, "approve": True, "override": None}
         h._approval_event.set()
     thread = threading.Thread(target=approve)

@@ -286,6 +286,21 @@ function useExample(text: string) {
           aria-label="承認が必要な操作"
         ></div>
         <div id="composer">
+          <div class="code-only autonomy-controls">
+            <label
+              title="プロジェクト内の編集と、指定した検証コマンドを自動で繰り返します"
+            >
+              <input id="autonomous-check" type="checkbox" :disabled="busy" />
+              自走（編集を自動適用）
+            </label>
+            <input
+              id="verification-command"
+              type="text"
+              aria-label="自走で繰り返す検証コマンド"
+              placeholder="検証コマンド（例: python -m pytest -q）"
+              :disabled="busy"
+            />
+          </div>
           <!-- 選択テキスト添付は両モード共通（Code でも「この関数を直して」が効く） -->
           <div id="chip-bar">
             <span id="sel-chip" class="chip hidden">選択テキスト添付</span>

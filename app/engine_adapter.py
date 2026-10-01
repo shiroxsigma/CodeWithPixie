@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import threading
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from contextvars import ContextVar
@@ -35,6 +36,9 @@ from .config import settings
 from .core_loader import load_core
 from . import model_compat, qwen_concise_guard
 from .qwen_read_guard import QwenReadGuard
+from .autonomy import AutonomousRun
+from .session_memory import SessionMemory
+from . import command_runner
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -227,6 +231,7 @@ CODE_SYSTEM_SUFFIX = """
 - 思考内でコード全文を転記したり、行数を手計算したり、同じ仮説を繰り返し検討しない。未解決の点は必要なツールで確認する。
 - 行数などの形式制約は get_file_stats 等で実測し、テスト前に整える。
 - 最終変更後に指定されたテストと必要な検証を実行する。失敗は修正して再検証し、成功後は変更内容と検証結果を短く報告する。未実行・未解決の検証を成功扱いしない。
+- 長い作業は小さい変更と検証に区切る。調査結果と次の作業は update_state に記録する。プロジェクト全体を何度も読み直さず、Workset・シンボル・検索で必要な範囲を追う。
 - Plan・計画フェーズでは読み取り専用を維持し、調査と実行計画の提示だけを行う。実装とコマンド実行は計画フェーズ終了後に行う。
 """
 
@@ -414,6 +419,7 @@ def bootstrap(awp_src=None):
     _register_copilot_tool(pixie_core)
     _register_note_tools(pixie_core)
     _register_python_tools(pixie_core)
+    _register_command_tool(pixie_core)
 
     _core = pixie_core
     _capabilities = detect_capabilities(pixie_core)
@@ -729,6 +735,39 @@ def _register_copilot_tool(pixie_core) -> None:
         return copilot.ask(str(question), files or [])
 
 
+def _register_command_tool(core) -> None:
+    @core.register_tool(
+        name="run_command",
+        description="OSコマンドを実行して終了コードと出力を確認します。作業ディレクトリは working_directory で指定します。実行中も停止できます。",
+        schema={"type": "object", "properties": {
+            "command": {"type": "string"},
+            "working_directory": {"type": "string"},
+            "input": {"type": "string"},
+            "timeout": {"type": "integer", "minimum": 1},
+        }, "required": ["command"]},
+        prompt_desc="run_command(command, working_directory?, input?, timeout?): OSコマンドの実行・検証",
+    )
+    def run_command(command, working_directory=None, input=None, timeout=30):
+        session = _ACTIVE_AGENT_SESSION.get()
+        if session is None:
+            return "Execution Failed: 実行中のCodeセッションがありません。"
+        session.ensure_turn_snapshot()
+        run = session._autonomous_run
+        started = run.command_started()
+
+        def finished(receipt):
+            receipt = {**receipt, "output": "\n".join(
+                str(receipt.get(key) or "") for key in ("stdout", "stderr")).strip()}
+            run.command_finished(receipt, started)
+            session._save_memory(command_receipt=receipt)
+
+        return command_runner.run_command(
+            command, working_directory, input, timeout,
+            workspace=session.workspace, control=session._control,
+            emit=session._emit_event, on_result=finished,
+        )
+
+
 def _register_python_tools(pixie_core) -> None:
     """Codeモード用の会話単位・永続Pythonカーネルを登録する。"""
 
@@ -874,7 +913,15 @@ class HistoryOps:
             "label": (label or "").strip()[:self.TURN_LABEL_CHARS],
             "start": self._engine.history_size(),
             "handles": [],
+            "before": self._engine.history_tail(0),
+            "memory_turn": uuid.uuid4().hex,
         }
+        memory = getattr(self, "_memory", None)
+        if memory is not None:
+            # Existing core messages predate the new turn. Capture them before
+            # changing provenance; core dictionaries themselves remain untouched.
+            memory.capture_history(self._engine.history_tail(0), record_requests=False)
+            memory.begin_turn(self._open_turn["memory_turn"])
         return self._turn_seq
 
     def end_turn(self) -> None:
@@ -884,9 +931,20 @@ class HistoryOps:
         削除時に前のターンまで巻き込む。
         """
         t, self._open_turn = self._open_turn, None
+        memory = getattr(self, "_memory", None)
+        if memory is not None:
+            memory.end_turn()
         if t is None:
             return
-        t["handles"] = self._engine.history_tail(t["start"])
+        previous = t.pop("before", [])
+        before = {id(message) for message in previous}
+        old_tool_ids = {message["tool_call_id"] for message in previous
+                        if message.get("role") == "tool"
+                        and isinstance(message.get("tool_call_id"), str)}
+        t["handles"] = [message for message in self._engine.history_tail(0)
+                        if id(message) not in before and not (
+                            message.get("role") == "tool"
+                            and message.get("tool_call_id") in old_tool_ids)]
         if t["handles"]:          # 何も積まれなかったターン（即エラー等）は記録しない
             self.turns.append(t)
 
@@ -898,6 +956,10 @@ class HistoryOps:
             if t["id"] == int(turn_id):
                 removed = self._engine.history_drop(t["handles"])
                 self.turns.pop(i)
+                memory = getattr(self, "_memory", None)
+                if memory is not None and t.get("memory_turn"):
+                    memory.drop_turn(t["memory_turn"])
+                    self._save_memory(publish=True)
                 return removed
         return -1
 
@@ -963,7 +1025,13 @@ class _WorkspaceContextOps:
         """Build current context, resolving explicit follow-ups from live history."""
         contextual_task = task
         inherited_paths = []
-        if re.search(r"そのように|その通り|それを|その変更|前回の|さっきの|続けて|引き続き", task):
+        if re.search(r"そのように|その通り|それを|その変更|前回の|さっきの|続けて|引き続き|\b(?:continue|resume)\b", task, re.I):
+            memory = getattr(self, "_memory", None)
+            if memory is not None:
+                inherited_paths.extend(memory.context_paths()[:8])
+                previous_task = memory.current_task(skip_continuations=True)
+                if previous_task:
+                    contextual_task = previous_task[-4000:] + "\n追加指示: " + task
             history_tail = getattr(self._engine, "history_tail", None)
             history = history_tail(0) if callable(history_tail) else []
             for message in reversed(history):
@@ -983,7 +1051,8 @@ class _WorkspaceContextOps:
                     if not isinstance(previous, str) or previous.startswith("【システム"):
                         continue
                     previous = previous.rsplit("# 指示\n", 1)[-1]
-                    contextual_task = previous[-4000:] + "\n追加指示: " + task
+                    if memory is None:
+                        contextual_task = previous[-4000:] + "\n追加指示: " + task
                     break
         return self._engine.build_workset({
             "task": contextual_task,
@@ -1025,6 +1094,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         self._execution_lock = threading.RLock()
         self._control = None
         self._closed = False
+        self._cancel = False
         self._init_turns()  # 往復の記録（削除・/compact 用。HistoryOps）
 
         # 承認の相関 ID とイベント。
@@ -1041,6 +1111,64 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         # ターン開始直前（main._turn_stream の worker）で take_turn_snapshot が記録する。
         self._snapshots: dict[int, dict[str, bytes]] = {}
         self._changesets_by_turn: dict[int, list[str]] = {}
+        self._deferred_snapshot: int | None = None
+        self._memory: SessionMemory | None = None
+        self._memory_lock = threading.RLock()
+        self._autonomous_run = AutonomousRun(self.workspace)
+
+    def bind_memory(self, session_id: str):
+        self._session_id = session_id
+        self._request_title = "保存された作業"
+        self._memory = SessionMemory(self.workspace, session_id)
+        messages = self._memory.restore_messages()
+        if messages:
+            self.replace_history(messages)
+
+    def configure_autonomy(self, enabled=False, verification_command="", *, user_request=None):
+        self._autonomous_run = AutonomousRun(
+            self.workspace, enabled=enabled, command=verification_command)
+        self._user_request = user_request
+
+    def _save_memory(self, *, command_receipt=None, changed_paths=None, publish=False):
+        with self._memory_lock:
+            self._persist_memory(command_receipt=command_receipt,
+                                 changed_paths=changed_paths, publish=publish)
+
+    def forget_memory(self):
+        """Disable future worker saves before deleting this conversation's checkpoint."""
+        with self._memory_lock:
+            memory, self._memory = self._memory, None
+            if memory is not None:
+                memory.clear()
+
+    def _persist_memory(self, *, command_receipt=None, changed_paths=None, publish=False):
+        memory = self._memory
+        if memory is None:
+            return
+        try:
+            memory.capture_history(self._engine.history_tail(0), record_requests=False)
+            if command_receipt is not None:
+                memory.record_command(command_receipt)
+            if changed_paths:
+                memory.record_changes(changed_paths)
+            memory.save()
+            if publish:
+                from . import code_chat
+                code_chat.remember_session(self._session_id, self.workspace,
+                                           self._request_title, memory.summary())
+        except (OSError, ValueError) as exc:
+            if callable(self._emit_event):
+                self._emit_event({"type": "status", "category": "warning",
+                                  "text": f"作業記録を保存できませんでした: {exc}"})
+
+    def restore_context(self, messages):
+        if self._memory is None:
+            return self.replace_history(messages)
+        # Display logs are supplemental; durable tool evidence remains authoritative.
+        if not self._memory.has_content and not self._memory.has_checkpoint:
+            self._memory.capture_history(messages)
+            self._memory.save()
+        return self.replace_history(self._memory.restore_messages())
 
     # ---- ターン実行（worker スレッドで呼ばれる） ----
     def run_turn(self, message: str, emit_event, approval_timeout: float = 0.0) -> None:
@@ -1050,12 +1178,62 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         self._emit_event = emit_event
         self._classifier = _StreamClassifier()  # 行分類の状態はターンをまたがない
         self._approval_timeout = approval_timeout if approval_timeout and approval_timeout > 0 else None
+        started_at = time.monotonic()
 
         before = files.snapshot_mtimes(workspace=self.workspace)
         token = _ACTIVE_AGENT_SESSION.set(self)
         try:
+            if self._memory is not None:
+                self._save_memory()
+                history = self._engine.history_tail(0)
+                chars = sum(len(json.dumps(item, ensure_ascii=False)) for item in history)
+                if (chars > settings.session_context_max_chars or len(history) > 80
+                        or not self._memory.has_request_context(history)):
+                    open_turn = self._open_turn
+                    self.replace_history(self._memory.compact_messages())
+                    self._open_turn = open_turn
+                    if open_turn is not None:
+                        open_turn["before"] = self._engine.history_tail(0)
+                        open_turn["start"] = self._engine.history_size()
+                    self._emit_event({"type": "status", "category": "context",
+                                      "text": "調査・変更・実行の記録を保持して、会話の文脈を整理しました。"})
+                request = getattr(self, "_user_request", None)
+                self._user_request = None
+                request = request if request is not None else message
+                self._request_title = request
+                self._memory.record_request(request)
+                self._save_memory(publish=True)
+            run = self._autonomous_run
+            message = (f"# 作業フォルダ\n{self.workspace}\n"
+                       "相対パスはこのフォルダ基準です。場所の再確認は不要です。\n\n" + message)
+            if run.enabled:
+                message += ("\n\n# この作業の自走設定\n"
+                            "ワークスペース内の対応済み編集ツールは自動適用できます。"
+                            "小さい変更ごとに検証し、失敗は原因を修正して再実行してください。")
+                if run.command:
+                    message += f"\n必須の検証コマンド: {run.command}\n最終変更後に作業フォルダ直下で実行してください。"
             # ターンシーケンス(reset→user追加→run_graph)は pixie_core 側に集約済み。
             self._run_engine_stream(message, interactive_fn=self._approve)
+            for attempt in range(settings.autonomous_recovery_rounds):
+                if (not run.command or run.verified()
+                        or self.outcome.get("status") in {"cancelled", "limit_reached"}
+                        or getattr(self, "_plan_phase", False)):
+                    break
+                if self.outcome.get("status") == "failed" and not self.outcome.get("reason", "").startswith("final_answer_acceptance_unresolved"):
+                    break
+                fingerprint = run.fingerprint()
+                self._emit_event({"type": "status", "category": "validation",
+                                  "text": f"指定した検証が未完了のため、修正・再検証を続けます（{attempt + 1}）。"})
+                self._save_memory()
+                self._run_engine_stream(run.verification_prompt(), interactive_fn=self._approve)
+                if not run.verified() and run.fingerprint() == fingerprint:
+                    break
+            if (run.command and not run.verified()
+                    and self.outcome.get("status") == "completed"
+                    and not getattr(self, "_plan_phase", False)):
+                self.outcome = {"status": "failed", "reason": "verification_unresolved"}
+                self._emit_event({"type": "error", "text":
+                    "最終変更後の指定コマンドの成功を確認できませんでした。作業記録を保持しています。"})
         except getattr(self._core, "TurnStopped", self._CancelTurn) as exc:
             reason = getattr(exc, "reason", "cancelled")
             self.outcome = {"status": "cancelled" if reason == "cancelled" else "limit_reached", "reason": reason}
@@ -1073,6 +1251,13 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
                 changed = files.diff_changed(before, workspace=self.workspace)
                 if changed:
                     emit_event({"type": "files_changed", "paths": changed})
+                self._save_memory(changed_paths=changed, publish=True)
+                receipt = self._autonomous_run.receipt
+                emit_event({"type": "status", "category": "turn_metrics",
+                            "text": f"作業時間 {time.monotonic() - started_at:.1f}秒",
+                            "elapsed_sec": round(time.monotonic() - started_at, 3),
+                            "verified": self._autonomous_run.verified() if self._autonomous_run.command else None,
+                            "command_exit_code": receipt.get("exit_code") if receipt else None})
             finally:
                 if owned:
                     self.release_turn()
@@ -1095,8 +1280,21 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     def _approve(self, tool_calls, content):
         if self._cancel:
             return ([], None)
+        self._save_memory()
+        memory = getattr(self, "_memory", None)
+        if memory is not None:
+            history = self._engine.history_tail(0)
+            if history and not memory.has_request_context(history):
+                return ([], memory.summary() + "\n\n元の依頼と制約を再確認し、前の作業を続けてください。")
 
         names = [_tc_name(tc) for tc in tool_calls]
+        if getattr(self, "_plan_phase", False) and any(name not in PLAN_TOOLS for name in names):
+            return ([], "計画フェーズでは編集とコマンド実行はできません。調査と計画の提示に進んでください。")
+        if (self._autonomous_run.enabled and len(tool_calls) == 1
+                and names[0] == "run_command"
+                and _tc_args(tool_calls[0]).get("command", "").strip() == "get_cwd"):
+            return ([], f"get_cwdはOSコマンドではなくツール名です。作業フォルダは {self.workspace} です。"
+                    "この情報で調査と編集を続け、run_commandは指定された検証に使ってください。")
         if not any(n in self._approval_required for n in names):
             return (tool_calls, None)  # read系/低リスクのみ → 自動承認
 
@@ -1113,6 +1311,18 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             except Exception as exc:  # preview不能でもrun_command等と同じ引数承認へ倒す
                 change_preview = {"ok": False, "changes": [],
                                   "errors": [{"error": f"{type(exc).__name__}: {exc}"}]}
+        run = self._autonomous_run
+        if (change_spec is not None and change_preview and change_preview.get("ok")
+                and run.allows_changes([item["path"] for item in change_spec["changes"]])):
+            self._pending_id = 0
+            return self._apply_approved_changeset(change_spec, tool_calls)
+        if (run.enabled and all(
+                name not in self._approval_required
+                or (name == "run_command" and run.allows_command(_tc_args(call)))
+                for call, name in zip(tool_calls, names))):
+            self._pending_id = 0
+            self.ensure_turn_snapshot()
+            return (tool_calls, None)
         calls_view = []
         for tc in tool_calls:
             name = _tc_name(tc)
@@ -1159,26 +1369,40 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             # ファイル編集だけのバッチはAWP ChangeSetで一括適用する。これにより承認から
             # 実適用までのbase hash競合を再検査し、全ファイルをjournalから巻き戻せる。
             if change_spec is not None and change_preview and change_preview.get("ok"):
-                control = getattr(self, "_control", None)
-                if control is not None:
-                    control.charge("tool_calls", len(tool_calls))
-                result = self._engine.apply_changeset(change_spec)
-                if result.get("applied"):
-                    paths = [item["path"] for item in result.get("changes", [])]
-                    self._remember_changeset(result["id"])
-                    self._emit_event({"type": "status", "text":
-                                      f"ChangeSet {result['id']} を一括適用しました（{len(paths)}ファイル）"})
-                    if paths:
-                        self._emit_event({"type": "files_changed", "paths": paths})
-                    return ([], "ChangeSetで承認済みの変更を一括適用しました: "
-                            + ", ".join(paths)
-                            + "。同じ編集を繰り返さず、必要な検証へ進んでください。")
-                details = result.get("conflicts") or result.get("errors") or result.get("error")
-                self._emit_event({"type": "status", "text": f"ChangeSetを適用できませんでした: {details}"})
-                return ([], "承認待ちの間に対象ファイルが変化したか、変更案を安全に適用できませんでした。"
-                        "read_fileで最新版を確認し、変更案を作り直してください。")
+                return self._apply_approved_changeset(change_spec, tool_calls)
+            self.ensure_turn_snapshot()
+            mutations = [call for call in tool_calls
+                         if _tc_name(call) in self._approval_required
+                         and _tc_name(call) != "run_command"]
+            if mutations:
+                self._autonomous_run.changed([
+                    _tc_args(call).get("path") for call in mutations
+                    if isinstance(_tc_args(call).get("path"), str)])
             return (tool_calls, None)
         return ([], None)
+
+    def _apply_approved_changeset(self, change_spec, tool_calls):
+        self.ensure_turn_snapshot()
+        control = getattr(self, "_control", None)
+        if control is not None:
+            control.charge("tool_calls", len(tool_calls))
+        result = self._engine.apply_changeset(change_spec)
+        if result.get("applied"):
+            paths = [item["path"] for item in result.get("changes", [])]
+            self._remember_changeset(result["id"])
+            self._autonomous_run.changed(paths)
+            self._save_memory(changed_paths=paths)
+            self._emit_event({"type": "status", "text":
+                f"ChangeSet {result['id']} を一括適用しました（{len(paths)}ファイル）"})
+            if paths:
+                self._emit_event({"type": "files_changed", "paths": paths})
+            return ([], "ChangeSetで承認済みの変更を一括適用しました: "
+                    + ", ".join(paths)
+                    + "。同じ編集を繰り返さず、必要な検証へ進んでください。")
+        details = result.get("conflicts") or result.get("errors") or result.get("error")
+        self._emit_event({"type": "status", "text": f"ChangeSetを適用できませんでした: {details}"})
+        return ([], "対象ファイルが変化したか、変更案を安全に適用できませんでした。"
+                "read_fileで最新版を確認し、変更案を作り直してください。")
 
     def _remember_changeset(self, change_id: str) -> None:
         turn = getattr(self, "_open_turn", None)
@@ -1195,10 +1419,13 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             _pin_changeset_hashes(spec, preview)
         if not preview.get("ok"):
             return {**preview, "applied": False}
+        self.ensure_turn_snapshot()
         result = self._engine.apply_changeset(spec)
         if result.get("applied"):
             self._remember_changeset(result["id"])
             paths = [item["path"] for item in result.get("changes", [])]
+            self._autonomous_run.changed(paths)
+            self._save_memory(changed_paths=paths)
             if paths and callable(getattr(self, "_emit_event", None)):
                 self._emit_event({"type": "files_changed", "paths": paths})
         return result
@@ -1231,6 +1458,7 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         計画フェーズのターンはこの制限下で ```plan フェンスの計画だけを出し、承認後
         フロントが計画を次の指示として送り直すことで、フルツールの通常ターンに移る。
         """
+        self._plan_phase = bool(on)
         active_packs = getattr(self._engine.context, "active_packs", set())
         tool_set = PLAN_TOOLS if on else CODE_TOOLS
         if "copilot" in active_packs:
@@ -1259,6 +1487,20 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
             self.python_kernel.close()
 
     # ---- ⏪ ロールバック（ターン開始前のスナップショット） ----
+    def prepare_turn_snapshot(self, turn_id: int):
+        """Read-only requests start inference without copying project contents."""
+        self._deferred_snapshot = turn_id or None
+        if turn_id:
+            self._snapshots[turn_id] = {}
+            for old in sorted(self._snapshots)[:-ROLLBACK_KEEP_TURNS]:
+                del self._snapshots[old]
+
+    def ensure_turn_snapshot(self):
+        turn_id = getattr(self, "_deferred_snapshot", None)
+        if turn_id is not None:
+            self.take_turn_snapshot(turn_id)
+            self._deferred_snapshot = None
+
     def take_turn_snapshot(self, turn_id: int) -> None:
         """ターン開始前のワークスペースのテキスト文件内容を記録する。
 

@@ -2764,7 +2764,7 @@ async function insertImage(file) {
 // 待機インジケータは「今どの段階か」を出し続け、本文トークンが来たら引っ込める。
 // （本文が出たあと次のステップが始まったら、また出す。）
 const PHASE_LABEL = {
-  prefill: (sec) => `応答を待っています（prefill 中… ${sec}s）`,
+  prefill: (sec) => `応答を待っています… ${sec}s`,
   thinking: (sec) => `思考中… ${sec}s`,
   generating: (sec) => `ツール呼び出しを生成中… ${sec}s`,
   tool: (sec) => `ツールを実行中… ${sec}s`,
@@ -3133,7 +3133,9 @@ async function sendChat() {
       }
       body = { message: msg, session_id: state.sessionId, current_file: state.currentFile,
                current_content: state.currentFile ? state.editor.getValue() : "",
-               selection: getSelection(), plan_first: codePlan };
+               selection: getSelection(), plan_first: codePlan,
+               autonomous: !codePlan && !!$("autonomous-check")?.checked,
+               verification_command: $("verification-command")?.value.trim() || "" };
       if (context_files.length) body.context_files = context_files;
     }
 
@@ -3320,6 +3322,11 @@ async function handleEvent(ev) {
       if (ev.text) state.assistantUi?.onToken(ev.text);
       break;
     case "status": {
+      if (ev.category === "command") {
+        state.assistantUi?.setPhase(ev.phase === "running" ? "tool" : "verify");
+        addToolStatus(state.assistantEl, ev.text || "", ev);
+        break;
+      }
       // schema v1以降は構造化フィールドを優先。旧サーバでは文字列判定へフォールバックする。
       const phase = ev.phase || phaseOf(ev.text || "");
       if (phase) { state.assistantUi?.setPhase(phase); break; }
@@ -3350,6 +3357,15 @@ async function handleEvent(ev) {
       const toolCalls = Number(metrics.tool_calls || 0);
       const acceptanceRetries = Number(metrics.acceptance_retries || 0);
       const parts = [`LLM ${llmCalls}`, `tools ${toolCalls}`];
+      const calls = Array.isArray(metrics.llm_calls) ? metrics.llm_calls : [];
+      const sum = (key) => calls.reduce((total, call) => total + (Number(call[key]) || 0), 0);
+      if (calls.length) {
+        parts.push(`LLM時間 ${sum("wall_sec").toFixed(1)}秒`);
+        parts.push(`応答待ち ${sum("prefill_sec").toFixed(1)}秒`);
+        parts.push(`推論 ${sum("thinking_sec").toFixed(1)}秒`);
+        const prompt = sum("prompt_tokens"), cached = sum("cache_tokens");
+        if (prompt + cached > 0) parts.push(`キャッシュ ${Math.round(100 * cached / (prompt + cached))}%`);
+      }
       if (metrics.exit_reason) parts.push(metrics.exit_reason);
       if (acceptanceRetries) parts.push(`acceptance retry ${acceptanceRetries}`);
       addToolStatus(state.assistantEl, `Turn: ${parts.join(" / ")}`,
@@ -3585,6 +3601,8 @@ async function rollbackTurn(turnId) {
 function newSession(switching) {
   if (state.streaming && !(switching && chatRuntime.current(switching) && chatRuntime.state.phase === "switching")) { alert("⚠️ 実行中です。中断してから新しい会話を開始してください。"); return; }
   state.sessionId = newSessionId();
+  if ($("autonomous-check")) $("autonomous-check").checked = false;
+  if ($("verification-command")) $("verification-command").value = "";
   $("messages").innerHTML = "";
   $("approval").classList.add("hidden");
   if (approvalPreviews.length) closeDiffPreview();

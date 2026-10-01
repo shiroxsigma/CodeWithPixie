@@ -1011,3 +1011,6 @@ body.view-chat.chat-files-open #filemgr {
   }
   body.view-editor #split:has(#approval:not(.hidden)) .composer-actions { margin-top: 0; }
 }
+.autonomy-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.autonomy-controls label { font-size: 12px; }
+.autonomy-controls input[type="text"] { flex: 1; min-width: 160px; padding: 5px 8px; }

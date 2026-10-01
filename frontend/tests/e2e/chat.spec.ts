@@ -60,6 +60,46 @@ test("switching views preserves the running conversation and composer", async ({
   await expect(page.locator("#chat-input")).toHaveValue("draft");
 });
 
+test("autonomous permission and verification command apply to the selected conversation", async ({
+  page,
+}) => {
+  await page.locator("#autonomous-check").check();
+  await page.locator("#verification-command").fill("python -m pytest -q");
+  await page.locator("#chat-input").fill("修正して検証");
+  await page.locator("#send-btn").click();
+  await expect(page.locator('[role="status"]')).toHaveText("実行中");
+  const sent = await page.evaluate(() => (window as any).chatRequests[0]);
+  expect(sent.autonomous).toBe(true);
+  expect(sent.verification_command).toBe("python -m pytest -q");
+  await expect(page.locator("#autonomous-check")).toBeDisabled();
+  await expect(page.locator("#verification-command")).toBeDisabled();
+  await page.evaluate(() => {
+    (window as any).emitChat({
+      type: "status",
+      category: "command",
+      phase: "running",
+      text: "Command started: pytest",
+    });
+  });
+  await expect(page.locator(".wait-text")).toContainText("ツールを実行中");
+  await expect(page.locator("#messages")).toContainText(
+    "Command started: pytest",
+  );
+  await page.evaluate(() => {
+    (window as any).emitChat({
+      type: "status",
+      category: "command",
+      phase: "finished",
+      text: "Command finished: exit 0",
+    });
+    (window as any).emitChat({ type: "done", status: "completed" });
+  });
+  await expect(page.locator('[role="status"]')).toHaveText("完了");
+  await page.locator("#new-session-btn").click();
+  await expect(page.locator("#autonomous-check")).not.toBeChecked();
+  await expect(page.locator("#verification-command")).toHaveValue("");
+});
+
 test("mobile approval keeps the diff and decision controls together", async ({
   page,
 }) => {

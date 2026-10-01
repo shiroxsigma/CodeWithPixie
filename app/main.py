@@ -12,13 +12,13 @@ import os
 import string
 import threading
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import (auth, code_chat, compact, config, copilot, copilot_flow, engine_adapter, engine_events, extract,
                files, history, mdflow, mode, note_api, note_prompts, patch, search)
@@ -71,6 +71,7 @@ class SessionManager:
                     raise HTTPException(429, f"セッション上限({self._max})に達しました。")
                 # 作成時点の作業フォルダ・アクティブサーバに束縛する。
                 s = AgentSession(self._core, config.active_server(), str(config.WORKSPACE))
+                s.bind_memory(sid)
                 self._sessions[sid] = s
             return s
 
@@ -103,6 +104,28 @@ class SessionManager:
 _manager: SessionManager | None = None
 _engine_error: str = ""
 _tool_count: int = 0
+
+
+def _chat_workspace(sid):
+    session = _manager.get(sid) if _manager is not None else None
+    return Path(getattr(session, "workspace", config.WORKSPACE))
+
+
+code_chat.workspace_for_session = _chat_workspace
+
+
+def _forget_chat(sid):
+    if _manager is None:
+        return
+    session = _manager.get(sid)
+    if session is not None:
+        forget = getattr(session, "forget_memory", None)
+        if callable(forget):
+            forget()
+        _manager.drop(sid)
+
+
+code_chat.forget_session = _forget_chat
 
 
 def _startup() -> None:
@@ -216,6 +239,8 @@ class ChatReq(BaseModel):
     attach_files: list[str] = []           # 関連ファイル（バイナリ/外部）の絶対パス: Copilot 添付用
     plan_first: bool = False               # Code モード plan-first サブモード: このターンは
                                            # 読み取り専用ツールで調査し ```plan の計画だけを出す
+    autonomous: bool = False
+    verification_command: str = Field(default="", max_length=2000)
 
 
 class ApproveReq(BaseModel):
@@ -950,7 +975,12 @@ def _error_stream(text: str) -> StreamingResponse:
 
 def _reserve_turn(sess):
     reserve = getattr(sess, "reserve_turn", None)
-    return reserve() if callable(reserve) else sess.busy.acquire(blocking=False)
+    acquired = reserve() if callable(reserve) else sess.busy.acquire(blocking=False)
+    if acquired:
+        configure = getattr(sess, "configure_autonomy", None)
+        if callable(configure):
+            configure()  # Permission is supplied anew by each ordinary Code request.
+    return acquired
 
 
 def _release_turn(sess):
@@ -998,7 +1028,8 @@ def _turn_stream(sess, start_turn, label: str = "") -> StreamingResponse:
             # ⏪ ロールバック用のターン前スナップショット（Code の AgentSession のみ持つ。
             # worker スレッドで実行し、イベントループをブロックしない）。
             if turn_id and hasattr(sess, "take_turn_snapshot"):
-                sess.take_turn_snapshot(turn_id)
+                prepare_snapshot = getattr(sess, "prepare_turn_snapshot", sess.take_turn_snapshot)
+                prepare_snapshot(turn_id)
             control = getattr(sess, "_control", None)
             if control is not None:
                 control.check()
@@ -1240,6 +1271,10 @@ async def api_chat(req: ChatReq):
     builder = getattr(sess, "build_workset", None)
 
     def prepare_code_context():
+        configure = getattr(sess, "configure_autonomy", None)
+        if callable(configure):
+            configure(req.autonomous and not req.plan_first, req.verification_command,
+                      user_request=req.message)
         if setter is not None:
             setter(req.current_file or "", req.current_content, req.context_files)
         workset = builder(
@@ -1361,7 +1396,10 @@ def api_turn_delete(req: TurnDeleteReq):
     sess, _ = _mode_session(req.session_id)
     if sess is None:
         return {"ok": True, "removed": 0, "reason": "session gone"}
-    removed = sess.drop_turn(req.turn_id)
+    with getattr(sess, "_execution_lock", nullcontext()):
+        if getattr(sess, "busy", None) is not None and sess.busy.locked():
+            raise HTTPException(409, "実行中の会話は削除できません。停止してから削除してください。")
+        removed = sess.drop_turn(req.turn_id)
     if removed < 0:
         return {"ok": False, "removed": 0,
                 "reason": "unknown turn (already dropped / summarized / engine too old)"}
@@ -1394,7 +1432,16 @@ def api_session_clear(req: SessionClearReq):
     elif current == "plan":
         engine_adapter.reset_plan_session()
     else:
-        _require_manager().drop(_valid_sid(req.session_id))
+        sid = _valid_sid(req.session_id)
+        manager = _require_manager()
+        session = manager.get(sid)
+        from .session_memory import SessionMemory
+        forget = getattr(session, "forget_memory", None)
+        if callable(forget):
+            forget()
+        else:
+            SessionMemory(getattr(session, "workspace", config.WORKSPACE), sid).clear()
+        manager.drop(sid)
     return {"ok": True, "mode": current}
 
 
@@ -1418,14 +1465,19 @@ def code_chat_restore(req: RestoreSessionReq):
     API 1.6 未満の pixie_core ではシードせず表示復元だけになる（ok=False で伝える）。
     """
     sid = _valid_sid(req.session_id)
-    messages = req.messages
-    if not messages:
-        entry = code_chat.load_store().get(sid)
-        messages = (entry or {}).get("messages") or []
     sess = _require_manager().get_or_create(sid)
-    seeded = sess.replace_history([
-        {"role": m.get("role"), "content": m.get("content") or ""} for m in messages
-    ]) if messages else True
+    with getattr(sess, "_execution_lock", nullcontext()):
+        if getattr(sess, "busy", None) is not None and sess.busy.locked():
+            raise HTTPException(409, "実行中の会話は復元できません。")
+        messages = req.messages
+        if not messages:
+            path = Path(getattr(sess, "workspace", config.WORKSPACE)) / code_chat.SIDECAR_NAME
+            entry = code_chat.load_store(path).get(sid)
+            messages = (entry or {}).get("messages") or []
+        restore = getattr(sess, "restore_context", sess.replace_history)
+        seeded = restore([
+            {"role": m.get("role"), "content": m.get("content") or ""} for m in messages
+        ]) if messages else True
     return {"ok": bool(seeded)}
 
 # モード切替時に旧モードの LLM 文脈を持ち越さない（mode.py の POST /api/mode が呼ぶ）。
