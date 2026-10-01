@@ -166,11 +166,12 @@ class SessionMemory:
         if isinstance(requests, list):
             turns = raw.get("request_turns")
             turns = turns if isinstance(turns, list) and len(turns) == len(requests) else [None] * len(requests)
-            for request, turn in list(zip(requests, turns))[-MAX_REQUESTS:]:
+            for request, turn in zip(requests, turns):
                 request = _text(request, MAX_REQUEST_CHARS)
                 if request and not request.startswith(CHECKPOINT_MARKER):
                     self._state["requests"].append(request)
                     self._state["request_turns"].append(_turn(turn))
+                    self._trim_requests()
         messages = raw.get("messages")
         if isinstance(messages, list):
             for message in messages[-MAX_MESSAGES:]:
@@ -284,8 +285,17 @@ class SessionMemory:
             if request != latest or latest_turn != self._active_turn:
                 requests.append(request)
                 self._state["request_turns"].append(self._active_turn)
-                del requests[:-MAX_REQUESTS]
-                del self._state["request_turns"][:-MAX_REQUESTS]
+                self._trim_requests()
+
+    def _trim_requests(self) -> None:
+        """Keep directives ahead of redundant resumes, preserving turn tags."""
+        requests = self._state["requests"]
+        while len(requests) > MAX_REQUESTS:
+            # The newest request remains current even when it is a brief resume.
+            index = next((index for index, request in enumerate(requests[:-1])
+                          if _CONTINUATION.fullmatch(request)), 0)
+            requests.pop(index)
+            self._state["request_turns"].pop(index)
 
     def current_task(self, *, skip_continuations: bool = False) -> str:
         """Return a real directive; optionally resolve a brief request to resume."""
@@ -582,7 +592,12 @@ class SessionMemory:
             )
             sections = [header]
             sections.append("## 元のユーザー依頼（引用）\n" + _quoted(state["original_request"], 3_000))
-            recent = [_display_text(r, 550) for r in state["requests"][-3:]]
+            directives = [r for r in state["requests"] if not _CONTINUATION.fullmatch(r)]
+            if state["requests"] and _CONTINUATION.fullmatch(state["requests"][-1]):
+                recent = [*directives[-2:], state["requests"][-1]]
+            else:
+                recent = directives[-3:]
+            recent = [_display_text(r, 550) for r in recent]
             if recent:
                 sections.append("## 最近のユーザー指示（引用、後の指示を優先）\n" + _quoted(recent, 1_800))
             files = [{k: v for k, v in item.items() if k in {"path", "status", "size", "sha256"}}

@@ -174,6 +174,92 @@ def test_cancelled_turn_cannot_start_kernel(kernel):
     assert kernel.execute("42", cancelled=lambda: False) == "42"
 
 
+def test_registered_python_cell_obeys_turn_deadline_and_recovers(tmp_path, monkeypatch):
+    import time
+
+    from app.config import settings
+
+    core = engine_adapter.bootstrap(engine_adapter.config.AWP_SRC)
+    session = engine_adapter.AgentSession(
+        core, {"base_url": "http://127.0.0.1:1", "model": "test"}, tmp_path
+    )
+    # Warm the kernel so this exercises stopping a running cell, with a later
+    # file mutation proving that stopping the request also stops the work.
+    session.python_kernel.execute("marker = 123")
+    proc = session.python_kernel._process
+    monkeypatch.setattr(settings, "turn_timeout_sec", 0.1)
+
+    def runner(prompt, *, control, **kwargs):
+        control.charge("llm_calls")
+        return core.tools.execute_builtin_tool("execute_python", {"code":
+            "import time\nfrom pathlib import Path\n"
+            "time.sleep(1)\nPath('late.txt').write_text('must not happen')",
+            "timeout": 5})
+
+    monkeypatch.setattr(session._engine, "run_turn_events", runner)
+    events = []
+    started = time.monotonic()
+    try:
+        session.run_turn("Pythonで確認", events.append)
+        assert time.monotonic() - started < 2
+        assert session.outcome == {"status": "limit_reached", "reason": "turn_timeout"}
+        assert proc.poll() is not None
+        assert not session.python_kernel.alive
+        assert not (tmp_path / "late.txt").exists()
+        assert any(event.get("text") == "turn_timeout" for event in events)
+        assert session.python_kernel.execute("6 * 7") == "42"
+        assert "NameError" in session.python_kernel.execute("marker")
+    finally:
+        session.close()
+
+
+def test_cancel_callback_stops_running_cell_and_recovers(kernel):
+    import threading
+
+    cancelled = threading.Event()
+    with pytest.raises(KernelError, match="停止"):
+        kernel.execute("print('ready', flush=True)\nimport time; time.sleep(30)",
+                       on_output=lambda event: cancelled.set(),
+                       cancelled=cancelled.is_set)
+    assert not kernel.alive
+    assert kernel.execute("42") == "42"
+
+
+def test_turn_expiring_during_startup_never_sends_cell(kernel, tmp_path, monkeypatch):
+    core = engine_adapter.bootstrap(engine_adapter.config.AWP_SRC)
+    from unittest.mock import Mock
+
+    expired = False
+    worker = None
+    send = None
+    original_start = kernel._start
+
+    class Control:
+        def check(self):
+            if expired:
+                raise core.TurnStopped("turn_timeout")
+
+    def expire_during_start():
+        nonlocal expired, worker, send
+        original_start()
+        worker = kernel._process
+        send = Mock(wraps=worker.stdin.write)
+        monkeypatch.setattr(worker.stdin, "write", send)
+        expired = True
+
+    monkeypatch.setattr(kernel, "_start", expire_during_start)
+    with pytest.raises(core.TurnStopped) as stopped:
+        kernel.execute("from pathlib import Path; Path('unexpected.txt').write_text('bad')",
+                       control=Control())
+    assert stopped.value.reason == "turn_timeout"
+    send.assert_not_called()
+    assert worker.poll() is not None
+    assert not kernel.alive
+    assert not (tmp_path / "unexpected.txt").exists()
+    monkeypatch.setattr(kernel, "_start", original_start)
+    assert kernel.execute("42") == "42"
+
+
 def test_session_drop_stops_kernel_and_prevents_recreation(tmp_path):
     from app.main import SessionManager
 

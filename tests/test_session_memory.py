@@ -344,6 +344,113 @@ def test_continuation_resolution_falls_back_to_original_and_keeps_concrete_text(
     assert memory.current_task(skip_continuations=True) == "続けて source.py の API を修正して"
 
 
+@pytest.mark.parametrize("continuation", ["続けて", "continue"])
+def test_repeated_continuations_keep_latest_directive_after_history_eviction_and_restart(tmp_path, continuation):
+    memory = SessionMemory(tmp_path, "repeated-continuations")
+    original = "auth.py は変更禁止。戻り値は XML にする。"
+    override = "追加指示: 戻り値を JSON にする。"
+    for turn, request in (("original", original), ("override", override)):
+        memory.begin_turn(turn)
+        memory.record_request(request)
+        memory.capture_history([{"role": "user", "content": request}], record_requests=False)
+        memory.end_turn()
+    for index in range(session_memory.MAX_MESSAGES):
+        memory.begin_turn(f"continue-{index}")
+        memory.record_request(continuation)
+        memory.capture_history([
+            {"role": "user", "content": continuation},
+            {"role": "assistant", "content": f"作業記録 {index}"},
+        ], record_requests=False)
+        memory.end_turn()
+    memory.save()
+    state = json.loads(memory.path.read_text(encoding="utf-8"))
+    assert not any(override in message["content"] for message in state["messages"])
+    assert len(state["requests"]) == len(state["request_turns"]) <= session_memory.MAX_REQUESTS
+    assert memory.path.stat().st_size <= session_memory.MAX_STORE_BYTES
+
+    restored = SessionMemory(tmp_path, "repeated-continuations")
+    assert restored.current_task() == continuation
+    assert restored.current_task(skip_continuations=True) == override
+    checkpoint = restored.restore_messages()[0]["content"]
+    assert original in checkpoint and override in checkpoint
+    assert len(checkpoint) <= session_memory.MAX_CHECKPOINT_CHARS
+    restored.begin_turn("next-continuation")
+    restored.record_request(continuation)
+    assert restored.current_task(skip_continuations=True) == override
+
+
+def test_repeated_continuation_turn_deletion_restores_prior_directive_and_preserves_other_turns(tmp_path):
+    memory = SessionMemory(tmp_path, "continuation-provenance")
+    for turn, request in (("original", "auth.py は変更禁止。戻り値は XML にする。"),
+                          ("yaml", "戻り値は YAML に変更する。"),
+                          ("json", "戻り値は JSON に変更する。")):
+        memory.begin_turn(turn)
+        memory.record_request(request)
+        memory.end_turn()
+    for index in range(session_memory.MAX_REQUESTS * 4):
+        memory.begin_turn(f"continue-{index}")
+        memory.record_request("続けて" if index % 2 else "continue")
+        memory.end_turn()
+    memory.save()
+
+    restored = SessionMemory(tmp_path, "continuation-provenance")
+    restored.drop_turn(f"continue-{session_memory.MAX_REQUESTS * 4 - 1}")
+    assert restored.current_task() == "continue"
+    assert restored.current_task(skip_continuations=True) == "戻り値は JSON に変更する。"
+    restored.drop_turn("json")
+    restored.save()
+    restored = SessionMemory(tmp_path, "continuation-provenance")
+    assert restored.current_task() == "continue"
+    assert restored.current_task(skip_continuations=True) == "戻り値は YAML に変更する。"
+    assert "JSON" not in restored.summary()
+    assert "auth.py は変更禁止" in restored.summary()
+    for index in range(session_memory.MAX_REQUESTS * 4):
+        restored.drop_turn(f"continue-{index}")
+    assert restored.current_task() == "戻り値は YAML に変更する。"
+    restored.drop_turn("yaml")
+    assert restored.current_task() == "auth.py は変更禁止。戻り値は XML にする。"
+    restored.drop_turn("original")
+    restored.save()
+    assert not SessionMemory(tmp_path, "continuation-provenance").has_content
+
+
+def test_legacy_checkpoint_continuation_clutter_uses_directive_retention_budget(tmp_path):
+    memory = SessionMemory(tmp_path, "legacy-continuations")
+    memory.record_request("auth.py は変更禁止")
+    memory.save()
+    state = json.loads(memory.path.read_text(encoding="utf-8"))
+    state["requests"] = ["最新指示: 戻り値を JSON にする", *["続けて"] * (session_memory.MAX_REQUESTS * 2)]
+    state["request_turns"] = ["override", *[f"continue-{index}" for index in range(session_memory.MAX_REQUESTS * 2)]]
+    memory.path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    restored = SessionMemory(tmp_path, "legacy-continuations")
+    assert restored.current_task() == "続けて"
+    assert restored.current_task(skip_continuations=True) == "最新指示: 戻り値を JSON にする"
+    assert "最新指示: 戻り値を JSON にする" in restored.summary()
+    restored.save()
+    state = json.loads(restored.path.read_text(encoding="utf-8"))
+    assert len(state["requests"]) == len(state["request_turns"]) == session_memory.MAX_REQUESTS
+    restored.drop_turn("override")
+    assert restored.current_task(skip_continuations=True) == "auth.py は変更禁止"
+
+
+def test_full_directive_budget_keeps_latest_continuation_as_current_request(tmp_path):
+    memory = SessionMemory(tmp_path, "full-directive-budget")
+    memory.record_request("元の具体的な依頼")
+    for index in range(session_memory.MAX_REQUESTS):
+        memory.begin_turn(f"override-{index}")
+        memory.record_request(f"具体的な追加指示 {index}")
+    for index in range(session_memory.MAX_REQUESTS * 2):
+        memory.begin_turn(f"continue-{index}")
+        memory.record_request("続けて")
+    memory.save()
+    restored = SessionMemory(tmp_path, "full-directive-budget")
+    assert restored.current_task() == "続けて"
+    assert restored.current_task(skip_continuations=True) == f"具体的な追加指示 {session_memory.MAX_REQUESTS - 1}"
+    restored.drop_turn(f"override-{session_memory.MAX_REQUESTS - 1}")
+    assert restored.current_task(skip_continuations=True) == f"具体的な追加指示 {session_memory.MAX_REQUESTS - 2}"
+
+
 @pytest.mark.parametrize("corrupt", [b"{broken", b"\xff\xfe", b"[]", b'{"version":999}',
                                    b'{"version":1,"messages":null,"original_request":123}'])
 def test_corrupt_store_is_safe(tmp_path, corrupt):

@@ -804,6 +804,7 @@ def _register_python_tools(pixie_core) -> None:
             return session.python_kernel.execute(
                 str(code or ""), timeout, stream,
                 cancelled=lambda: getattr(session, "_cancel", False),
+                control=getattr(session, "_control", None),
             )
         except (KernelError, OSError, ValueError) as exc:
             return f"エラー: {exc}"

@@ -86,17 +86,32 @@ class PythonKernel:
 
     def execute(self, code: str, timeout: float = 30.0,
                 on_output: Callable[[dict], None] | None = None,
-                *, cancelled: Callable[[], bool] | None = None) -> str:
+                *, cancelled: Callable[[], bool] | None = None, control=None) -> str:
         timeout = max(0.1, min(float(timeout), 120.0))
+        proc = None
+
+        def check_interruption() -> None:
+            try:
+                if control is not None:
+                    control.check()
+                if cancelled and cancelled():
+                    raise KernelError("Python実行は停止されました。")
+            except BaseException:
+                if proc is not None:
+                    self._stop_process(proc)
+                raise
+
         with self._state_lock:
             generation = self._generation
         with self._lock:
             with self._state_lock:
-                if self._closed or generation != self._generation or (cancelled and cancelled()):
+                check_interruption()
+                if self._closed or generation != self._generation:
                     raise KernelError("Python実行は停止されました。")
                 self._start()
                 proc = self._process
                 events = self._events
+            check_interruption()
             if proc is None or proc.stdin is None:
                 raise KernelError("Pythonカーネルを起動できませんでした。")
             try:
@@ -109,6 +124,7 @@ class PythonKernel:
             output: list[str] = []
             output_chars = 0
             while True:
+                check_interruption()
                 with self._state_lock:
                     if generation != self._generation:
                         raise KernelError("Python実行は停止されました。")
@@ -123,6 +139,7 @@ class PythonKernel:
                         self._stop_process(proc)
                         raise KernelError("Pythonカーネルが予期せず終了しました。")
                     continue
+                check_interruption()
                 kind = event.get("type")
                 if kind == "done":
                     return "".join(output).rstrip() or "実行完了（出力なし）"
