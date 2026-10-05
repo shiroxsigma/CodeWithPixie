@@ -4245,7 +4245,7 @@ const Ll = { id: "split" }, Dl = { id: "right-pane" }, $l = { id: "chat" }, jl =
                 id: "verification-command",
                 type: "text",
                 "aria-label": "自走で繰り返す検証コマンド",
-                placeholder: "検証コマンド（例: python -m pytest -q）",
+                placeholder: "検証コマンドを入力（自動検出できませんでした）",
                 disabled: k(s)
               }, null, 8, Jl)
             ]),
@@ -4396,7 +4396,7 @@ const ec = /* @__PURE__ */ zi(Zl, [["render", tc]]), sc = { id: "topbar" }, nc =
   }
 });
 vl(nc).mount("#app");
-hi(() => import("./app-CADqk8tf.js"));
+hi(() => import("./app-C2f1moOM.js"));
 export {
   B as a,
   lc as b,

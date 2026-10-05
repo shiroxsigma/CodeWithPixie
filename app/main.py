@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (auth, code_chat, compact, config, copilot, copilot_flow, engine_adapter, engine_events, extract,
-               files, history, mdflow, mode, note_api, note_prompts, patch, search, source_bundle)
+               files, history, mdflow, mode, note_api, note_prompts, patch, search, source_bundle, verification)
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -276,6 +276,11 @@ class PatchReq(BaseModel):
 
 
 # --- ファイル API -------------------------------------------------------------
+@app.get("/api/workspace/verification-command")
+def api_verification_command():
+    return {"command": verification.suggest_command(config.WORKSPACE)}
+
+
 @app.post("/api/workspace/source-bundle")
 def api_source_bundle(req: SourceBundleReq):
     """選択中のプロジェクトをコピー・保存・Copilot 添付用にまとめる。"""

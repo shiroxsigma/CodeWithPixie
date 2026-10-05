@@ -69,6 +69,40 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator("#chat-welcome")).toBeVisible();
 });
 
+test("live speed uses an explicit estimate without server timings and excludes tool waits", async ({ page }) => {
+  await page.clock.install();
+  await page.locator("#chat-input").fill("live speed");
+  await page.locator("#send-btn").click();
+  await page.evaluate(() => (window as any).emitChat({ type: "token", text: "first" }));
+  await expect(page.locator("#chat-activity")).toContainText("速度を計測中");
+  await page.clock.runFor(1000);
+  await page.evaluate(() => (window as any).emitChat({ type: "token", text: "abcdefghijkl" }));
+  await expect(page.locator("#chat-activity")).toContainText("推定 4.0 tokens/sec");
+  await page.evaluate(() => (window as any).emitChat({ type: "status", phase: "tool" }));
+  await expect(page.locator("#chat-activity")).toContainText("ツールを実行中");
+  await page.clock.runFor(10000);
+  await page.evaluate(() => (window as any).emitChat({ type: "token", text: "resume" }));
+  await expect(page.locator("#chat-activity")).toContainText("回答を生成中");
+  await page.clock.runFor(1000);
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "token", text: "abcdefghijkl" });
+    (window as any).emitChat({ type: "turn_metrics", metrics: { llm_calls: [{ decode_tokens: null, decode_ms: null }] } });
+    (window as any).emitChat({ type: "done" });
+  });
+  await expect(page.locator("#chat-activity")).toHaveText("推定 4.0 tokens/sec");
+  await expect(page.locator("#messages .response-speed")).toHaveText("推定 4.0 tokens/sec");
+});
+
+test("a single buffered response reports missing speed data instead of an invented rate", async ({ page }) => {
+  await page.locator("#chat-input").fill("buffered");
+  await page.locator("#send-btn").click();
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "token", text: "one complete response" });
+    (window as any).emitChat({ type: "done" });
+  });
+  await expect(page.locator("#chat-activity")).toHaveText("速度: 計測データなし");
+});
+
 test("switching views preserves the running conversation and composer", async ({
   page,
 }) => {
@@ -94,8 +128,18 @@ test("switching views preserves the running conversation and composer", async ({
 test("autonomous permission and verification command apply to the selected conversation", async ({
   page,
 }) => {
+  await page.route("**/api/workspace/verification-command", route =>
+    route.fulfill({ json: { command: "npm test" } }),
+  );
+  await expect(page.locator("#verification-command")).toBeHidden();
   await page.locator("#autonomous-check").check();
+  await expect(page.locator("#verification-command")).toBeVisible();
+  await expect(page.locator("#verification-command")).toHaveValue("npm test");
   await page.locator("#verification-command").fill("python -m pytest -q");
+  await page.locator("#autonomous-check").uncheck();
+  await expect(page.locator("#verification-command")).toBeHidden();
+  await page.locator("#autonomous-check").check();
+  await expect(page.locator("#verification-command")).toHaveValue("python -m pytest -q");
   await page.locator("#chat-input").fill("修正して検証");
   await page.locator("#send-btn").click();
   await expect(page.locator('[role="status"]')).toHaveText("実行中");

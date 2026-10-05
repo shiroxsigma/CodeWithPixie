@@ -1,10 +1,10 @@
-import { c as M, w as Oi, a as dn, s as dt, b as Hi, d as un, e as ys, f as ji } from "./main-CG7Jpmff.js";
+import { c as $, w as Oi, a as dn, s as dt, b as Hi, d as un, e as ys, f as ji } from "./main-DeV90tDn.js";
 class ne extends Error {
   constructor(t, n) {
     super(t), this.name = "ApiError", this.status = n;
   }
 }
-async function Y(e, t) {
+async function Z(e, t) {
   let n;
   try {
     n = await fetch(e, t);
@@ -17,14 +17,14 @@ async function Y(e, t) {
   }
   return n.json();
 }
-const re = (e) => Y(e), R = (e, t) => Y(e, {
+const re = (e) => Z(e), R = (e, t) => Z(e, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: t === void 0 ? void 0 : JSON.stringify(t)
 });
-async function Z(e, t) {
+async function z(e, t) {
   try {
-    return await Y(e, t);
+    return await Z(e, t);
   } catch (n) {
     alert("⚠️ " + n.message);
     return;
@@ -42,59 +42,59 @@ ${e.content}` : e.content;
 function Wi({ getSnapshot: e, isCurrent: t, canSend: n, send: s }) {
   const i = l("source-bundle-modal"), r = l("source-bundle-instruction"), a = l("source-bundle-preview"), c = l("source-bundle-status");
   let d = null, u, f = 0, h = !1, p = !1;
-  const g = [], y = (S, $, I) => {
-    S.addEventListener($, I), g.push(() => S.removeEventListener($, I));
+  const g = [], y = (E, M, I) => {
+    E.addEventListener(M, I), g.push(() => E.removeEventListener(M, I));
   };
-  function b() {
-    const S = !h && d?.file_count > 0 && t(u);
-    l("source-bundle-copy").disabled = !S, l("source-bundle-download").disabled = !S, l("source-bundle-send").disabled = !S || !r.value.trim() || !n(), l("source-bundle-refresh").disabled = h, a.value = d ? Rt(d, r.value) : "";
+  function k() {
+    const E = !h && d?.file_count > 0 && t(u);
+    l("source-bundle-copy").disabled = !E, l("source-bundle-download").disabled = !E, l("source-bundle-send").disabled = !E || !r.value.trim() || !n(), l("source-bundle-refresh").disabled = h, a.value = d ? Rt(d, r.value) : "";
   }
-  function E() {
+  function L() {
     i.classList.add("hidden"), l("source-bundle-btn").focus();
   }
   function v() {
-    f++, h = !1, d = null, u = void 0, r.value = "", c.textContent = "", l("source-bundle-root").textContent = "", l("source-bundle-summary").textContent = "", l("source-bundle-skips-list").replaceChildren(), l("source-bundle-skips").classList.add("hidden"), l("source-bundle-warning").classList.add("hidden"), i.classList.add("hidden"), b();
+    f++, h = !1, d = null, u = void 0, r.value = "", c.textContent = "", l("source-bundle-root").textContent = "", l("source-bundle-summary").textContent = "", l("source-bundle-skips-list").replaceChildren(), l("source-bundle-skips").classList.add("hidden"), l("source-bundle-warning").classList.add("hidden"), i.classList.add("hidden"), k();
   }
-  async function k() {
-    const S = e(), $ = ++f;
-    u = S.generation, h = !0, d = null, c.textContent = "ソースを収集中…", l("source-bundle-root").textContent = "", l("source-bundle-summary").textContent = "", l("source-bundle-warning").classList.add("hidden"), l("source-bundle-skips").classList.add("hidden"), b();
+  async function b() {
+    const E = e(), M = ++f;
+    u = E.generation, h = !0, d = null, c.textContent = "ソースを収集中…", l("source-bundle-root").textContent = "", l("source-bundle-summary").textContent = "", l("source-bundle-warning").classList.add("hidden"), l("source-bundle-skips").classList.add("hidden"), k();
     try {
       const I = await R("/api/workspace/source-bundle", {
-        current_file: S.current_file,
-        current_content: S.current_content
+        current_file: E.current_file,
+        current_content: E.current_content
       });
-      if (p || $ !== f) return;
-      if (!t(S.generation)) {
+      if (p || M !== f) return;
+      if (!t(E.generation)) {
         v();
         return;
       }
       d = I, l("source-bundle-root").textContent = I.root, l("source-bundle-summary").textContent = `${I.file_count} ファイル・${Number(I.total_bytes).toLocaleString()} バイト`;
       const P = l("source-bundle-warning");
       P.textContent = I.truncated ? "サイズまたは件数の上限に達しました。一部のソースは含まれていません。" : "", P.classList.toggle("hidden", !I.truncated);
-      const j = I.skipped || [];
-      l("source-bundle-skips").classList.toggle("hidden", !j.length), l("source-bundle-skips-summary").textContent = `除外されたファイル（${j.length}件）`;
+      const W = I.skipped || [];
+      l("source-bundle-skips").classList.toggle("hidden", !W.length), l("source-bundle-skips-summary").textContent = `除外されたファイル（${W.length}件）`;
       const V = l("source-bundle-skips-list");
       V.replaceChildren();
-      for (const ae of j) {
+      for (const ae of W) {
         const H = document.createElement("li");
         H.textContent = `${ae.path}: ${ae.reason}`, V.appendChild(H);
       }
       c.textContent = I.file_count ? "コピー・保存・送信の準備ができました。" : "まとめられるソースがありません。";
     } catch (I) {
-      if (p || $ !== f) return;
-      if (!t(S.generation)) {
+      if (p || M !== f) return;
+      if (!t(E.generation)) {
         v();
         return;
       }
       c.textContent = "ソースをまとめられませんでした: " + I.message;
     } finally {
-      !p && $ === f && (h = !1, b());
+      !p && M === f && (h = !1, k());
     }
   }
   function C() {
-    return d && !h && t(u) && d.file_count > 0 ? !0 : (b(), !1);
+    return d && !h && t(u) && d.file_count > 0 ? !0 : (k(), !1);
   }
-  async function T() {
+  async function _() {
     if (C())
       try {
         await navigator.clipboard.writeText(Rt(d, r.value)), c.textContent = "コピーしました。Copilot に貼り付けられます。";
@@ -104,26 +104,26 @@ function Wi({ getSnapshot: e, isCurrent: t, canSend: n, send: s }) {
   }
   function A() {
     if (!C()) return;
-    const S = URL.createObjectURL(new Blob([Rt(d, r.value)], { type: "text/markdown;charset=utf-8" })), $ = document.createElement("a");
-    $.href = S, $.download = d.filename, document.body.appendChild($), $.click(), $.remove(), setTimeout(() => URL.revokeObjectURL(S), 1e3), c.textContent = "ファイルに保存しました。Copilot に添付できます。";
+    const E = URL.createObjectURL(new Blob([Rt(d, r.value)], { type: "text/markdown;charset=utf-8" })), M = document.createElement("a");
+    M.href = E, M.download = d.filename, document.body.appendChild(M), M.click(), M.remove(), setTimeout(() => URL.revokeObjectURL(E), 1e3), c.textContent = "ファイルに保存しました。Copilot に添付できます。";
   }
-  async function B() {
-    if (!C() || (b(), !r.value.trim() || !n())) return;
-    const S = {
+  async function F() {
+    if (!C() || (k(), !r.value.trim() || !n())) return;
+    const E = {
       message: "/copilot_simple " + r.value.trim(),
       sourceBundle: { filename: d.filename, content: d.content },
       attachmentLabel: `${d.filename}（${d.file_count} ファイル）`
-    }, $ = s(S);
-    E(), await $;
+    }, M = s(E);
+    L(), await M;
   }
   return y(l("source-bundle-btn"), "click", () => {
-    i.classList.remove("hidden"), r.focus(), k();
-  }), y(r, "input", b), y(l("source-bundle-close"), "click", E), y(l("source-bundle-refresh"), "click", k), y(l("source-bundle-copy"), "click", T), y(l("source-bundle-download"), "click", A), y(l("source-bundle-send"), "click", B), y(i, "click", (S) => {
-    S.target === i && E();
-  }), y(window, "focus", b), y(window, "keydown", (S) => {
-    S.key === "Escape" && !i.classList.contains("hidden") && (S.preventDefault(), E());
-  }), b(), { reset: v, update: b, dispose() {
-    p = !0, v(), g.forEach((S) => S());
+    i.classList.remove("hidden"), r.focus(), b();
+  }), y(r, "input", k), y(l("source-bundle-close"), "click", L), y(l("source-bundle-refresh"), "click", b), y(l("source-bundle-copy"), "click", _), y(l("source-bundle-download"), "click", A), y(l("source-bundle-send"), "click", F), y(i, "click", (E) => {
+    E.target === i && L();
+  }), y(window, "focus", k), y(window, "keydown", (E) => {
+    E.key === "Escape" && !i.classList.contains("hidden") && (E.preventDefault(), L());
+  }), k(), { reset: v, update: k, dispose() {
+    p = !0, v(), g.forEach((E) => E());
   } };
 }
 const me = globalThis.jsyaml || null, bs = () => me !== null, Ui = "fill:#ff9999,stroke:#333,stroke-width:2px", qi = "fill:#2a2a2a,stroke:#555,color:#888", Un = /^```[ \t]*(?:yaml[ \t]+)?mdflow-mapping[ \t]*\n([\s\S]*?)^```/gm, Es = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/, Vi = /^﻿?---[ \t]*\r?\n/, Ki = /^\s*%%\s*id\s*:\s*(\S+)/m;
@@ -165,12 +165,12 @@ function Gi(e) {
         continue;
       }
       const p = [];
-      for (const [y, b] of Object.entries(h.presets || {})) {
-        const E = b || {};
+      for (const [y, k] of Object.entries(h.presets || {})) {
+        const L = k || {};
         p.push({
           name: String(y),
-          when: String(E.when ?? ""),
-          activeNodes: (E.active_nodes || []).map(String)
+          when: String(L.when ?? ""),
+          activeNodes: (L.active_nodes || []).map(String)
         });
       }
       const g = h.style || {};
@@ -281,8 +281,8 @@ function Ji(e, t) {
     if (i()?.t !== "op") return p;
     let g = !0;
     for (; i()?.t === "op"; ) {
-      const y = r().v, b = f();
-      g && !Xi(y, p, b) && (g = !1), p = b;
+      const y = r().v, k = f();
+      g && !Xi(y, p, k) && (g = !1), p = k;
     }
     return g;
   }
@@ -430,9 +430,9 @@ mdflow:
   }
   let h = -1;
   for (let v = f + 1; v < d.length; v++) {
-    const k = d[v].raw.replace(/\r$/, "");
-    if (k.trim() && It(k) === 0) break;
-    if (/^\s+selected:\s*$/.test(k)) {
+    const b = d[v].raw.replace(/\r$/, "");
+    if (b.trim() && It(b) === 0) break;
+    if (/^\s+selected:\s*$/.test(b)) {
       h = v;
       break;
     }
@@ -445,27 +445,27 @@ mdflow:
 ` };
   }
   const p = It(d[h].raw), g = " ".repeat(p + 2);
-  let y = -1, b = null;
+  let y = -1, k = null;
   for (let v = h + 1; v < d.length; v++) {
-    const k = d[v].raw.replace(/\r$/, "");
-    if (k.trim() && It(k) <= p) break;
-    if (k.trim() && (b == null && (b = /^\s*/.exec(k)[0]), nr(k) === t)) {
+    const b = d[v].raw.replace(/\r$/, "");
+    if (b.trim() && It(b) <= p) break;
+    if (b.trim() && (k == null && (k = /^\s*/.exec(b)[0]), nr(b) === t)) {
       y = v;
       break;
     }
   }
   if (y >= 0) {
-    const v = d[y], k = v.raw.endsWith("\r");
+    const v = d[y], b = v.raw.endsWith("\r");
     if (i == null) {
-      const T = Math.min(v.start + v.raw.length + 1, a + c.length);
-      return { start: v.start, end: T, text: "" };
+      const _ = Math.min(v.start + v.raw.length + 1, a + c.length);
+      return { start: v.start, end: _, text: "" };
     }
     const C = /^\s*/.exec(v.raw)[0];
-    return { start: v.start, end: v.start + v.raw.length - (k ? 1 : 0), text: `${C}${i}` };
+    return { start: v.start, end: v.start + v.raw.length - (b ? 1 : 0), text: `${C}${i}` };
   }
   if (i == null) return null;
-  const E = d[h].start + d[h].raw.length + 1;
-  return { start: E, end: E, text: `${b ?? g}${i}
+  const L = d[h].start + d[h].raw.length + 1;
+  return { start: L, end: L, text: `${k ?? g}${i}
 ` };
 }
 const ir = 2;
@@ -617,20 +617,20 @@ function br(e, t, n, s) {
   }, c = () => t + r.pos;
   function d() {
     a();
-    const E = mr.exec(e.slice(r.pos));
-    if (!E) return null;
-    let v = E[0];
-    const k = v.search(/--|-\.|\.-/);
-    if (k > 0 && (v = v.slice(0, k)), v = v.replace(/[-.]+$/, ""), !v) return null;
+    const L = mr.exec(e.slice(r.pos));
+    if (!L) return null;
+    let v = L[0];
+    const b = v.search(/--|-\.|\.-/);
+    if (b > 0 && (v = v.slice(0, b)), v = v.replace(/[-.]+$/, ""), !v) return null;
     const C = c();
     r.pos += v.length;
-    const T = { id: v, span: { start: C, end: C + v.length }, def: null };
-    for (const [A, B] of lr) {
+    const _ = { id: v, span: { start: C, end: C + v.length }, def: null };
+    for (const [A, F] of lr) {
       if (!e.startsWith(A, r.pos)) continue;
-      const S = r.pos + A.length;
-      let $ = -1, I = !1, P = S;
-      if (e[S] === '"') {
-        I = !0, P = S + 1;
+      const E = r.pos + A.length;
+      let M = -1, I = !1, P = E;
+      if (e[E] === '"') {
+        I = !0, P = E + 1;
         let H = P;
         for (; H < e.length; ) {
           if (e[H] === "\\" && e[H + 1] === '"') {
@@ -638,40 +638,40 @@ function br(e, t, n, s) {
             continue;
           }
           if (e[H] === '"') {
-            $ = H;
+            M = H;
             break;
           }
           H++;
         }
-        if ($ < 0 || !e.startsWith(B, $ + 1)) return null;
+        if (M < 0 || !e.startsWith(F, M + 1)) return null;
       } else {
-        const H = e.indexOf(B, S);
+        const H = e.indexOf(F, E);
         if (H < 0) return null;
-        $ = H;
+        M = H;
       }
-      const j = $ + (I ? 1 : 0) + B.length;
-      let V = j;
-      const ae = /^:::[A-Za-z0-9_-]+/.exec(e.slice(j));
-      return ae && (V = j + ae[0].length), T.def = {
-        label: e.slice(P, $),
+      const W = M + (I ? 1 : 0) + F.length;
+      let V = W;
+      const ae = /^:::[A-Za-z0-9_-]+/.exec(e.slice(W));
+      return ae && (V = W + ae[0].length), _.def = {
+        label: e.slice(P, M),
         quoted: I,
-        shape: [A, B],
+        shape: [A, F],
         cls: ae ? ae[0] : "",
-        labelSpan: { start: t + P, end: t + $ },
+        labelSpan: { start: t + P, end: t + M },
         span: { start: C, end: t + V },
         raw: e.slice(C - t, V)
-      }, r.pos = V, T.span = { start: C, end: t + V }, T;
+      }, r.pos = V, _.span = { start: C, end: t + V }, _;
     }
-    return T;
+    return _;
   }
   function u() {
     a();
-    for (const E of dr) {
-      if (!e.startsWith(E, r.pos)) continue;
+    for (const L of dr) {
+      if (!e.startsWith(L, r.pos)) continue;
       const v = c();
-      r.pos += E.length;
-      const k = {
-        text: E,
+      r.pos += L.length;
+      const b = {
+        text: L,
         mid: null,
         span: { start: v, end: c() },
         label: null,
@@ -681,36 +681,36 @@ function br(e, t, n, s) {
       if (a(), e[r.pos] === "|") {
         const C = e.indexOf("|", r.pos + 1);
         if (C < 0) return null;
-        k.label = e.slice(r.pos + 1, C), k.pipeSpan = { start: c(), end: t + C + 1 }, k.labelSpan = { start: c() + 1, end: t + C }, r.pos = C + 1;
+        b.label = e.slice(r.pos + 1, C), b.pipeSpan = { start: c(), end: t + C + 1 }, b.labelSpan = { start: c() + 1, end: t + C }, r.pos = C + 1;
       }
-      return k;
+      return b;
     }
     return f();
   }
   function f() {
-    for (const E of Ss) {
-      if (!e.startsWith(E.open, r.pos)) continue;
-      const v = c(), k = r.pos + E.open.length;
-      let C = -1, T = "", A = "";
-      for (let P = k; P < e.length && C < 0; P++)
-        for (const [j, V] of E.closers)
-          if (e.startsWith(j, P)) {
-            C = P, T = j, A = V;
+    for (const L of Ss) {
+      if (!e.startsWith(L.open, r.pos)) continue;
+      const v = c(), b = r.pos + L.open.length;
+      let C = -1, _ = "", A = "";
+      for (let P = b; P < e.length && C < 0; P++)
+        for (const [W, V] of L.closers)
+          if (e.startsWith(W, P)) {
+            C = P, _ = W, A = V;
             break;
           }
       if (C < 0) continue;
-      const B = e.slice(k, C);
-      if (!B.trim()) continue;
-      r.pos = C + T.length;
-      const S = B.length - B.replace(/^\s+/, "").length, $ = B.trim(), I = t + k + S;
+      const F = e.slice(b, C);
+      if (!F.trim()) continue;
+      r.pos = C + _.length;
+      const E = F.length - F.replace(/^\s+/, "").length, M = F.trim(), I = t + b + E;
       return {
         text: A,
         // mid があるものは「中置ラベル形式」。raw をそのまま書き戻せば見た目が保たれる。
-        mid: { open: E.open, close: T },
+        mid: { open: L.open, close: _ },
         raw: e.slice(v - t, r.pos),
         span: { start: v, end: c() },
-        label: $,
-        labelSpan: { start: I, end: I + $.length },
+        label: M,
+        labelSpan: { start: I, end: I + M.length },
         pipeSpan: null
       };
     }
@@ -724,16 +724,16 @@ function br(e, t, n, s) {
   const g = u();
   if (!g)
     return h() ? { type: "node", start: t, end: n, indent: i, ref: p } : null;
-  const y = [p], b = [g];
+  const y = [p], k = [g];
   for (; ; ) {
-    const E = d();
-    if (!E) return null;
-    if (y.push(E), h()) break;
+    const L = d();
+    if (!L) return null;
+    if (y.push(L), h()) break;
     const v = u();
     if (!v) return null;
-    b.push(v);
+    k.push(v);
   }
-  return { type: "edge", start: t, end: n, indent: i, refs: y, arrows: b };
+  return { type: "edge", start: t, end: n, indent: i, refs: y, arrows: k };
 }
 function Yn(e, t) {
   const n = e.nodes.get(t.id);
@@ -997,8 +997,8 @@ function st(e, t) {
     for (let p = 1; p < d.length; p++) {
       const g = d[p - 1];
       if (g !== "-" && g !== "_") continue;
-      const y = d.slice(0, p - 1), b = d.slice(p);
-      y && b && n.has(y) && n.has(b) && u.push([y, b]);
+      const y = d.slice(0, p - 1), k = d.slice(p);
+      y && k && n.has(y) && n.has(k) && u.push([y, k]);
     }
     const f = u.filter(([p, g]) => t.edges.some((y) => y.from === p && y.to === g)), h = f.length ? f : u;
     if (h.length !== 1) return null;
@@ -1049,8 +1049,8 @@ function qt(e, t, n, s = null) {
   const r = { selected: null, arrowPick: null, busy: !1 }, a = document.createElement("div");
   a.className = "mermaid-editbar";
   const c = (m, w, x) => {
-    const L = document.createElement("button");
-    return L.type = "button", L.textContent = m, L.title = w, L.addEventListener("click", x), a.appendChild(L), L;
+    const S = document.createElement("button");
+    return S.type = "button", S.textContent = m, S.title = w, S.addEventListener("click", x), a.appendChild(S), S;
   }, d = c("ラベル編集", "選択中のノード/矢印のラベルを編集", Ni);
   c("➕ ノード", "ノードを追加（追加後にラベルを編集できます）", Ri);
   const u = c("➕ 矢印", "矢印を追加（始点→終点の順にノードをクリック）", Ii), f = c("⇄ 反転", "選択中の矢印の向きを入れ替える", Ai), h = document.createElement("select");
@@ -1063,28 +1063,28 @@ function qt(e, t, n, s = null) {
   const p = document.createElement("select");
   p.className = "mermaid-node-shape", p.title = "選択中のノードの形状を変える";
   for (const [m, w, x] of Br) {
-    const L = document.createElement("option");
-    L.value = m + Pt + w, L.textContent = x, p.appendChild(L);
+    const S = document.createElement("option");
+    S.value = m + Pt + w, S.textContent = x, p.appendChild(S);
   }
   p.addEventListener("change", Fi), a.appendChild(p);
   const g = c("削除", "選択中のノード/矢印を削除（Delete キーでも可。Ctrl+Z で戻せます）", Bn), y = document.createElement("span");
   y.className = "mermaid-edit-hint", a.appendChild(y), c("✓ 完了", "編集モードを終了（Esc でも可）", () => Te(!0)), e.appendChild(a);
-  const b = (m) => {
+  const k = (m) => {
     y.textContent = m;
-  }, E = (m) => {
+  }, L = (m) => {
     if (![...h.options].some((w) => w.value === m)) {
       const w = document.createElement("option");
       w.value = m, w.textContent = m, h.appendChild(w);
     }
     h.value = m;
   }, v = (m) => {
-    const [w, x] = m || ["[", "]"], L = w + Pt + x;
-    if (![...p.options].some((_) => _.value === L)) {
-      const _ = document.createElement("option");
-      _.value = L, _.textContent = `${w}…${x}`, p.appendChild(_);
+    const [w, x] = m || ["[", "]"], S = w + Pt + x;
+    if (![...p.options].some((T) => T.value === S)) {
+      const T = document.createElement("option");
+      T.value = S, T.textContent = `${w}…${x}`, p.appendChild(T);
     }
-    p.value = L;
-  }, k = () => {
+    p.value = S;
+  }, b = () => {
     if (!n.reveal) return;
     const m = r.selected;
     if (!m) {
@@ -1092,23 +1092,23 @@ function qt(e, t, n, s = null) {
       return;
     }
     if (m.kind === "node") {
-      const L = i.nodes.get(m.id), _ = L?.def ? L.def.span : L?.firstRef?.span;
-      n.reveal(_ ? { line: Pr(i, _.start), focus: _ } : null);
+      const S = i.nodes.get(m.id), T = S?.def ? S.def.span : S?.firstRef?.span;
+      n.reveal(T ? { line: Pr(i, T.start), focus: T } : null);
       return;
     }
     const w = i.edges[m.idx], x = w ? i.statements[w.stmtIdx] : null;
     n.reveal(w ? { line: x ? { start: x.start, end: x.end } : null, focus: w.arrow.span } : null);
   }, C = () => {
     const m = r.selected, w = m?.kind === "edge", x = m?.kind === "node";
-    d.disabled = !m, g.disabled = !m, d.textContent = w ? "ラベル編集（矢印）" : "ラベル編集", f.classList.toggle("hidden", !w), h.classList.toggle("hidden", !w), p.classList.toggle("hidden", !x), u.classList.toggle("active", !!r.arrowPick), w && E(i.edges[m.idx]?.arrow.text || "-->"), x && v(i.nodes.get(m.id)?.def?.shape), r.arrowPick ? b(r.arrowPick.from ? `➕ 矢印: 始点 ${r.arrowPick.from} → 終点のノードをクリック（Escで中止）` : "➕ 矢印: 始点のノードをクリック（Escで中止）") : b(m ? m.kind === "node" ? `選択中: ノード ${m.id}（Delete で削除）` : "選択中: 矢印（Delete で削除）" : "クリック: 選択 ／ ダブルクリック: ラベル編集 ／ Esc: 終了"), k();
+    d.disabled = !m, g.disabled = !m, d.textContent = w ? "ラベル編集（矢印）" : "ラベル編集", f.classList.toggle("hidden", !w), h.classList.toggle("hidden", !w), p.classList.toggle("hidden", !x), u.classList.toggle("active", !!r.arrowPick), w && L(i.edges[m.idx]?.arrow.text || "-->"), x && v(i.nodes.get(m.id)?.def?.shape), r.arrowPick ? k(r.arrowPick.from ? `➕ 矢印: 始点 ${r.arrowPick.from} → 終点のノードをクリック（Escで中止）` : "➕ 矢印: 始点のノードをクリック（Escで中止）") : k(m ? m.kind === "node" ? `選択中: ノード ${m.id}（Delete で削除）` : "選択中: 矢印（Delete で削除）" : "クリック: 選択 ／ ダブルクリック: ラベル編集 ／ Esc: 終了"), b();
   };
   C();
-  const T = () => {
+  const _ = () => {
     e.querySelectorAll(".selected").forEach((m) => m.classList.remove("selected")), r.selected = null;
-  }, A = (m) => [...e.querySelectorAll("g[id*='flowchart-']")].find((w) => nt(w.id, i.nodes) === m) || null, B = (m) => [...e.querySelectorAll("path.flowchart-link")].find((w) => st(w, i) === m) || null, S = (m, w) => {
-    T(), r.selected = { kind: "node", id: m }, (w || A(m))?.classList.add("selected"), C();
-  }, $ = (m, w) => {
-    T(), r.selected = { kind: "edge", idx: m }, (w || B(m))?.classList.add("selected"), C();
+  }, A = (m) => [...e.querySelectorAll("g[id*='flowchart-']")].find((w) => nt(w.id, i.nodes) === m) || null, F = (m) => [...e.querySelectorAll("path.flowchart-link")].find((w) => st(w, i) === m) || null, E = (m, w) => {
+    _(), r.selected = { kind: "node", id: m }, (w || A(m))?.classList.add("selected"), C();
+  }, M = (m, w) => {
+    _(), r.selected = { kind: "edge", idx: m }, (w || F(m))?.classList.add("selected"), C();
   }, I = () => {
     const m = r.selected;
     if (!m) return null;
@@ -1121,9 +1121,9 @@ function qt(e, t, n, s = null) {
       editNodeId: w,
       selection: x === void 0 ? I() : x
     }) || Te(!1);
-  }, j = e.querySelector(":scope > .mermaid-canvas") || e, V = (m, w) => {
-    const x = j.getBoundingClientRect();
-    return { x: m - x.left + j.scrollLeft, y: w - x.top + j.scrollTop };
+  }, W = e.querySelector(":scope > .mermaid-canvas") || e, V = (m, w) => {
+    const x = W.getBoundingClientRect();
+    return { x: m - x.left + W.scrollLeft, y: w - x.top + W.scrollTop };
   }, ae = (m) => {
     const w = m.getBoundingClientRect(), x = V(w.left, w.top);
     return { left: x.x, top: x.y, width: w.width, height: w.height };
@@ -1141,48 +1141,48 @@ function qt(e, t, n, s = null) {
     const w = V(m.x, m.y);
     return { left: w.x - 90, top: w.y - 14, width: 180 };
   }, Ti = (m, w) => {
-    const x = A(m), L = A(w);
-    if (!x || !L) return { left: 8, top: 8, width: 180 };
-    const _ = x.getBoundingClientRect(), G = L.getBoundingClientRect();
+    const x = A(m), S = A(w);
+    if (!x || !S) return { left: 8, top: 8, width: 180 };
+    const T = x.getBoundingClientRect(), Y = S.getBoundingClientRect();
     return Fn({
-      x: (_.left + _.width / 2 + G.left + G.width / 2) / 2,
-      y: (_.top + _.height / 2 + G.top + G.height / 2) / 2
+      x: (T.left + T.width / 2 + Y.left + Y.width / 2) / 2,
+      y: (T.top + T.height / 2 + Y.top + Y.height / 2) / 2
     });
-  }, $t = ({ left: m, top: w, width: x, value: L, placeholder: _ }, G) => {
+  }, $t = ({ left: m, top: w, width: x, value: S, placeholder: T }, Y) => {
     e.querySelectorAll(".mermaid-inline-input").forEach((ce) => ce.remove());
-    const F = document.createElement("textarea");
-    F.className = "mermaid-inline-input", F.rows = 1, F.value = L || "", _ && (F.placeholder = _), F.style.left = `${Math.max(0, m)}px`, F.style.top = `${Math.max(0, w)}px`, F.style.width = `${Math.max(160, x)}px`, j.appendChild(F);
+    const D = document.createElement("textarea");
+    D.className = "mermaid-inline-input", D.rows = 1, D.value = S || "", T && (D.placeholder = T), D.style.left = `${Math.max(0, m)}px`, D.style.top = `${Math.max(0, w)}px`, D.style.width = `${Math.max(160, x)}px`, W.appendChild(D);
     const Ee = () => {
-      F.style.height = "auto", F.style.height = `${F.scrollHeight}px`;
+      D.style.height = "auto", D.style.height = `${D.scrollHeight}px`;
     };
-    Ee(), F.focus(), F.select();
+    Ee(), D.focus(), D.select();
     let Ne = !1;
     const Nt = (ce) => {
       if (Ne) return;
       Ne = !0;
-      const Bi = F.value;
-      F.remove(), ce && G(Bi);
+      const Bi = D.value;
+      D.remove(), ce && Y(Bi);
     };
-    F.addEventListener("keydown", (ce) => {
+    D.addEventListener("keydown", (ce) => {
       ce.stopPropagation(), ce.key === "Enter" && !ce.shiftKey ? (ce.preventDefault(), Nt(!0)) : ce.key === "Escape" && Nt(!1);
-    }), F.addEventListener("input", Ee), F.addEventListener("blur", () => Nt(!0));
+    }), D.addEventListener("input", Ee), D.addEventListener("blur", () => Nt(!0));
   }, Tt = (m, w) => {
-    const x = Zn(i.nodes.get(w)?.def?.label ?? ""), L = ae(m);
+    const x = Zn(i.nodes.get(w)?.def?.label ?? ""), S = ae(m);
     $t({
-      left: L.left,
-      top: L.top,
-      width: L.width + 24,
+      left: S.left,
+      top: S.top,
+      width: S.width + 24,
       value: x,
       placeholder: "ノードラベル（Shift+Enter で改行）"
-    }, (_) => {
-      _ !== x && P(Lr(i, t.src, w, At(_)));
+    }, (T) => {
+      T !== x && P(Lr(i, t.src, w, At(T)));
     });
   }, Dn = (m, w) => {
-    const x = Zn(i.edges[m]?.arrow?.label || ""), L = Fn(w ? H(w) : null);
+    const x = Zn(i.edges[m]?.arrow?.label || ""), S = Fn(w ? H(w) : null);
     $t(
-      { ...L, value: x, placeholder: "矢印ラベル（Shift+Enter で改行・空で削除）" },
-      (_) => {
-        _ !== x && P(Mr(i, t.src, m, At(_)));
+      { ...S, value: x, placeholder: "矢印ラベル（Shift+Enter で改行・空で削除）" },
+      (T) => {
+        T !== x && P(Mr(i, t.src, m, At(T)));
       }
     );
   };
@@ -1193,14 +1193,14 @@ function qt(e, t, n, s = null) {
         const w = A(m.id);
         w && Tt(w, m.id);
       } else
-        Dn(m.idx, B(m.idx));
+        Dn(m.idx, F(m.idx));
   }
   function Ri() {
     const { edits: m, id: w } = Rr(i, t.src, {});
     P(m, { editNodeId: w, selection: { kind: "node", id: w } });
   }
   function Ii() {
-    r.arrowPick = r.arrowPick ? null : {}, T(), C();
+    r.arrowPick = r.arrowPick ? null : {}, _(), C();
   }
   function Ai() {
     const m = r.selected;
@@ -1226,15 +1226,15 @@ function qt(e, t, n, s = null) {
     m && P(m.kind === "node" ? Ar(i, t.src, m.id) : $r(i, t.src, m.idx), { selection: null });
   }
   const Di = (m) => {
-    const w = m.getBoundingClientRect(), x = w.left + w.width / 2, L = w.top + w.height / 2;
-    let _ = null, G = 1 / 0;
-    for (const F of e.querySelectorAll("path.flowchart-link")) {
-      const Ee = H(F);
+    const w = m.getBoundingClientRect(), x = w.left + w.width / 2, S = w.top + w.height / 2;
+    let T = null, Y = 1 / 0;
+    for (const D of e.querySelectorAll("path.flowchart-link")) {
+      const Ee = H(D);
       if (!Ee) continue;
-      const Ne = (Ee.x - x) ** 2 + (Ee.y - L) ** 2;
-      Ne < G && (G = Ne, _ = F);
+      const Ne = (Ee.x - x) ** 2 + (Ee.y - S) ** 2;
+      Ne < Y && (Y = Ne, T = D);
     }
-    return G < 1600 ? _ : null;
+    return Y < 1600 ? T : null;
   }, On = (m) => {
     const w = m.target.closest("path.flowchart-link");
     if (w) return w;
@@ -1244,50 +1244,50 @@ function qt(e, t, n, s = null) {
     if (m.target.closest(".mermaid-editbar, .mermaid-inline-input")) return;
     const w = m.target.closest("g[id*='flowchart-']");
     if (w) {
-      const L = nt(w.id, i.nodes);
-      if (!L) return;
+      const S = nt(w.id, i.nodes);
+      if (!S) return;
       if (r.arrowPick) {
         if (!r.arrowPick.from)
-          r.arrowPick = { from: L }, T(), w.classList.add("selected"), C();
+          r.arrowPick = { from: S }, _(), w.classList.add("selected"), C();
         else {
-          const _ = r.arrowPick.from;
-          r.arrowPick = null, T(), C(), $t(
-            { ...Ti(_, L), value: "", placeholder: "矢印ラベル（空でも可・Shift+Enter で改行）" },
-            (G) => P(
-              Ir(i, t.src, _, L, At(G)).edits,
-              { selection: { kind: "edge", from: _, to: L } }
+          const T = r.arrowPick.from;
+          r.arrowPick = null, _(), C(), $t(
+            { ...Ti(T, S), value: "", placeholder: "矢印ラベル（空でも可・Shift+Enter で改行）" },
+            (Y) => P(
+              Ir(i, t.src, T, S, At(Y)).edits,
+              { selection: { kind: "edge", from: T, to: S } }
             )
           );
         }
         return;
       }
-      S(L, w);
+      E(S, w);
       return;
     }
     const x = On(m);
     if (x) {
-      const L = st(x, i);
-      if (L != null) {
-        $(L, x);
+      const S = st(x, i);
+      if (S != null) {
+        M(S, x);
         return;
       }
-      b("⚠️ この矢印はソースと対応付けできませんでした（特殊な記法の可能性）。");
+      k("⚠️ この矢印はソースと対応付けできませんでした（特殊な記法の可能性）。");
       return;
     }
-    !r.arrowPick && r.selected && (T(), C());
+    !r.arrowPick && r.selected && (_(), C());
   }, jn = (m) => {
     if (m.target.closest(".mermaid-editbar, .mermaid-inline-input")) return;
     const w = m.target.closest("g[id*='flowchart-']");
     if (w) {
       m.preventDefault();
-      const _ = nt(w.id, i.nodes);
-      _ && Tt(w, _);
+      const T = nt(w.id, i.nodes);
+      T && Tt(w, T);
       return;
     }
     const x = On(m);
     if (!x) return;
-    const L = st(x, i);
-    L != null && (m.preventDefault(), $(L, x), Dn(L, x));
+    const S = st(x, i);
+    S != null && (m.preventDefault(), M(S, x), Dn(S, x));
   }, Wn = (m) => {
     if (!e.isConnected) {
       Te(!1);
@@ -1296,7 +1296,7 @@ function qt(e, t, n, s = null) {
     if (!m.target?.closest?.(Or)) {
       if (m.key === "Escape") {
         if (r.arrowPick) {
-          r.arrowPick = null, T(), C();
+          r.arrowPick = null, _(), C();
           return;
         }
         Te(!0);
@@ -1314,16 +1314,16 @@ function qt(e, t, n, s = null) {
   };
   e.addEventListener("click", Hn), e.addEventListener("dblclick", jn), document.addEventListener("keydown", Wn);
   function Te(m) {
-    e.removeEventListener("click", Hn), e.removeEventListener("dblclick", jn), document.removeEventListener("keydown", Wn), e.classList.remove("mermaid-editing"), a.remove(), e.querySelectorAll(".mermaid-inline-input").forEach((w) => w.remove()), T(), n.reveal?.(null), m && n.onExit?.();
+    e.removeEventListener("click", Hn), e.removeEventListener("dblclick", jn), document.removeEventListener("keydown", Wn), e.classList.remove("mermaid-editing"), a.remove(), e.querySelectorAll(".mermaid-inline-input").forEach((w) => w.remove()), _(), n.reveal?.(null), m && n.onExit?.();
   }
   return s && requestAnimationFrame(() => {
     if (!e.isConnected || !a.isConnected) return;
     const m = s.selection;
     if (m?.kind === "node" && i.nodes.has(m.id))
-      S(m.id);
+      E(m.id);
     else if (m?.kind === "edge") {
       const w = i.edges.findIndex((x) => x.from === m.from && x.to === m.to);
-      w >= 0 && $(w);
+      w >= 0 && M(w);
     }
     if (s.editNodeId) {
       const w = A(s.editNodeId);
@@ -1605,22 +1605,22 @@ async function eo(e, t, n) {
     if (a += 1, ut.get(e) !== t) return;
     const d = c.textContent, u = s ? to(d, s) : null;
     let f = u ? u.injected : d;
-    const h = (k) => {
-      c.dataset.srcLine && (k.dataset.srcLine = c.dataset.srcLine), c.dataset.srcEnd && (k.dataset.srcEnd = c.dataset.srcEnd), k.__mermaidMeta = p, c.replaceWith(k), u && k.after(no(u, s));
+    const h = (b) => {
+      c.dataset.srcLine && (b.dataset.srcLine = c.dataset.srcLine), c.dataset.srcEnd && (b.dataset.srcEnd = c.dataset.srcEnd), b.__mermaidMeta = p, c.replaceWith(b), u && b.after(no(u, s));
     }, p = { src: d, index: a, editable: !!n.editable }, g = i.get(a);
     if (g && g.src === d && g.renderSrc === f) {
       g.meta.index = a, r.set(a, g), h(g.box), He && He(g.box, g.meta, !0);
       continue;
     }
-    const y = (k) => (r.set(a, { src: d, renderSrc: f, box: k, meta: p }), k), b = Kr(e, p), E = Re.get(f);
-    if (E) {
-      h(y(es(E, p, b)));
+    const y = (b) => (r.set(a, { src: d, renderSrc: f, box: b, meta: p }), b), k = Kr(e, p), L = Re.get(f);
+    if (L) {
+      h(y(es(L, p, k)));
       continue;
     }
     let v;
     try {
       ({ svg: v } = await Ce.render(`pixie-mermaid-${et++}`, f));
-    } catch (k) {
+    } catch (b) {
       if (document.getElementById(`dpixie-mermaid-${et - 1}`)?.remove(), u && f !== d)
         try {
           f = d, { svg: v } = await Ce.render(`pixie-mermaid-${et++}`, f);
@@ -1630,12 +1630,12 @@ async function eo(e, t, n) {
       else
         v = null;
       if (v == null) {
-        c.classList.add("mermaid-error"), c.title = `Mermaid の構文エラー: ${k?.message || k}`;
+        c.classList.add("mermaid-error"), c.title = `Mermaid の構文エラー: ${b?.message || b}`;
         continue;
       }
     }
     if (Yr(f, v), ut.get(e) !== t) return;
-    h(y(es(v, p, b)));
+    h(y(es(v, p, k)));
   }
 }
 function to(e, t) {
@@ -1664,7 +1664,7 @@ function to(e, t) {
   if (xs(e)) {
     const p = new Set(ks(e));
     for (const g of s.presets) {
-      const y = g.activeNodes.filter((b) => !p.has(b));
+      const y = g.activeNodes.filter((k) => !p.has(k));
       y.length && (h[g.name] = y);
     }
   }
@@ -1699,17 +1699,17 @@ function no(e, t) {
     g.className = "mdflow-preset-name";
     const y = document.createElement("span");
     if (y.textContent = c.name, g.appendChild(y), f.length) {
-      const E = document.createElement("span");
-      E.className = "mdflow-warn-badge", E.textContent = "⚠", g.appendChild(E);
+      const L = document.createElement("span");
+      L.className = "mdflow-warn-badge", L.textContent = "⚠", g.appendChild(L);
     }
     if (e.selectedName === c.name && d.classList.add("selected"), !e.selectedName && e.resolution?.auto && e.resolution.name === c.name) {
       d.classList.add("auto-hit");
-      const E = document.createElement("span");
-      E.className = "mdflow-badge", E.textContent = "自動", g.appendChild(E);
+      const L = document.createElement("span");
+      L.className = "mdflow-badge", L.textContent = "自動", g.appendChild(L);
     }
     p.appendChild(g);
-    const b = document.createElement("span");
-    b.className = "mdflow-when", b.textContent = u, p.appendChild(b), d.appendChild(p), i.appendChild(d);
+    const k = document.createElement("span");
+    k.className = "mdflow-when", k.textContent = u, p.appendChild(k), d.appendChild(p), i.appendChild(d);
   }
   if (n.appendChild(i), !e.resolution && !e.selectedName) {
     const c = document.createElement("div");
@@ -1905,7 +1905,7 @@ function uo(e) {
 function ze() {
   return crypto.randomUUID && crypto.randomUUID() || "s-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
-M.select(ze());
+$.select(ze());
 const o = {
   editor: null,
   monaco: null,
@@ -1943,7 +1943,7 @@ const o = {
   changedPaths: /* @__PURE__ */ new Set(),
   // 直近ターンでエージェントが変更したファイル
   get streaming() {
-    return M.busy.value;
+    return $.busy.value;
   },
   assistantEl: null,
   // 進行中ターンのアシスタント吹き出し
@@ -1954,10 +1954,10 @@ const o = {
   compacted: null,
   // /compact の結果（compacted イベント）。ターン確定時に畳む
   get sessionId() {
-    return M.state.sessionId;
+    return $.state.sessionId;
   },
   set sessionId(e) {
-    M.select(e, M.state.phase === "switching" ? M.active : void 0);
+    $.select(e, $.state.phase === "switching" ? $.active : void 0);
   },
   // 会話切替の完了まで送信をロックする。
   // --- モード（統合シェル）---
@@ -2000,9 +2000,9 @@ const o = {
   // 作り直されるため、入力値はここが正（ファイル切替でクリア）
   diagramEditing: null
   // 直接編集中の mermaid 図 {src, index, restore, dispose}
-}, D = () => o.mode === "note", Ge = () => o.mode === "plan", Fe = () => o.mode === "code";
-let q = 0, ot = 0, te = !1, we = !1, Zt = !1, xt = null;
-Oi(() => [dn.ready, M.busy.value], () => xt?.update());
+}, B = () => o.mode === "note", Ge = () => o.mode === "plan", Fe = () => o.mode === "code";
+let j = 0, ot = 0, te = !1, we = !1, Zt = !1, xt = null;
+Oi(() => [dn.ready, $.busy.value], () => xt?.update());
 const fo = {
   py: "python",
   pyi: "python",
@@ -2068,17 +2068,17 @@ window.__monacoReady.then((e) => {
     e.KeyMod.CtrlCmd | e.KeyMod.Shift | e.KeyCode.KeyP,
     () => sn()
   ), o.editor.addCommand(e.KeyMod.Alt | e.KeyCode.LeftArrow, () => Qt()), o.editor.addCommand(e.KeyMod.Alt | e.KeyCode.RightArrow, () => en()), o.editor.addCommand(e.KeyMod.CtrlCmd | e.KeyCode.KeyE, () => tn()), o.editor.onMouseDown((n) => {
-    D() && n.target.type === e.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && va(n.target.position.lineNumber);
+    B() && n.target.type === e.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && va(n.target.position.lineNumber);
   });
   const t = o.editor.getContainerDomNode();
   t.addEventListener("wheel", oi, { passive: !0, capture: !0 }), t.addEventListener("paste", (n) => {
-    if (!D()) return;
+    if (!B()) return;
     const s = ds(n.clipboardData);
     s && (n.preventDefault(), n.stopPropagation(), us(s));
   }, !0), t.addEventListener("dragover", (n) => {
-    D() && n.dataTransfer?.types?.includes("Files") && (n.preventDefault(), n.stopPropagation());
+    B() && n.dataTransfer?.types?.includes("Files") && (n.preventDefault(), n.stopPropagation());
   }, !0), t.addEventListener("drop", (n) => {
-    if (!D() || !n.dataTransfer?.files?.length) return;
+    if (!B() || !n.dataTransfer?.files?.length) return;
     n.preventDefault(), n.stopPropagation();
     const s = ds(n.dataTransfer);
     if (!s) {
@@ -2091,7 +2091,7 @@ window.__monacoReady.then((e) => {
 async function mo() {
   Zr(na), Xr(ca), Jr(da);
   try {
-    await Hs(), gn(), await Ct(), await z(), D() && await yn();
+    await Hs(), gn(), await Ct(), await G(), B() && await yn();
   } catch (e) {
     dt(e.message || "初期化中に問題が発生しました。設定を確認してください。");
   }
@@ -2113,7 +2113,7 @@ function Xt(e) {
   o.mode = De.includes(e.mode) ? e.mode : "code", o.features = e.features || {}, Array.isArray(o.features.extract_exts) && (Os = new Set(o.features.extract_exts)), o.copilotEnabled = !!o.features.copilot;
 }
 function gn() {
-  const e = D(), t = l("mode-btn");
+  const e = B(), t = l("mode-btn");
   for (const n of De)
     document.body.classList.toggle("mode-" + n, o.mode === n), t.classList.toggle("mode-" + n, o.mode === n);
   t.textContent = je[o.mode], t.title = `現在: ${je[o.mode]} モード（クリックで次のモードへ切替）`, Ge() || Li(), o.editor?.updateOptions({ glyphMargin: e }), pi(), wn(), js(), Ye();
@@ -2151,7 +2151,7 @@ async function vn(e, t = {}) {
   if (e === o.mode) return !0;
   if (t.confirm && !confirm(`${je[e]} モードに切り替えますか？
 （会話セッションはリセットされます）`)) return !1;
-  const n = M.begin("switching");
+  const n = $.begin("switching");
   if (!n) return;
   let s = "";
   try {
@@ -2162,11 +2162,11 @@ async function vn(e, t = {}) {
     } catch (r) {
       return s = r.message, alert("⚠️ モードを切り替えられません: " + r.message), !1;
     }
-    return Xt(i), t.keepMessages || (l("messages").innerHTML = ""), l("approval").classList.add("hidden"), l("approval").innerHTML = "", o.assistantEl = null, o.sessionId = ze(), $e(), Ws(), gn(), await z(), D() ? (await yn(), o.currentFile && (await $n(), await Nn()), N("system", "Noteモードに切り替えました（読み取り専用エージェント・クリック反映）。")) : Ge() ? N("system", "Planモードに切り替えました（調べて実行計画を立てるだけ。承認するまでファイルは変更されません）。") : N("system", "Codeモードに切り替えました（自律エージェント・破壊操作は承認制）。"), !0;
+    return Xt(i), t.keepMessages || (l("messages").innerHTML = ""), l("approval").classList.add("hidden"), l("approval").innerHTML = "", o.assistantEl = null, o.sessionId = ze(), $e(), Ws(), gn(), await G(), B() ? (await yn(), o.currentFile && (await $n(), await Nn()), N("system", "Noteモードに切り替えました（読み取り専用エージェント・クリック反映）。")) : Ge() ? N("system", "Planモードに切り替えました（調べて実行計画を立てるだけ。承認するまでファイルは変更されません）。") : N("system", "Codeモードに切り替えました（自律エージェント・破壊操作は承認制）。"), !0;
   } catch (i) {
     return s = i.message, alert(i.message), !1;
   } finally {
-    M.finish(n, s);
+    $.finish(n, s);
   }
 }
 async function yn() {
@@ -2205,7 +2205,7 @@ async function wo() {
   }
   if (confirm("この保存先の会話履歴を消去しますか？")) {
     try {
-      await Y("/api/chat/history", { method: "DELETE" });
+      await Z("/api/chat/history", { method: "DELETE" });
     } catch (e) {
       alert("⚠️ 履歴を消去できません: " + e.message);
       return;
@@ -2248,18 +2248,18 @@ function qs(e, t) {
   t.truncated && (o.treeTruncated = !0);
 }
 async function ft(e) {
-  const t = q, n = await Z("/api/files/list?path=" + encodeURIComponent(e || ""));
-  return !n || t !== q ? !1 : (qs(e, n), !0);
+  const t = j, n = await z("/api/files/list?path=" + encodeURIComponent(e || ""));
+  return !n || t !== j ? !1 : (qs(e, n), !0);
 }
 function vo(e) {
   for (const t of [...o.fsMap.keys()])
     (t === e || t.startsWith(e + "/")) && (o.fsMap.delete(t), o.checkedFiles.delete(t));
 }
-async function z() {
-  const e = q;
+async function G() {
+  const e = j;
   o.treeTruncated = !1;
-  const t = await Z("/api/files/list?path=");
-  if (!(!t || e !== q)) {
+  const t = await z("/api/files/list?path=");
+  if (!(!t || e !== j)) {
     Us(t.root), qs("", t);
     for (const [n, s] of [...o.fsMap])
       s.type === "dir" && s.loaded && n && await ft(n);
@@ -2390,7 +2390,7 @@ async function pt(e, t = "") {
   const s = prompt(e === "dir" ? "新規フォルダ名（例: src/utils）" : "新規ファイル名（例: src/main.py）", t);
   if (!s || !s.trim() || s.trim() === t.trim()) return;
   const i = s.trim().replace(/\\/g, "/");
-  await xn("/api/fs/create", { path: i, kind: e }) && (e === "dir" && o.collapsedDirs.delete(i), await z(), e === "file" && await oe(i));
+  await xn("/api/fs/create", { path: i, kind: e }) && (e === "dir" && o.collapsedDirs.delete(i), await G(), e === "file" && await oe(i));
 }
 async function Lo(e) {
   const t = prompt("新しいパス（フォルダに入れるには src/名前.py のように）", e.path);
@@ -2408,7 +2408,7 @@ async function Ks(e, t) {
     const s = n(o.currentFile);
     s !== o.currentFile && (o.currentFile = s, l("current-file").textContent = s, ys(s, o.dirty));
   }
-  o.checkedFiles = new Set([...o.checkedFiles].map(n)), zs(n), await z();
+  o.checkedFiles = new Set([...o.checkedFiles].map(n)), zs(n), await G();
 }
 function zs(e) {
   const t = (n) => {
@@ -2428,7 +2428,7 @@ async function Gs(e, t) {
   i !== e && e.split("/").slice(0, -1).join("/") !== t && await Ks(n, i);
 }
 async function So(e) {
-  confirm(`「${e.path}」を削除しますか？`) && await xn("/api/fs/delete", { path: e.path }) && (o.checkedFiles.delete(e.path), zs((t) => t === e.path ? null : t), o.currentFile === e.path && (o.currentFile = null, o.baseMtime = null, o.editor.setValue(""), Lt(), U(), l("current-file").textContent = "（ファイル未選択）", _e(), Me(), D() && (await $n(), await Nn())), await z());
+  confirm(`「${e.path}」を削除しますか？`) && await xn("/api/fs/delete", { path: e.path }) && (o.checkedFiles.delete(e.path), zs((t) => t === e.path ? null : t), o.currentFile === e.path && (o.currentFile = null, o.baseMtime = null, o.editor.setValue(""), Lt(), q(), l("current-file").textContent = "（ファイル未選択）", _e(), Me(), B() && (await $n(), await Nn())), await G());
 }
 async function Ys(e) {
   try {
@@ -2439,27 +2439,27 @@ async function Ys(e) {
 }
 async function oe(e, t, n = "push") {
   if (te) return;
-  const s = ++ot, i = q, r = o.editor.getModel(), a = r.getVersionId(), c = () => s === ot && i === q && !te && o.editor.getModel() === r && r.getVersionId() === a;
+  const s = ++ot, i = j, r = o.editor.getModel(), a = r.getVersionId(), c = () => s === ot && i === j && !te && o.editor.getModel() === r && r.getVersionId() === a;
   if (t || await Mt(), !c() || o.dirty && !t && !confirm("未保存の変更があります。破棄して開きますか？"))
     return;
-  const d = await Z("/api/file?path=" + encodeURIComponent(e));
-  !d || !c() || (n === "push" && o.currentFile && o.currentFile !== e && (o.navBack.push(o.currentFile), o.navFwd.length = 0), No(e), o.currentFile = e, o.baseMtime = d.mtime ?? null, o.conflictDeclined = !1, o.mdflowConditions.clear(), la(), zr(l("preview")), o.monaco.editor.setModelLanguage(o.editor.getModel(), mn(e)), o.editor.setValue(d.content), o.saveError = null, Lt(), U(), l("current-file").textContent = e, t || un("editor"), _e(), Me(), Ln(), await bo(e), !(s !== ot || i !== q) && (Ye(), D() && (await $n(), await Nn())));
+  const d = await z("/api/file?path=" + encodeURIComponent(e));
+  !d || !c() || (n === "push" && o.currentFile && o.currentFile !== e && (o.navBack.push(o.currentFile), o.navFwd.length = 0), No(e), o.currentFile = e, o.baseMtime = d.mtime ?? null, o.conflictDeclined = !1, o.mdflowConditions.clear(), la(), zr(l("preview")), o.monaco.editor.setModelLanguage(o.editor.getModel(), mn(e)), o.editor.setValue(d.content), o.saveError = null, Lt(), q(), l("current-file").textContent = e, t || un("editor"), _e(), Me(), Ln(), await bo(e), !(s !== ot || i !== j) && (Ye(), B() && (await $n(), await Nn())));
 }
 let ns = null;
 function Lt() {
   o.savedVersionId = o.editor.getModel().getAlternativeVersionId(), o.dirty = !1;
 }
 function Zs() {
-  o.currentFile && (o.dirty = o.editor.getModel().getAlternativeVersionId() !== o.savedVersionId, U());
+  o.currentFile && (o.dirty = o.editor.getModel().getAlternativeVersionId() !== o.savedVersionId, q());
 }
-function U(e) {
+function q(e) {
   const t = l("save-state");
   if (ys(o.currentFile, o.dirty), clearTimeout(ns), t.classList.remove("save-error"), t.title = "", e === "saving") {
     t.textContent = "保存中…";
     return;
   }
   if (e === "saved") {
-    t.textContent = "保存済", ns = setTimeout(U, 1500);
+    t.textContent = "保存済", ns = setTimeout(q, 1500);
     return;
   }
   if (o.saveError) {
@@ -2480,9 +2480,9 @@ async function St() {
   }
 }
 async function Mo() {
-  const e = o.currentFile, t = o.editor.getValue(), n = o.editor.getModel().getAlternativeVersionId(), s = !o.fsMap.has(e), i = D();
+  const e = o.currentFile, t = o.editor.getValue(), n = o.editor.getModel().getAlternativeVersionId(), s = !o.fsMap.has(e), i = B();
   let r = null;
-  i && (_t(), r = o.notes.map((d) => ({ ...d }))), clearTimeout(Ue), o.saving = !0, U("saving");
+  i && (_t(), r = o.notes.map((d) => ({ ...d }))), clearTimeout(Ue), o.saving = !0, q("saving");
   const a = o.currentFile === e ? o.baseMtime : null;
   let c;
   try {
@@ -2496,19 +2496,19 @@ async function Mo() {
         return o.conflictDeclined = !0, o.saveError = new ne(
           "外部の変更があるため保存を見送りました（保存ボタン／Ctrl+S でもう一度判断できます）。",
           409
-        ), U(), !1;
+        ), q(), !1;
     } else
-      return o.saveError = u, U(), !1;
+      return o.saveError = u, q(), !1;
   } finally {
     o.saving = !1;
   }
-  if (o.currentFile === e && (o.baseMtime = c?.mtime ?? o.baseMtime), o.currentFile === e && (o.savedVersionId = n, Zs()), s && await z(), i)
+  if (o.currentFile === e && (o.baseMtime = c?.mtime ?? o.baseMtime), o.currentFile === e && (o.savedVersionId = n, Zs()), s && await G(), i)
     try {
       await Tn(e, r);
     } catch (d) {
-      return o.saveError = new ne(`本文は保存しましたが、付箋の保存に失敗しました: ${d.message}`, 0), U(), !0;
+      return o.saveError = new ne(`本文は保存しましたが、付箋の保存に失敗しました: ${d.message}`, 0), q(), !0;
     }
-  return o.saveError = null, o.conflictDeclined = !1, U("saved"), !0;
+  return o.saveError = null, o.conflictDeclined = !1, q("saved"), !0;
 }
 function Jt() {
   return o.conflictDeclined = !1, St();
@@ -2516,7 +2516,7 @@ function Jt() {
 const _o = 2e3;
 let Ue = null;
 function kn() {
-  clearTimeout(Ue), !(we || te) && D() && (o.conflictDeclined || !o.currentFile || !o.dirty || (Ue = setTimeout(() => {
+  clearTimeout(Ue), !(we || te) && B() && (o.conflictDeclined || !o.currentFile || !o.dirty || (Ue = setTimeout(() => {
     if (o.dirty) {
       if (o.saving) {
         kn();
@@ -2527,7 +2527,7 @@ function kn() {
   }, _o)));
 }
 async function Mt() {
-  clearTimeout(Ue), !we && D() && (o.conflictDeclined || o.currentFile && o.dirty && await St());
+  clearTimeout(Ue), !we && B() && (o.conflictDeclined || o.currentFile && o.dirty && await St());
 }
 async function $o(e, t) {
   if (!confirm(
@@ -2542,7 +2542,7 @@ async function $o(e, t) {
   try {
     return await R("/api/file", { path: e, content: t, base_mtime: null, force: !0 });
   } catch (s) {
-    return o.saveError = s instanceof ne ? s : new ne(String(s), 0), U(), null;
+    return o.saveError = s instanceof ne ? s : new ne(String(s), 0), q(), null;
   }
 }
 const To = 15;
@@ -2577,7 +2577,7 @@ function at() {
   l("hist-modal").classList.add("hidden");
 }
 async function Ao() {
-  const e = o.currentFile, t = await Z("/api/history?path=" + encodeURIComponent(e)), n = l("hist-list");
+  const e = o.currentFile, t = await z("/api/history?path=" + encodeURIComponent(e)), n = l("hist-list");
   if (n.innerHTML = "", !!t) {
     if (!t.enabled) {
       n.innerHTML = "<li class='hint'>ローカル履歴は設定で無効になっています（history_enabled）。</li>";
@@ -2605,7 +2605,7 @@ function Js(e) {
 async function Po(e, t, n) {
   for (const i of l("hist-list").children) i.classList.remove("active");
   n.classList.add("active"), qe = t.id, l("hist-restore").disabled = !0, l("hist-preview-head").textContent = "読み込み中…";
-  const s = await Z(
+  const s = await z(
     `/api/history/file?path=${encodeURIComponent(e)}&version_id=${encodeURIComponent(t.id)}`
   );
   !s || qe !== t.id || (l("hist-preview").textContent = s.content, l("hist-preview-head").textContent = `${Js(t.saved_at)} の内容`, l("hist-restore").disabled = !1);
@@ -2620,15 +2620,15 @@ async function Fo() {
       alert("⚠️ 復元に失敗: " + t.message);
       return;
     }
-    at(), await oe(e, !0, "none"), U("saved");
+    at(), await oe(e, !0, "none"), q("saved");
   }
 }
-let W = { favorites: [], recent: [], current: "" };
+let U = { favorites: [], recent: [], current: "" };
 async function Qs() {
-  const e = await Z("/api/workspace/places");
-  return e && (W = e), W;
+  const e = await z("/api/workspace/places");
+  return e && (U = e), U;
 }
-const ei = (e) => W.favorites.some((t) => Do(t.path, e)), Do = (e, t) => String(e || "").replace(/[\\/]+$/, "").toLowerCase() === String(t || "").replace(/[\\/]+$/, "").toLowerCase();
+const ei = (e) => U.favorites.some((t) => Do(t.path, e)), Do = (e, t) => String(e || "").replace(/[\\/]+$/, "").toLowerCase() === String(t || "").replace(/[\\/]+$/, "").toLowerCase();
 async function Bo() {
   await Qs();
   const e = [], t = (n, s) => n.map((i) => ({
@@ -2636,7 +2636,7 @@ async function Bo() {
     title: i.path,
     onClick: i.exists ? () => An(i.path) : void 0
   }));
-  W.favorites.length && e.push({ label: "お気に入り" }, ...t(W.favorites, "⭐")), W.recent.length && e.push({ label: "最近使ったフォルダ" }, ...t(W.recent, "🕘")), e.push({ label: "フォルダを選ぶ…", onClick: ln }), !W.favorites.length && !W.recent.length && e.unshift({ label: "行き先はまだありません（フォルダを移動すると溜まります）" }), Vs(l("places-btn"), e);
+  U.favorites.length && e.push({ label: "お気に入り" }, ...t(U.favorites, "⭐")), U.recent.length && e.push({ label: "最近使ったフォルダ" }, ...t(U.recent, "🕘")), e.push({ label: "フォルダを選ぶ…", onClick: ln }), !U.favorites.length && !U.recent.length && e.unshift({ label: "行き先はまだありません（フォルダを移動すると溜まります）" }), Vs(l("places-btn"), e);
 }
 function ti() {
   const e = l("root-places");
@@ -2656,15 +2656,15 @@ function ti() {
       h.className = "place-mini", h.textContent = r ? "★" : "☆", h.title = r ? "お気に入りから外す" : "お気に入りに入れる", h.addEventListener("click", () => ni(c.path, c.name)), d.append(u, f, h), e.appendChild(d);
     }
   };
-  t("⭐ お気に入り", W.favorites, "⭐", !0), t("🕘 最近使ったフォルダ", W.recent, "🕘", !1), !W.favorites.length && !W.recent.length && (e.innerHTML = "<div class='hint'>よく使うフォルダは ☆ ボタンでお気に入りに入れておくと、次からここに出ます。</div>");
+  t("⭐ お気に入り", U.favorites, "⭐", !0), t("🕘 最近使ったフォルダ", U.recent, "🕘", !1), !U.favorites.length && !U.recent.length && (e.innerHTML = "<div class='hint'>よく使うフォルダは ☆ ボタンでお気に入りに入れておくと、次からここに出ます。</div>");
 }
 async function ni(e, t) {
   if (e) {
     try {
-      ei(e) ? W = await Y(
+      ei(e) ? U = await Z(
         "/api/workspace/favorites?path=" + encodeURIComponent(e),
         { method: "DELETE" }
-      ) : W = await R("/api/workspace/favorites", { path: e, name: t || "" });
+      ) : U = await R("/api/workspace/favorites", { path: e, name: t || "" });
     } catch (n) {
       alert("⚠️ " + n.message);
       return;
@@ -2689,7 +2689,7 @@ function ii() {
   const e = o.editor.getValue();
   let t = e, n = 0;
   const s = {};
-  if (D() && o.features.mdflow && bs())
+  if (B() && o.features.mdflow && bs())
     try {
       const i = Gi(e);
       if (t = i.body, n = (e.slice(0, i.bodyOffset).match(/\n/g) || []).length, i.mappings.length) {
@@ -2798,10 +2798,10 @@ function Go(e) {
   const g = ci(e.getValueInRange(u), h);
   let y = null;
   if (g) {
-    const b = e.getOffsetAt({ lineNumber: c, column: 1 });
+    const k = e.getOffsetAt({ lineNumber: c, column: 1 });
     y = o.monaco.Range.fromPositions(
-      e.getPositionAt(b + g.start),
-      e.getPositionAt(b + g.end)
+      e.getPositionAt(k + g.start),
+      e.getPositionAt(k + g.end)
     );
   }
   return { lineRange: u, textRange: y };
@@ -2820,24 +2820,24 @@ function Yo(e, t, n) {
   let c = null;
   const d = le(t.startContainer, "g[id*='flowchart-']"), u = le(t.endContainer, "g[id*='flowchart-']");
   if (d && d === u) {
-    const A = nt(d.id, a.nodes), B = A ? a.nodes.get(A) : null;
-    c = B?.def?.labelSpan || B?.firstRef?.span || null;
+    const A = nt(d.id, a.nodes), F = A ? a.nodes.get(A) : null;
+    c = F?.def?.labelSpan || F?.firstRef?.span || null;
   }
   if (!c) {
-    const A = le(t.startContainer, ".edgeLabel"), B = le(t.endContainer, ".edgeLabel");
-    if (A && A === B) {
-      const S = Zo(s, A), $ = S ? st(S, a) : null;
-      c = $ != null ? a.edges[$]?.arrow?.labelSpan : null;
+    const A = le(t.startContainer, ".edgeLabel"), F = le(t.endContainer, ".edgeLabel");
+    if (A && A === F) {
+      const E = Zo(s, A), M = E ? st(E, a) : null;
+      c = M != null ? a.edges[M]?.arrow?.labelSpan : null;
     }
   }
   if (!c) return null;
   const f = Number(s.dataset.srcLine) + gt, h = nn(e, f + 1);
   if (!h) return null;
-  const p = e.getOffsetAt({ lineNumber: h, column: 1 }), g = r.src.slice(c.start, c.end), y = ci(g, n), b = p + c.start + (y?.start || 0), E = p + c.start + (y?.end ?? g.length), v = o.monaco.Range.fromPositions(
-    e.getPositionAt(b),
-    e.getPositionAt(E)
-  ), k = v.startLineNumber, C = v.endLineNumber;
-  return { lineRange: new o.monaco.Range(k, 1, C, e.getLineMaxColumn(C)), textRange: v };
+  const p = e.getOffsetAt({ lineNumber: h, column: 1 }), g = r.src.slice(c.start, c.end), y = ci(g, n), k = p + c.start + (y?.start || 0), L = p + c.start + (y?.end ?? g.length), v = o.monaco.Range.fromPositions(
+    e.getPositionAt(k),
+    e.getPositionAt(L)
+  ), b = v.startLineNumber, C = v.endLineNumber;
+  return { lineRange: new o.monaco.Range(b, 1, C, e.getLineMaxColumn(C)), textRange: v };
 }
 function Zo(e, t) {
   const n = t.getBoundingClientRect(), s = n.left + n.width / 2, i = n.top + n.height / 2;
@@ -2946,7 +2946,7 @@ async function na(e, t) {
     data_b64: await cr(e),
     overwrite: !0
   });
-  return await z(), i.path;
+  return await G(), i.path;
 }
 function sn() {
   if (Bs(o.currentFile)) {
@@ -3189,15 +3189,15 @@ function fa() {
   ye++, clearTimeout(on), l("file-search").value = "", ie = [], l("search-results").classList.add("hidden"), l("search-results").innerHTML = "", l("search-opts").classList.add("hidden"), l("replace-bar").classList.add("hidden"), l("replace-preview").innerHTML = "", l("replace-status").textContent = "", l("file-list").classList.remove("hidden");
 }
 async function _n(e) {
-  const t = ++ye, n = q, s = l("search-case").checked;
+  const t = ++ye, n = j, s = l("search-case").checked;
   ie = [], X();
   const i = l("search-results"), r = l("file-list");
   if (!e.trim()) {
     ie = [], i.classList.add("hidden"), l("search-opts").classList.add("hidden"), l("replace-bar").classList.add("hidden"), r.classList.remove("hidden");
     return;
   }
-  const a = new URLSearchParams({ q: e, case: s ? "true" : "false" }), c = await Z("/api/search?" + a);
-  if (!(!c || t !== ye || n !== q || e !== l("file-search").value || s !== l("search-case").checked)) {
+  const a = new URLSearchParams({ q: e, case: s ? "true" : "false" }), c = await z("/api/search?" + a);
+  if (!(!c || t !== ye || n !== j || e !== l("file-search").value || s !== l("search-case").checked)) {
     ie = [...new Set(c.results.map((d) => d.path))], i.innerHTML = "";
     for (const d of c.results) i.appendChild(pa(d));
     c.results.length || (i.innerHTML = "<div class='hint'>該当なし</div>"), l("search-opts").classList.remove("hidden"), X(), r.classList.add("hidden"), i.classList.remove("hidden");
@@ -3232,7 +3232,7 @@ function X(e) {
 }
 async function Ot(e) {
   if (we || te) return;
-  const t = l("file-search").value, n = l("replace-input").value, s = [...ie], i = l("search-case").checked, r = q, a = ye;
+  const t = l("file-search").value, n = l("replace-input").value, s = [...ie], i = l("search-case").checked, r = j, a = ye;
   if (!(!t.trim() || !ie.length) && !(!e && !confirm(
     `${ie.length} ファイルの「${t}」を「${n}」に置き換えます。
 
@@ -3247,7 +3247,7 @@ async function Ot(e) {
           return;
         }
       }
-      if (r !== q || a !== ye) {
+      if (r !== j || a !== ye) {
         X("検索対象が変わったため、置換を中止しました。");
         return;
       }
@@ -3273,7 +3273,7 @@ async function Ot(e) {
         return;
       }
       const p = f.files.map((g) => g.path);
-      o.currentFile && p.includes(o.currentFile) && (!o.dirty && o.currentFile === c && o.editor.getModel() === d && d.getVersionId() === u && await oe(o.currentFile, !0, "none"), o.dirty && (o.conflictDeclined = !0, o.saveError = new ne("ディスクを置換しました。処理中の編集は保持しています。保存前に履歴で変更を確認してください。", 409), U())), await _n(l("file-search").value), X(h);
+      o.currentFile && p.includes(o.currentFile) && (!o.dirty && o.currentFile === c && o.editor.getModel() === d && d.getVersionId() === u && await oe(o.currentFile, !0, "none"), o.dirty && (o.conflictDeclined = !0, o.saveError = new ne("ディスクを置換しました。処理中の編集は保持しています。保存前に履歴で変更を確認してください。", 409), q())), await _n(l("file-search").value), X(h);
     } finally {
       Zt = !1, we = !1, X(l("replace-status").textContent), kn();
     }
@@ -3301,7 +3301,7 @@ function wt() {
   return o.editor.getModel().getValueInRange(e);
 }
 function ga() {
-  return D() ? "テキストを選択してAIに送れます" : Ge() ? "計画モード：エージェントは調査だけを行い、ファイルは変更しません。" : "エージェントがファイルを直接編集します（破壊操作は承認制）。";
+  return B() ? "テキストを選択してAIに送れます" : Ge() ? "計画モード：エージェントは調査だけを行い、ファイルは変更しません。" : "エージェントがファイルを直接編集します（破壊操作は承認制）。";
 }
 function pi() {
   const e = wt().trim().length > 0;
@@ -3312,11 +3312,11 @@ async function $n() {
     o.notes = [], vt();
     return;
   }
-  const e = await Z("/api/notes?path=" + encodeURIComponent(o.currentFile));
+  const e = await z("/api/notes?path=" + encodeURIComponent(o.currentFile));
   o.notes = e ? e.notes || [] : [], vt();
 }
 async function Tn(e = o.currentFile, t) {
-  e && (t == null && (_t(), t = o.notes), await Y("/api/notes?path=" + encodeURIComponent(e), {
+  e && (t == null && (_t(), t = o.notes), await Z("/api/notes?path=" + encodeURIComponent(e), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(t)
@@ -3358,14 +3358,14 @@ async function Nn() {
     o.refs = [], Ve();
     return;
   }
-  const e = await Z("/api/refs?path=" + encodeURIComponent(o.currentFile));
+  const e = await z("/api/refs?path=" + encodeURIComponent(o.currentFile));
   o.refs = e ? e.refs || [] : [];
   const t = new Set(o.refs.map(fe));
   for (const n of [...o.checkedRefs]) t.has(n) || o.checkedRefs.delete(n);
   Ve();
 }
 async function hi() {
-  o.currentFile && await Z("/api/refs", {
+  o.currentFile && await z("/api/refs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path: o.currentFile, refs: o.refs })
@@ -3449,7 +3449,7 @@ function ka() {
   });
 }
 async function Be(e) {
-  const t = await Z("/api/workspace/dirs?files=true&path=" + encodeURIComponent(e || ""));
+  const t = await z("/api/workspace/dirs?files=true&path=" + encodeURIComponent(e || ""));
   if (!t) return;
   l("pick-input").value = t.cwd || "";
   const n = l("pick-drives");
@@ -3524,7 +3524,7 @@ async function us(e) {
   const n = t.rel.split("/").pop().replace(/\.[^.]+$/, "");
   o.editor.executeEdits("insert-image", [
     { range: o.editor.getSelection(), text: `![${n}](${t.rel})` }
-  ]), o.editor.focus(), await z();
+  ]), o.editor.focus(), await G();
 }
 const Sa = {
   prefill: (e) => `応答を待っています… ${e}s`,
@@ -3534,50 +3534,54 @@ const Sa = {
   verify: (e) => `結果を検証中… ${e}s`,
   responding: (e) => `回答を生成中… ${e}s`
 };
-function Ma(e) {
-  let t = "", n = "prefill", s = performance.now();
-  const i = document.createElement("div");
-  i.className = "wait-indicator", i.innerHTML = '<span class="dots"><i></i><i></i><i></i></span><span class="wait-text"></span>';
-  const r = i.querySelector(".wait-text"), a = l("chat-activity");
-  a && a.replaceChildren();
-  let c = "";
-  const d = () => {
-    i.isConnected || (a || e).prepend(i);
-  }, u = () => {
-    if (!i.isConnected) return;
-    const b = ((performance.now() - s) / 1e3).toFixed(1), E = Sa[n] || ((v) => `${n}… ${v}s`);
-    r.textContent = E(b) + (c ? ` / ${c}` : "");
-  }, f = (b) => {
-    b !== n && (n = b, s = performance.now()), d(), u(), Q();
-  }, h = performance.now();
-  let p = null;
-  const g = (b, E = !1) => {
-    if (!b.trim()) return;
-    p || (p = document.createElement("details"), p.className = "think-box", p.innerHTML = '<summary></summary><div class="think-body"></div>', e.insertBefore(p, e.querySelector(".body")));
-    const v = ((performance.now() - h) / 1e3).toFixed(1);
-    p.querySelector("summary").textContent = E ? `💭 思考ログ（${b.length}文字・${v}s）` : "💭 思考中…", p.querySelector(".think-body").textContent = b, E && (p.open = !1);
+function Ma(e, t = !0) {
+  let n = "", s = "prefill", i = performance.now();
+  const r = document.createElement("div");
+  r.className = "wait-indicator", r.innerHTML = '<span class="dots"><i></i><i></i><i></i></span><span class="wait-text"></span>';
+  const a = r.querySelector(".wait-text"), c = l("chat-activity");
+  c && c.replaceChildren();
+  let d = "", u = !1, f = null, h = 0, p = 0;
+  const g = "LLM全呼び出しの生成トークン数 ÷ 生成時間（思考・ツール呼び出しの生成を含む）", y = "受信した文字数 ÷ 3でトークン数を概算し、ストリームの受信時間で割った推定値。ツール実行・応答待ちの時間を除外します。", k = () => {
+    let E = e.querySelector(".response-speed");
+    E || (E = document.createElement("div"), E.className = "response-speed", e.appendChild(E)), E.textContent = d, E.title = u ? g : y;
+  }, L = () => {
+    r.isConnected || (c || e).prepend(r);
+  }, v = () => {
+    if (!r.isConnected) return;
+    const E = ((performance.now() - i) / 1e3).toFixed(1), M = Sa[s] || ((I) => `${s}… ${I}s`);
+    a.textContent = M(E) + (d ? ` / ${d}` : ""), a.title = u ? g : y;
+  }, b = (E) => {
+    E !== s && (s = E, i = performance.now(), f = null), L(), v(), Q();
+  }, C = performance.now();
+  let _ = null;
+  const A = (E, M = !1) => {
+    if (!E.trim()) return;
+    _ || (_ = document.createElement("details"), _.className = "think-box", _.innerHTML = '<summary></summary><div class="think-body"></div>', e.insertBefore(_, e.querySelector(".body")));
+    const I = ((performance.now() - C) / 1e3).toFixed(1);
+    _.querySelector("summary").textContent = M ? `💭 思考ログ（${E.length}文字・${I}s）` : "💭 思考中…", _.querySelector(".think-body").textContent = E, M && (_.open = !1);
   };
-  d(), u();
-  const y = setInterval(() => {
-    u(), Q();
+  L(), v();
+  const F = setInterval(() => {
+    v(), Q();
   }, 200);
   return {
-    onToken(b) {
-      t += b, f("responding");
-      const { think: E, visible: v } = Yt(t);
-      g(E), As(e.querySelector(".body"), v), Q();
+    onToken(E) {
+      if (n += E, b("responding"), t && !u) {
+        const P = performance.now();
+        f !== null && (h += [...E].length, p += P - f), f = P, d = p >= 100 ? `推定 ${(h / 3 * 1e3 / p).toFixed(1)} tokens/sec` : "速度を計測中…", v();
+      }
+      const { think: M, visible: I } = Yt(n);
+      A(M), As(e.querySelector(".body"), I), Q();
     },
     /** エンジンのインジケータ（⏳ Prefill / 🧠 Thinking...）を待機表示のフェーズに反映する。 */
-    setPhase: f,
-    setSpeed(b) {
-      c = b, u();
-      let E = e.querySelector(".response-speed");
-      E || (E = document.createElement("div"), E.className = "response-speed", e.appendChild(E)), E.textContent = b, E.title = "LLM全呼び出しの生成トークン数 ÷ 生成時間（思考・ツール呼び出しの生成を含む）";
+    setPhase: b,
+    setSpeed(E) {
+      u = !0, d = E, v(), k();
     },
     finish() {
-      clearInterval(y), i.remove(), a && (a.textContent = c);
-      const { think: b, visible: E } = Yt(t);
-      return g(b, !0), E.trim() && Ke(e.querySelector(".body"), E, { assetBase: Ze() }), E;
+      clearInterval(F), r.remove(), d === "速度を計測中…" && (d = "速度: 計測データなし"), d && k(), c && (c.textContent = d);
+      const { think: E, visible: M } = Yt(n);
+      return A(E, !0), M.trim() && Ke(e.querySelector(".body"), M, { assetBase: Ze() }), M;
     }
   };
 }
@@ -3596,7 +3600,7 @@ async function Ta(e, t) {
   for (const a of [...o.checkedFiles]) {
     let c = null;
     try {
-      c = await Y("/api/file?path=" + encodeURIComponent(a), { signal: t });
+      c = await Z("/api/file?path=" + encodeURIComponent(a), { signal: t });
     } catch (d) {
       if (t?.aborted) throw d;
       if (alert("⚠️ " + d.message), d.status === 423) continue;
@@ -3611,7 +3615,7 @@ async function Ta(e, t) {
         if (an(c) || mi(c)) {
           let d = null;
           try {
-            d = await Y(
+            d = await Z(
               `/api/refs/read?note=${encodeURIComponent(o.currentFile)}&idx=${a}`,
               { signal: t }
             );
@@ -3736,10 +3740,10 @@ async function Pa() {
     alert("⚠️ 応答の生成中はリセットできません。");
     return;
   }
-  const e = D() ? `
+  const e = B() ? `
 （保存されている会話履歴も消えます）` : "";
   if (!confirm("この会話をリセットしますか？" + e)) return;
-  const t = M.begin("switching");
+  const t = $.begin("switching");
   if (!t) return;
   let n = "";
   try {
@@ -3749,9 +3753,9 @@ async function Pa() {
       n = s.message, alert("⚠️ リセットできません: " + s.message);
       return;
     }
-    if (D())
+    if (B())
       try {
-        await Y("/api/chat/history", { method: "DELETE" }), o.history = [], o.historyLoaded = !0;
+        await Z("/api/chat/history", { method: "DELETE" }), o.history = [], o.historyLoaded = !0;
       } catch (s) {
         n = s.message, alert("⚠️ 保存履歴を消せませんでした: " + s.message);
       }
@@ -3759,7 +3763,7 @@ async function Pa() {
   } catch (s) {
     return n = s.message, alert(s.message), !1;
   } finally {
-    M.finish(t, n);
+    $.finish(t, n);
   }
 }
 async function Le(e) {
@@ -3773,11 +3777,11 @@ async function Le(e) {
     await Na(s) && (n.value = "");
     return;
   }
-  const r = M.begin();
+  const r = $.begin();
   if (!r) return;
   let a = "";
   try {
-    const c = !t && D(), d = !t && Ge(), u = !t && Fe() && o.codeStyle === "plan" && !o.planExecNext;
+    const c = !t && B(), d = !t && Ge(), u = !t && Fe() && o.codeStyle === "plan" && !o.planExecNext;
     t || (o.planExecNext = !1);
     const f = c ? Za() : null;
     let h;
@@ -3786,10 +3790,10 @@ async function Le(e) {
     else if (c)
       h = await Ta(s, r.controller.signal);
     else if (d) {
-      const k = [];
+      const b = [];
       for (const C of [...o.checkedFiles]) {
-        const T = await Y("/api/file?path=" + encodeURIComponent(C), { signal: r.controller.signal });
-        T && T.content != null && k.push({ path: C, content: T.content });
+        const _ = await Z("/api/file?path=" + encodeURIComponent(C), { signal: r.controller.signal });
+        _ && _.content != null && b.push({ path: C, content: _.content });
       }
       h = {
         message: s,
@@ -3797,13 +3801,13 @@ async function Le(e) {
         selection: wt(),
         current_file: o.currentFile || "",
         current_content: o.currentFile ? o.editor.getValue() : "",
-        context_files: k
+        context_files: b
       };
     } else {
-      const k = [];
+      const b = [];
       for (const C of [...o.checkedFiles]) {
-        const T = await Y("/api/file?path=" + encodeURIComponent(C), { signal: r.controller.signal });
-        T && T.content != null && k.push({ path: C, content: T.content });
+        const _ = await Z("/api/file?path=" + encodeURIComponent(C), { signal: r.controller.signal });
+        _ && _.content != null && b.push({ path: C, content: _.content });
       }
       h = {
         message: s,
@@ -3813,39 +3817,39 @@ async function Le(e) {
         selection: wt(),
         plan_first: u,
         autonomous: !u && !!l("autonomous-check")?.checked,
-        verification_command: l("verification-command")?.value.trim() || ""
-      }, k.length && (h.context_files = k);
+        verification_command: !u && l("autonomous-check")?.checked && l("verification-command")?.value.trim() || ""
+      }, b.length && (h.context_files = b);
     }
-    if (r.controller.signal.aborted || !M.current(r)) return;
+    if (r.controller.signal.aborted || !$.current(r)) return;
     h.session_id = r.sessionId, t || (n.value = "");
     const p = t ? `${s}
 
 添付: ${e.attachmentLabel || t.filename}` : s, g = N("user", p);
-    o.changedPaths.size && (o.changedPaths.clear(), Ye()), o.assistantEl = N("assistant", ""), o.turnId = 0, o.compacted = null, o.assistantEl._exchange = { userEl: g, userText: p }, o.assistantUi = Ma(o.assistantEl);
+    o.changedPaths.size && (o.changedPaths.clear(), Ye()), o.assistantEl = N("assistant", ""), o.turnId = 0, o.compacted = null, o.assistantEl._exchange = { userEl: g, userText: p }, o.assistantUi = Ma(o.assistantEl, !/^\/copilot/i.test(s) && !t);
     try {
-      const k = await fetch("/api/chat", {
+      const b = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(h),
         signal: r.controller.signal
       });
-      if (!k.ok) {
-        const C = await k.json().catch(() => ({}));
-        throw new Error(C.detail || `HTTP ${k.status}`);
+      if (!b.ok) {
+        const C = await b.json().catch(() => ({}));
+        throw new Error(C.detail || `HTTP ${b.status}`);
       }
-      M.phase(r, "running"), await ji(k, r, M.current, async (C) => {
-        M.current(r) && (C.type === "approval" && M.phase(r, "approval"), await Ha(C));
+      $.phase(r, "running"), await ji(b, r, $.current, async (C) => {
+        $.current(r) && (C.type === "approval" && $.phase(r, "approval"), await Ha(C));
       });
-    } catch (k) {
-      r.controller.signal.aborted || (a = k.message, O(o.assistantEl, "⚠️ 実行失敗: " + k.message));
+    } catch (b) {
+      r.controller.signal.aborted || (a = b.message, O(o.assistantEl, "⚠️ 実行失敗: " + b.message));
     }
-    if (!M.current(r)) return;
-    const y = r.controller.signal.aborted || r.outcome === "cancelled" || !!a, b = o.assistantEl, E = o.turnId, v = fs();
-    c ? Oa(b, s, v, f, y) : (d || u) && !y && Ba(v), Fe() && !y && Va(p, v), o.compacted && b?.isConnected ? Fa(b, o.compacted) : b?.isConnected && (Fs(b, () => vi(b, E)), Fe() && E && ao(b, () => qa(E)));
+    if (!$.current(r)) return;
+    const y = r.controller.signal.aborted || r.outcome === "cancelled" || !!a, k = o.assistantEl, L = o.turnId, v = fs();
+    c ? Oa(k, s, v, f, y) : (d || u) && !y && Ba(v), Fe() && !y && Va(p, v), o.compacted && k?.isConnected ? Fa(k, o.compacted) : k?.isConnected && (Fs(k, () => vi(k, L)), Fe() && L && ao(k, () => qa(L)));
   } catch (c) {
     r.controller.signal.aborted || (a = c.message, N("error", c.message));
   } finally {
-    await r.interruption, M.current(r) && (o.assistantUi && fs(), l("approval").classList.add("hidden"), l("approval").innerHTML = "", be.length && ue(), M.finish(r, a));
+    await r.interruption, $.current(r) && (o.assistantUi && fs(), l("approval").classList.add("hidden"), l("approval").innerHTML = "", be.length && ue(), $.finish(r, a));
   }
 }
 async function vi(e, t) {
@@ -3867,7 +3871,7 @@ async function vi(e, t) {
     } catch {
       i = !1;
     }
-  if (D()) {
+  if (B()) {
     const r = o.history.findIndex((a) => a.role === "user" && a.content === n?.userText);
     if (r >= 0) {
       const a = o.history[r + 1]?.role === "assistant" ? 2 : 1;
@@ -3890,7 +3894,7 @@ function Fa(e, t) {
     "system",
     `ここまでの会話（${t.before}件）を要約に畳みました（約${t.saved_chars.toLocaleString()}文字ぶんの文脈を解放）。`
   );
-  n.insertBefore(s, e), D() && (o.history = [
+  n.insertBefore(s, e), B() && (o.history = [
     { role: "user", content: "（ここまでの会話は /compact で要約に置き換えました）" },
     { role: "assistant", content: t.summary }
   ], bn()), Q(!0);
@@ -4039,8 +4043,8 @@ function Wa(e) {
 }
 const jt = /* @__PURE__ */ new WeakSet();
 async function yi(e, t, n) {
-  const s = M.active;
-  if (!s || M.state.phase !== "approval") return;
+  const s = $.active;
+  if (!s || $.state.phase !== "approval") return;
   const i = l("approval");
   if (jt.has(s)) return;
   jt.add(s);
@@ -4049,12 +4053,12 @@ async function yi(e, t, n) {
     d.disabled = !0;
   });
   try {
-    if (await R(e, { ...t, session_id: s.sessionId }), !M.current(s) || s.controller.signal.aborted) return;
-    O(o.assistantEl, n), i.firstChild === r && (i.classList.add("hidden"), i.innerHTML = "", be.length && ue(), M.phase(s, "running"));
+    if (await R(e, { ...t, session_id: s.sessionId }), !$.current(s) || s.controller.signal.aborted) return;
+    O(o.assistantEl, n), i.firstChild === r && (i.classList.add("hidden"), i.innerHTML = "", be.length && ue(), $.phase(s, "running"));
   } catch (d) {
-    M.current(s) && !s.controller.signal.aborted && O(o.assistantEl, d.message);
+    $.current(s) && !s.controller.signal.aborted && O(o.assistantEl, d.message);
   } finally {
-    jt.delete(s), M.current(s) && (i.firstChild === r || !i.firstChild) && a.forEach((d, u) => {
+    jt.delete(s), $.current(s) && (i.firstChild === r || !i.firstChild) && a.forEach((d, u) => {
       d.disabled = c[u];
     });
   }
@@ -4069,26 +4073,26 @@ async function ps(e, t, n) {
 async function bi(e) {
   O(o.assistantEl, "変更されたファイル: " + e.join(", "));
   for (const t of e) o.changedPaths.add(t);
-  await z(), o.currentFile && e.includes(o.currentFile) && (o.dirty ? (o.conflictDeclined = !0, o.saveError = new ne("エージェントがファイルを更新しました。未保存の編集は保持しています。保存前に変更を確認してください。", 409), U()) : await oe(o.currentFile, !0));
+  await G(), o.currentFile && e.includes(o.currentFile) && (o.dirty ? (o.conflictDeclined = !0, o.saveError = new ne("エージェントがファイルを更新しました。未保存の編集は保持しています。保存前に変更を確認してください。", 409), q()) : await oe(o.currentFile, !0));
 }
 async function Ua() {
-  const e = M.stop();
+  const e = $.stop();
   e && (Fe() && (e.interruption = (async () => {
     let t = !1;
     for (let n = 0; n < 10; n++) {
-      const s = await Y("/api/interrupt", {
+      const s = await Z("/api/interrupt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: e.sessionId }),
         signal: AbortSignal.timeout(5e3)
       });
-      if (!M.current(e)) return;
+      if (!$.current(e)) return;
       if (s.stopped !== !1) {
         t = !0;
         break;
       }
     }
-    await z(), M.current(e) && o.currentFile && !o.dirty && await oe(o.currentFile, !0, "none"), t || N("error", "停止を要求しましたが、処理の終了をまだ確認できません。ファイルの状態を確認してください。");
+    await G(), $.current(e) && o.currentFile && !o.dirty && await oe(o.currentFile, !0, "none"), t || N("error", "停止を要求しましたが、処理の終了をまだ確認できません。ファイルの状態を確認してください。");
   })().catch((t) => {
     N("error", t.message);
   })), be.length && ue());
@@ -4113,7 +4117,7 @@ async function qa(e) {
     }
 }
 function Ei(e) {
-  if (o.streaming && !(e && M.current(e) && M.state.phase === "switching")) {
+  if (o.streaming && !(e && $.current(e) && $.state.phase === "switching")) {
     alert("⚠️ 実行中です。中断してから新しい会話を開始してください。");
     return;
   }
@@ -4166,7 +4170,7 @@ async function xi() {
   }
 }
 async function za(e) {
-  const t = M.begin("switching");
+  const t = $.begin("switching");
   if (!t) return;
   let n = "";
   l("sessions-modal").classList.add("hidden");
@@ -4175,13 +4179,13 @@ async function za(e) {
       "/api/code-chat/restore",
       { session_id: e, messages: s.messages }
     );
-    M.finish(t), o.sessionId = e, $e(), l("messages").innerHTML = "";
+    $.finish(t), o.sessionId = e, $e(), l("messages").innerHTML = "";
     for (const r of s.messages || []) N(r.role, r.content, { assetBase: Ze() });
     N("system", i.ok ? "✓ 会話を復元しました（エンジンの文脈も引き継がれています。続きから話せます）。" : "✓ 会話の表示を復元しました（このエンジンでは文脈の復元は未対応です）。"), Q(!0);
   } catch (s) {
     n = s.message, alert("⚠️ 会話を復元できませんでした: " + s.message);
   } finally {
-    M.finish(t, n);
+    $.finish(t, n);
   }
 }
 function $e() {
@@ -4340,7 +4344,7 @@ function hs() {
   l("plan-overlay").classList.add("hidden"), N("system", "✕ 計画の修正を依頼します。どこをどう直したいかチャットに書いてください。"), l("chat-input").focus();
 }
 async function Se(e) {
-  const t = await Z("/api/workspace/dirs?path=" + encodeURIComponent(e || ""));
+  const t = await z("/api/workspace/dirs?path=" + encodeURIComponent(e || ""));
   if (!t) return;
   l("root-input").value = t.cwd || "", Cn();
   const n = l("root-drives");
@@ -4376,13 +4380,13 @@ async function An(e) {
     alert("⚠️ 実行中は作業フォルダを切り替えられません。");
     return;
   }
-  const t = M.begin("switching");
+  const t = $.begin("switching");
   if (!t) return;
   let n = "", s;
   try {
     for (; o.savePromise; ) await o.savePromise;
     if (await Mt(), o.dirty && !confirm("未保存の変更があります。破棄して作業フォルダを切り替えますか？")) return;
-    te = !0, s = o.editor.getOption(o.monaco.editor.EditorOption.readOnly), o.editor.updateOptions({ readOnly: !0 }), q++, xt?.reset(), ot++, ye++;
+    te = !0, s = o.editor.getOption(o.monaco.editor.EditorOption.readOnly), o.editor.updateOptions({ readOnly: !0 }), j++, xt?.reset(), ot++, ye++;
     let i;
     try {
       i = await R("/api/workspace", { path: e });
@@ -4390,11 +4394,11 @@ async function An(e) {
       n = r.message, alert("⚠️ フォルダ変更に失敗: " + r.message);
       return;
     }
-    lt(), o.currentFile = null, o.baseMtime = null, Ro(), fa(), o.collapsedDirs.clear(), o.knownDirs.clear(), o.changedPaths.clear(), o.saveError = null, o.editor.setValue(""), Lt(), U(), l("current-file").textContent = "（ファイル未選択）", _e(), Ws(), await Hs(), gn(), await Ct(), await z(), D() ? (o.sessionId = ze(), $e(), l("approval").classList.add("hidden"), o.assistantEl = null, await yn()) : Ei(t), N("system", "作業フォルダを変更: " + (i.workspace || e));
+    lt(), o.currentFile = null, o.baseMtime = null, Ro(), fa(), o.collapsedDirs.clear(), o.knownDirs.clear(), o.changedPaths.clear(), o.saveError = null, o.editor.setValue(""), Lt(), q(), l("current-file").textContent = "（ファイル未選択）", _e(), Ws(), await Hs(), gn(), await Ct(), await G(), B() ? (o.sessionId = ze(), $e(), l("approval").classList.add("hidden"), o.assistantEl = null, await yn()) : Ei(t), N("system", "作業フォルダを変更: " + (i.workspace || e));
   } catch (i) {
     return n = i.message, alert(i.message), !1;
   } finally {
-    te = !1, s !== void 0 && o.editor.updateOptions({ readOnly: s }), M.finish(t, n);
+    te = !1, s !== void 0 && o.editor.updateOptions({ readOnly: s }), $.finish(t, n);
   }
 }
 async function ic() {
@@ -4413,7 +4417,7 @@ async function ic() {
         alert(n.error);
         return;
       }
-      await z(), await oe(n.path);
+      await G(), await oe(n.path);
     } catch (n) {
       alert("エラー: " + n.message);
     } finally {
@@ -4563,9 +4567,9 @@ function uc() {
     getSnapshot: () => ({
       current_file: o.currentFile || "",
       current_content: o.currentFile ? o.editor.getValue() : null,
-      generation: q
+      generation: j
     }),
-    isCurrent: (e) => e === q && !te,
+    isCurrent: (e) => e === j && !te,
     canSend: () => dn.ready && !o.streaming && o.copilotEnabled && !te,
     send: (e) => Le(e)
   }), l("send-btn").addEventListener("click", () => o.streaming ? Ua() : Le()), l("new-session-btn").addEventListener("click", Ei), l("sessions-btn").addEventListener("click", xi), l("sessions-close").addEventListener("click", () => l("sessions-modal").classList.add("hidden")), l("sessions-modal").addEventListener("click", (e) => {
@@ -4574,7 +4578,12 @@ function uc() {
     qo(), de && li(o.editor.getModel(), de.range);
   }, { passive: !0 }), document.addEventListener("selectionchange", () => {
     clearTimeout(os), os = setTimeout(zo, Vo);
-  }), jo(), aa(), l("refresh-btn").addEventListener("click", () => z()), l("file-search").addEventListener("input", ua), l("search-case").addEventListener("change", () => _n(l("file-search").value)), l("replace-toggle").addEventListener("click", ma), l("replace-preview-btn").addEventListener("click", () => Ot(!0)), l("replace-run-btn").addEventListener("click", () => Ot(!1)), l("replace-input").addEventListener("keydown", (e) => {
+  }), jo(), aa(), l("refresh-btn").addEventListener("click", () => G()), l("autonomous-check").addEventListener("change", async () => {
+    const e = l("autonomous-check"), t = l("verification-command");
+    if (!e.checked || t.value.trim()) return;
+    const n = j, s = o.sessionId, i = await z("/api/workspace/verification-command");
+    i && n === j && s === o.sessionId && e.checked && !t.value.trim() && !o.streaming && (t.value = i.command || "");
+  }), l("file-search").addEventListener("input", ua), l("search-case").addEventListener("change", () => _n(l("file-search").value)), l("replace-toggle").addEventListener("click", ma), l("replace-preview-btn").addEventListener("click", () => Ot(!0)), l("replace-run-btn").addEventListener("click", () => Ot(!1)), l("replace-input").addEventListener("keydown", (e) => {
     e.key === "Enter" && (e.preventDefault(), Ot(!0));
   }), l("nav-back").addEventListener("click", Qt), l("nav-fwd").addEventListener("click", en), l("recent-btn").addEventListener("click", (e) => {
     e.stopPropagation(), tn();

@@ -298,7 +298,7 @@ function useExample(text: string) {
               id="verification-command"
               type="text"
               aria-label="自走で繰り返す検証コマンド"
-              placeholder="検証コマンド（例: python -m pytest -q）"
+              placeholder="検証コマンドを入力（自動検出できませんでした）"
               :disabled="busy"
             />
           </div>

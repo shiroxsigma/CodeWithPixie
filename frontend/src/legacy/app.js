@@ -2777,7 +2777,7 @@ const PHASE_LABEL = {
   responding: (sec) => `回答を生成中… ${sec}s`,
 };
 
-function beginAssistantStream(el) {
+function beginAssistantStream(el, estimateSpeed = true) {
   let raw = "";                          // 本文トークンの蓄積
   let phase = "prefill";
   let phaseStart = performance.now();    // 経過秒はフェーズごとに測る（通算だと何を待っているか分からない）
@@ -2789,6 +2789,22 @@ function beginAssistantStream(el) {
   const activity = $("chat-activity");
   if (activity) activity.replaceChildren();
   let speedLabel = "";
+  let measuredSpeed = false;
+  let lastTokenAt = null;
+  let receivedChars = 0;
+  let receivedMs = 0;
+  const measuredTitle = "LLM全呼び出しの生成トークン数 ÷ 生成時間（思考・ツール呼び出しの生成を含む）";
+  const estimatedTitle = "受信した文字数 ÷ 3でトークン数を概算し、ストリームの受信時間で割った推定値。ツール実行・応答待ちの時間を除外します。";
+  const renderSpeed = () => {
+    let speed = el.querySelector(".response-speed");
+    if (!speed) {
+      speed = document.createElement("div");
+      speed.className = "response-speed";
+      el.appendChild(speed);
+    }
+    speed.textContent = speedLabel;
+    speed.title = measuredSpeed ? measuredTitle : estimatedTitle;
+  };
 
   const showWait = () => {
     if (!wait.isConnected) (activity || el).prepend(wait);
@@ -2798,9 +2814,10 @@ function beginAssistantStream(el) {
     const sec = ((performance.now() - phaseStart) / 1000).toFixed(1);
     const label = PHASE_LABEL[phase] || ((s) => `${phase}… ${s}s`);
     waitText.textContent = label(sec) + (speedLabel ? ` / ${speedLabel}` : "");
+    waitText.title = measuredSpeed ? measuredTitle : estimatedTitle;
   };
   const setPhase = (p) => {
-    if (p !== phase) { phase = p; phaseStart = performance.now(); }
+    if (p !== phase) { phase = p; phaseStart = performance.now(); lastTokenAt = null; }
     showWait();
     paint();
     scrollMessages();
@@ -2833,6 +2850,18 @@ function beginAssistantStream(el) {
     onToken(t) {
       raw += t;
       setPhase("responding");
+      if (estimateSpeed && !measuredSpeed) {
+        const now = performance.now();
+        if (lastTokenAt !== null) {
+          receivedChars += [...t].length;
+          receivedMs += now - lastTokenAt;
+        }
+        lastTokenAt = now;
+        speedLabel = receivedMs >= 100
+          ? `推定 ${(receivedChars / 3 * 1000 / receivedMs).toFixed(1)} tokens/sec`
+          : "速度を計測中…";
+        paint();
+      }
       // 思考は折りたたみへ、本文だけを吹き出しに出す。ストリーミング中の本文は生テキスト
       // のまま（トークンごとに Markdown を組み直すと重いうえ、閉じていないフェンスが
       // 崩れて見える）。整形は finish() で一度だけ行う。
@@ -2844,20 +2873,16 @@ function beginAssistantStream(el) {
     /** エンジンのインジケータ（⏳ Prefill / 🧠 Thinking...）を待機表示のフェーズに反映する。 */
     setPhase,
     setSpeed(label) {
+      measuredSpeed = true;
       speedLabel = label;
       paint();
-      let speed = el.querySelector(".response-speed");
-      if (!speed) {
-        speed = document.createElement("div");
-        speed.className = "response-speed";
-        el.appendChild(speed);
-      }
-      speed.textContent = label;
-      speed.title = "LLM全呼び出しの生成トークン数 ÷ 生成時間（思考・ツール呼び出しの生成を含む）";
+      renderSpeed();
     },
     finish() {
       clearInterval(timer);
       wait.remove();
+      if (speedLabel === "速度を計測中…") speedLabel = "速度: 計測データなし";
+      if (speedLabel) renderSpeed();
       if (activity) activity.textContent = speedLabel;
       // <think>...</think>（qwen 系が content に混ぜる形式）は表示・履歴・差分反映の
       // 対象から外す。無ければ splitThink は素通しなので Code モードにも無害。
@@ -3163,7 +3188,8 @@ async function sendChat(submission) {
                current_content: state.currentFile ? state.editor.getValue() : "",
                selection: getSelection(), plan_first: codePlan,
                autonomous: !codePlan && !!$("autonomous-check")?.checked,
-               verification_command: $("verification-command")?.value.trim() || "" };
+               verification_command: !codePlan && $("autonomous-check")?.checked
+                 ? $("verification-command")?.value.trim() || "" : "" };
       if (context_files.length) body.context_files = context_files;
     }
 
@@ -3180,7 +3206,7 @@ async function sendChat(submission) {
     state.compacted = null;
     // 削除は「1往復」が単位なので、アシスタントの吹き出しから相方のユーザー発言を辿れるようにする。
     state.assistantEl._exchange = { userEl, userText };
-    state.assistantUi = beginAssistantStream(state.assistantEl);
+    state.assistantUi = beginAssistantStream(state.assistantEl, !/^\/copilot/i.test(msg) && !sourceBundle);
 
 
     try {
@@ -4416,6 +4442,18 @@ function bindUI() {
   bindMdflowUI();
   bindConfluenceUI();
   $("refresh-btn").addEventListener("click", () => loadFileList());
+  $("autonomous-check").addEventListener("change", async () => {
+    const checkbox = $("autonomous-check");
+    const input = $("verification-command");
+    if (!checkbox.checked || input.value.trim()) return;
+    const workspace = workspaceGeneration;
+    const session = state.sessionId;
+    const result = await tryJSON("/api/workspace/verification-command");
+    if (result && workspace === workspaceGeneration && session === state.sessionId
+        && checkbox.checked && !input.value.trim() && !state.streaming) {
+      input.value = result.command || "";
+    }
+  });
   $("file-search").addEventListener("input", onSearch);
   // 全文検索の大小区別トグルと一括置換
   $("search-case").addEventListener("change", () => runSearch($("file-search").value));
