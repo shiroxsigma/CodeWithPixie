@@ -99,6 +99,19 @@ def test_completion_without_metrics_is_not_treated_as_success():
     assert session.outcome == {"status": "failed", "reason": "missing_exit_reason"}
 
 
+def test_structured_tokens_preserve_whitespace_without_cli_prefix_or_duplicates():
+    session = _Session()
+    text = "本文\n\n```python\na = 1\n\nb = 2\n```"
+    session._on_engine_event({"type": "response_start", "response_id": 1})
+    session._on_engine_event({"type": "output", "text": "AI: "})
+    session._on_engine_event({"type": "token", "response_id": 1, "text": text})
+    session._on_engine_event({"type": "output", "text": text})
+    session._on_engine_event({"type": "output", "text": "\n"})
+    session._on_engine_event({"type": "response_end", "response_id": 1, "progress": False})
+    assert "".join(e.get("text", "") for e in session.events if e["type"] == "token") == text
+    assert [e["type"] for e in session.events] == ["response_start", "token", "response_end"]
+
+
 @pytest.mark.parametrize("native", [True, False])
 def test_incomplete_tool_envelope_is_failure_without_retry(native):
     from types import SimpleNamespace

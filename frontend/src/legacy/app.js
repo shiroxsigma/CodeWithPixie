@@ -8,6 +8,7 @@
 // モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code /
 //   mode-plan で出し分け。
 import { chatRuntime, consumeChatStream } from "../chat/runtime";
+import { ResponseTranscript } from "../chat/response-transcript";
 import { watch } from "vue";
 import { setConnectionIssue, setControllerReady, setEditorContext, showView, workspaceView } from "../ui/view";
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
@@ -21,7 +22,7 @@ import { available as cfAvailable, htmlToMarkdown } from "./confluence.js";
 import * as mermaidEdit from "./mermaid-edit.js";
 import * as mdflow from "./mdflow.js";
 import { $ } from "./dom.js";
-import { addDeleteButton, addMessage, addRollbackButton, addToolStatus, scrollMessages } from "./chat-log.js";
+import { addDeleteButton, addMessage, addProgressStatus, addRollbackButton, addToolStatus, scrollMessages } from "./chat-log.js";
 import { splitThink, scanEditBlocks, extractEdits, extractProposed } from "./edit-blocks.js";
 
 function newSessionId() {
@@ -2773,12 +2774,15 @@ const PHASE_LABEL = {
   thinking: (sec) => `思考中… ${sec}s`,
   generating: (sec) => `ツール呼び出しを生成中… ${sec}s`,
   tool: (sec) => `ツールを実行中… ${sec}s`,
+  approval: (sec) => `承認を待っています… ${sec}s`,
   verify: (sec) => `結果を検証中… ${sec}s`,
   responding: (sec) => `回答を生成中… ${sec}s`,
 };
 
 function beginAssistantStream(el, estimateSpeed = true) {
-  let raw = "";                          // 本文トークンの蓄積
+  const transcript = new ResponseTranscript();
+  let completedThinking = "";
+  let responseCount = 0;
   let phase = "prefill";
   let phaseStart = performance.now();    // 経過秒はフェーズごとに測る（通算だと何を待っているか分からない）
 
@@ -2788,6 +2792,8 @@ function beginAssistantStream(el, estimateSpeed = true) {
   const waitText = wait.querySelector(".wait-text");
   const activity = $("chat-activity");
   if (activity) activity.replaceChildren();
+  const report = document.createElement("div");
+  report.className = "activity-report";
   let speedLabel = "";
   let measuredSpeed = false;
   let lastTokenAt = null;
@@ -2813,7 +2819,11 @@ function beginAssistantStream(el, estimateSpeed = true) {
     if (!wait.isConnected) return;
     const sec = ((performance.now() - phaseStart) / 1000).toFixed(1);
     const label = PHASE_LABEL[phase] || ((s) => `${phase}… ${s}s`);
-    waitText.textContent = label(sec) + (speedLabel ? ` / ${speedLabel}` : "");
+    const total = ((performance.now() - startedAt) / 1000).toFixed(1);
+    waitText.textContent = label(sec)
+      + (responseCount ? ` / LLM ${responseCount}回目` : "")
+      + ` / 全体 ${total}s`
+      + (speedLabel ? ` / ${speedLabel}` : "");
     waitText.title = measuredSpeed ? measuredTitle : estimatedTitle;
   };
   const setPhase = (p) => {
@@ -2847,10 +2857,32 @@ function beginAssistantStream(el, estimateSpeed = true) {
   const timer = setInterval(() => { paint(); scrollMessages(); }, 200);
 
   return {
+    onResponseStart(ev) {
+      transcript.start(ev.response_id);
+      responseCount += 1;
+      phaseStart = performance.now();
+      lastTokenAt = null;
+      setPhase("prefill");
+    },
+    onResponseEnd(ev) {
+      const moved = transcript.end(ev.response_id, ev.progress, ev.interrupted);
+      if (moved) {
+        const { think, visible } = splitThink(moved);
+        if (think) completedThinking += think + "\n";
+        const text = visible.trim();
+        addProgressStatus(el, text);
+        report.textContent = text;
+        if (text && !report.isConnected) (activity || el).appendChild(report);
+      }
+      const { think, visible } = splitThink(transcript.text);
+      showThink(completedThinking + think);
+      renderPlain(el.querySelector(".body"), visible);
+      setPhase(ev.has_tool_calls ? "tool" : "verify");
+    },
     onToken(t) {
-      raw += t;
-      setPhase("responding");
-      if (estimateSpeed && !measuredSpeed) {
+      transcript.append(t);
+      if (t.trim()) setPhase("responding");
+      if (t.trim() && estimateSpeed && !measuredSpeed) {
         const now = performance.now();
         if (lastTokenAt !== null) {
           receivedChars += [...t].length;
@@ -2865,8 +2897,8 @@ function beginAssistantStream(el, estimateSpeed = true) {
       // 思考は折りたたみへ、本文だけを吹き出しに出す。ストリーミング中の本文は生テキスト
       // のまま（トークンごとに Markdown を組み直すと重いうえ、閉じていないフェンスが
       // 崩れて見える）。整形は finish() で一度だけ行う。
-      const { think, visible } = splitThink(raw);
-      showThink(think);
+      const { think, visible } = splitThink(transcript.text);
+      showThink(completedThinking + think);
       renderPlain(el.querySelector(".body"), visible);
       scrollMessages();
     },
@@ -2886,8 +2918,8 @@ function beginAssistantStream(el, estimateSpeed = true) {
       if (activity) activity.textContent = speedLabel;
       // <think>...</think>（qwen 系が content に混ぜる形式）は表示・履歴・差分反映の
       // 対象から外す。無ければ splitThink は素通しなので Code モードにも無害。
-      const { think, visible } = splitThink(raw);
-      showThink(think, true);   // 完了したら折りたたむ
+      const { think, visible } = splitThink(transcript.text);
+      showThink(completedThinking + think, true);   // 完了したら折りたたむ
       // 本文が出揃ったのでここで一度だけ Markdown へ。assetBase は「今のノートの
       // ディレクトリ」を明示する（モジュール共通の基準は最後にプレビューしたディレクトリで止まるため）
       if (visible.trim()) renderInto(el.querySelector(".body"), visible, { assetBase: currentDir() });
@@ -3372,6 +3404,12 @@ function noteAfterTurn(assistantEl, message, visible, applyTarget, cancelled) {
 
 async function handleEvent(ev) {
   switch (ev.type) {
+    case "response_start":
+      state.assistantUi?.onResponseStart(ev);
+      break;
+    case "response_end":
+      state.assistantUi?.onResponseEnd(ev);
+      break;
     case "token":
       // text 欠落のイベントで文字列 "undefined" を本文へ混ぜない（search ブロックが壊れる）
       if (ev.text) state.assistantUi?.onToken(ev.text);
@@ -3424,8 +3462,15 @@ async function handleEvent(ev) {
       }
       if (calls.length) {
         parts.push(`LLM時間 ${sum("wall_sec").toFixed(1)}秒`);
-        parts.push(`応答待ち ${sum("prefill_sec").toFixed(1)}秒`);
-        parts.push(`推論 ${sum("thinking_sec").toFixed(1)}秒`);
+        if (calls.some(call => call.time_to_first_token != null))
+          parts.push(`最初の生成データ待ち ${sum("time_to_first_token").toFixed(1)}秒`);
+        if (calls.some(call => call.prefill_sec != null))
+          parts.push(`入力処理 ${sum("prefill_sec").toFixed(1)}秒`);
+        if (measured.length) parts.push(`生成 ${(sum("decode_ms") / 1000).toFixed(1)}秒`);
+        parts.push(calls.some(call => call.thinking_sec != null)
+          ? `思考 ${sum("thinking_sec").toFixed(1)}秒` : "思考 計測なし");
+        if (metrics.tool_wall_sec != null)
+          parts.push(`ツール実行 ${Number(metrics.tool_wall_sec).toFixed(1)}秒`);
         const prompt = sum("prompt_tokens"), cached = sum("cache_tokens");
         if (prompt + cached > 0) parts.push(`キャッシュ ${Math.round(100 * cached / (prompt + cached))}%`);
       }
@@ -3469,7 +3514,7 @@ function finishStream() {
   const visible = state.assistantUi?.finish() ?? "";
   // 送信そのものが失敗したターンでは、本文もツールログも無い空の吹き出しが残る。
   // 直後にエラー吹き出しを出すので、空箱は畳んでおく。
-  if (state.assistantEl && !visible.trim() && !state.assistantEl.querySelector(".tool-log")) {
+  if (state.assistantEl && !visible.trim() && !state.assistantEl.querySelector(".tool-log, .progress-log")) {
     state.assistantEl.remove();
     state.assistantEl = null;
   }

@@ -1,5 +1,54 @@
 import { expect, test } from "@playwright/test";
 
+test("work reports move to progress while request waits stay visible and answers stream", async ({ page }) => {
+  await page.clock.install();
+  await page.locator("#chat-input").fill("D:\\Workspace\\Pixylph-MoE を解説して");
+  await page.locator("#send-btn").click();
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "response_start", response_id: 1 });
+    (window as any).emitChat({ type: "token", text: "まず主要ファイルを確認します。\n\n\n" });
+    (window as any).emitChat({ type: "response_end", response_id: 1, progress: true, has_tool_calls: true });
+    (window as any).emitChat({ type: "token", text: "\n\n" });
+  });
+  await expect(page.locator("#messages .assistant .body")).toBeEmpty();
+  await expect(page.locator("#chat-activity .activity-report")).toHaveText("まず主要ファイルを確認します。");
+  await expect(page.locator("#messages .progress-log summary")).toHaveText("作業の経過（1件）");
+  await expect(page.locator("#chat-activity")).toContainText("ツールを実行中");
+  await page.evaluate(() => (window as any).emitChat({ type: "response_start", response_id: 2 }));
+  await expect(page.locator("#chat-activity")).toContainText("LLM 2回目");
+  await page.clock.runFor(15000);
+  await expect(page.locator("#chat-activity")).toContainText("応答を待っています… 15.0s");
+  await expect(page.locator("#chat-activity")).toContainText("まず主要ファイルを確認します。");
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "token", text: "# プロジェクト概要\n\nC++の推論エンジンです。" });
+  });
+  await expect(page.locator("#messages .assistant .body")).toHaveText("# プロジェクト概要\n\nC++の推論エンジンです。");
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "response_end", response_id: 2, progress: false });
+    (window as any).emitChat({ type: "token", text: "\n\n\n" });
+    (window as any).emitChat({ type: "done", status: "completed" });
+  });
+  // The Markdown renderer may be unavailable in the offline browser fixture.
+  await expect(page.locator("#messages .assistant .body")).toContainText("プロジェクト概要");
+  await expect(page.locator("#messages .assistant .body")).not.toContainText("確認します");
+  await expect(page.locator("#chat-activity .wait-indicator")).toHaveCount(0);
+  await page.locator("#messages .progress-log summary").click();
+  await expect(page.locator("#messages .progress-status")).toBeVisible();
+});
+
+test("an interrupted response stays visible even when a progress flag is present", async ({ page }) => {
+  await page.locator("#chat-input").fill("interrupted report");
+  await page.locator("#send-btn").click();
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "response_start", response_id: 1 });
+    (window as any).emitChat({ type: "token", text: "確認します。\n\n途中の回答です。" });
+    (window as any).emitChat({ type: "response_end", response_id: 1, progress: true, interrupted: true });
+    (window as any).emitChat({ type: "done", status: "cancelled" });
+  });
+  await expect(page.locator("#messages .assistant .body")).toContainText("途中の回答です。");
+  await expect(page.locator("#messages .progress-log")).toHaveCount(0);
+});
+
 test("activity stays above the input and measured generation speed survives completion", async ({ page }) => {
   await page.locator("#chat-input").fill("speed check");
   await page.locator("#send-btn").click();

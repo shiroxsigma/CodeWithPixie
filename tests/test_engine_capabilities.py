@@ -56,6 +56,7 @@ def test_detects_capabilities_from_public_methods():
         "stream_timeout": True,
         "context_policy": True,
         "structured_events": True,
+        "response_events": False,
         "turn_metrics": True,
         "agent_profiles": True,
     }

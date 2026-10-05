@@ -39,6 +39,7 @@ from .qwen_read_guard import QwenReadGuard
 from .autonomy import AutonomousRun
 from .session_memory import SessionMemory
 from . import command_runner
+from .response_progress import ResponseProgress
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -456,6 +457,7 @@ def detect_capabilities(core) -> dict:
         # 次世代境界。AWP側に追加された時点でCWPはバージョン番号変更なしでも検出できる。
         "context_policy": engine_has("set_context_policy"),
         "structured_events": engine_has("run_turn_events"),
+        "response_events": bool(getattr(engine_type, "structured_response_events", False)),
         "turn_metrics": engine_has("get_turn_metrics"),
         "agent_profiles": "profile" in create_params,
     }
@@ -619,10 +621,35 @@ class _EngineStreamOps:
     def _on_engine_event(self, event) -> None:
         value = event.as_dict() if callable(getattr(event, "as_dict", None)) else dict(event)
         event_type = value.get("type")
-        if event_type == "output":
+        if event_type == "response_start":
+            self._structured_response_active = True
+            self._emit_event(value)
+        elif event_type == "response_end":
+            self._structured_response_active = False
+            self._emit_event(value)
+        elif event_type == "phase":
+            value.update(type="status", category="phase", text="")
+            self._emit_event(value)
+        elif event_type == "token":
+            if getattr(self, "_cancel", False):
+                raise self._CancelTurn()
+            self._emit_event(value)
+        elif event_type in {"tool_started", "tool_completed", "approval_waiting"}:
+            value.update(type="status", category=event_type)
+            value.setdefault("text", "")
+            self._emit_event(value)
+            if event_type in {"tool_started", "approval_waiting"}:
+                self._emit_event({"type": "status", "category": "phase", "text": "",
+                                  "phase": "tool" if event_type == "tool_started" else "approval"})
+        elif event_type == "output":
+            if getattr(self, "_structured_response_active", False):
+                return
             self._emit(value.get("text", ""), end=value.get("end", ""),
                        flush=bool(value.get("flush", False)))
         elif event_type == "turn_completed":
+            reporter = getattr(self, "_response_reporter", None)
+            if reporter is not None:
+                reporter.finish()
             metrics = value.get("metrics") or {}
             raw_reason = metrics.get("exit_reason")
             reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
@@ -666,22 +693,41 @@ class _EngineStreamOps:
                 return read_guard.filter_calls(approved, _tc_name, _tc_args)
 
             interactive_fn = interactive_with_read_guard
-        if callable(runner):
-            result = runner(
-                user_text,
-                event_fn=self._on_engine_event,
-                interactive_fn=interactive_fn,
-                show_thinking=show_thinking,
-                **options,
-            )
-        else:
-            result = self._engine.run_turn(
-                user_text,
-                output_fn=self._emit,
-                interactive_fn=interactive_fn,
-                show_thinking=show_thinking,
-                **options,
-            )
+        backend = getattr(getattr(self._engine, "context", None), "llm", None)
+        completion = getattr(backend, "create_chat_completion", None)
+        self._structured_response_events = bool(getattr(self._engine, "structured_response_events", False))
+        self._structured_response_active = False
+        reporter = (ResponseProgress(self._emit_event)
+                    if getattr(self, "_present_response_progress", False) and callable(completion) and not self._structured_response_events
+                    else None)
+        self._response_reporter = reporter
+        if reporter is not None:
+            backend.create_chat_completion = reporter.observe(completion)
+            if callable(interactive_fn):
+                progress_interactive = interactive_fn
+
+                def interactive_with_progress(tool_calls, content):
+                    reporter.finish()
+                    return progress_interactive(tool_calls, content)
+
+                interactive_fn = interactive_with_progress
+        try:
+            if callable(runner):
+                result = runner(
+                    user_text, event_fn=self._on_engine_event,
+                    interactive_fn=interactive_fn, show_thinking=show_thinking, **options,
+                )
+            else:
+                result = self._engine.run_turn(
+                    user_text, output_fn=self._emit,
+                    interactive_fn=interactive_fn, show_thinking=show_thinking, **options,
+                )
+        finally:
+            if reporter is not None:
+                backend.create_chat_completion = completion
+                reporter.finish()
+            self._response_reporter = None
+            self._structured_response_active = False
         if (getattr(self, "outcome", {}).get("status", "completed") == "completed"
                 and _incomplete_tool_markup(result)):
             self.outcome = {"status": "failed", "reason": "incomplete_tool_markup"}
@@ -1069,6 +1115,8 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
     分離される）。作業対象 workspace は会話作成時に固定し、画面のフォルダ切替から分離する。
     """
 
+    _present_response_progress = True
+
     def __init__(self, core, server: dict, workspace):
         self._core = core
         self._CancelTurn = core.CancelTurn
@@ -1270,6 +1318,14 @@ class AgentSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         if not text:
             return
         for kind, out in self._classifier.feed(text):
+            reporter = getattr(self, "_response_reporter", None)
+            if reporter is not None:
+                # Legacy indicators treat the initial empty role delta as
+                # prefill completion. Use the actual chunk observer for phases.
+                if kind == "status" and ("Prefill" in out or "⏳" in out):
+                    continue
+                if kind == "token" and reporter.active is None and not out.strip():
+                    continue  # engine separators outside a model response
             self._emit_event({"type": "token" if kind == "token" else "status", "text": out})
 
     def _emit_flush(self) -> None:

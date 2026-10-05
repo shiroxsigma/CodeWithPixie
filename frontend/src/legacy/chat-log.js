@@ -81,6 +81,7 @@ export function addRollbackButton(el, onRollback) {
 
 /** エージェントのツール実行ステータスを本文の上のログ枠に積む。 */
 export function addToolStatus(el, text, meta = {}) {
+  if (!el || !text) return;
   let log = el.querySelector(".tool-log");
   if (!log) {
     log = document.createElement("div");
@@ -93,6 +94,24 @@ export function addToolStatus(el, text, meta = {}) {
   if (meta.tool) line.dataset.tool = meta.tool;
   line.textContent = text;
   log.appendChild(line);
+  scrollMessages();
+}
+
+/** LLMの作業報告は本文から分け、後から確認できる折りたたみに残す。 */
+export function addProgressStatus(el, text) {
+  if (!el || !text.trim()) return;
+  let log = el.querySelector(".progress-log");
+  if (!log) {
+    log = document.createElement("details");
+    log.className = "progress-log";
+    log.appendChild(document.createElement("summary"));
+    el.insertBefore(log, el.querySelector(".body"));
+  }
+  const line = document.createElement("div");
+  line.className = "progress-status";
+  line.textContent = text;
+  log.appendChild(line);
+  log.querySelector("summary").textContent = `作業の経過（${log.querySelectorAll(".progress-status").length}件）`;
   scrollMessages();
 }
 
