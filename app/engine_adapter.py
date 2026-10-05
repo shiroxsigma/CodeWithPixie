@@ -655,7 +655,7 @@ class _EngineStreamOps:
                 control.cancel()
         options = {"control": control} if control is not None else {}
         if (callable(interactive_fn)
-                and model_compat.is_qwen36(getattr(self, "model_name", ""))):
+                and model_compat.uses_qwen_tools(self._engine)):
             read_guard = QwenReadGuard(self._engine)
             original_interactive = interactive_fn
 
@@ -1656,7 +1656,7 @@ class NoteSession(_EngineStreamOps, _WorkspaceContextOps, HistoryOps):
         try:
             concise_scope = (
                 qwen_concise_guard.note_turn(self._core, self._engine.state, self.workspace)
-                if self.PROFILE_NAME == "note" and model_compat.is_qwen36(self.model_name)
+                if self.PROFILE_NAME == "note" and model_compat.uses_qwen_tools(self._engine)
                 else nullcontext()
             )
             with concise_scope:

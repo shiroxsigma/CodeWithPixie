@@ -26,6 +26,11 @@ def is_qwen36(model: object) -> bool:
     return "qwen3.6" in str(model or "").lower()
 
 
+def uses_qwen_tools(engine) -> bool:
+    return (is_qwen36(getattr(engine, "model_name", ""))
+            or getattr(engine.context, "tool_protocol", None) == "qwen3")
+
+
 def _has_visible_answer(content_parts: list[str]) -> bool:
     """Match pixie_core's handling of inline Qwen <think> content."""
     content = "".join(content_parts)
@@ -60,7 +65,7 @@ def _complete_tool_calls(chunks: list[dict]) -> bool:
 
 def prepare_server(server: dict) -> dict:
     """Give a local Qwen server time to prefill a large prompt."""
-    if not is_qwen36(server.get("model")):
+    if not is_qwen36(server.get("model")) and server.get("model") != "pixylph-moe":
         return server
     prepared = dict(server)
     prepared.setdefault("read_idle_timeout", 120.0)
@@ -86,6 +91,9 @@ def install_sampling_profile(core) -> None:
 
 def configure_engine(engine, server: dict) -> None:
     """Keep native tool history and bound long Qwen reasoning per request."""
+    if server.get("model") == "pixylph-moe":
+        _configure_pixylph(engine, server)
+        return
     if not is_qwen36(server.get("model")):
         return
 
@@ -193,3 +201,28 @@ def configure_engine(engine, server: dict) -> None:
             return
 
     backend.create_chat_completion = bounded_completion
+
+
+def _configure_pixylph(engine, server: dict) -> None:
+    """Use Pixylph's native tool API and preserve supported sampling settings."""
+    engine.context.supports_tool_role = True
+    engine.context.tool_protocol = "qwen3"
+    engine.context.native_tool_calls_only = True
+    backend = engine.context.llm
+    completion = backend.create_chat_completion
+    limit = int(server.get("max_tokens") or 4096)
+    if limit <= 0:
+        raise ValueError("Pixylph max_tokens must be positive")
+    backend.read_idle_timeout = float(server.get("read_idle_timeout") or 120.0)
+
+    @wraps(completion)
+    def native_completion(messages, **kwargs):
+        kwargs["max_tokens"] = min(int(kwargs.get("max_tokens") or limit), limit)
+        kwargs.setdefault("temperature", 0.0)
+        # Thinking is disabled; sampling and stop settings are supported.
+        # Keep tools, tool_choice and the original structured history intact.
+        for key in ("thinking_budget_tokens", "reasoning_effort"):
+            kwargs[key] = None
+        return completion(messages, **kwargs)
+
+    backend.create_chat_completion = native_completion

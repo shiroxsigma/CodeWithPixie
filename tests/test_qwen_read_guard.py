@@ -64,7 +64,8 @@ def _track_reads(monkeypatch):
 
 @pytest.mark.parametrize("model, expected_reads", [
     ("qwen3.6-35b-a3b", ["a.txt", "b.txt"]),
-    ("gemma-4", ["a.txt", "b.txt", "a.txt", "b.txt"]),
+    ("pixylph-moe", ["a.txt", "b.txt"]),
+    ("gemma-4", ["a.txt", "b.txt"]),
 ])
 def test_alternating_duplicate_reads_are_filtered_for_qwen_only(
     core, tmp_path, monkeypatch, model, expected_reads,
