@@ -783,6 +783,10 @@ details.mdflow-mapping pre {
 }
 
 /* 応答待ちインジケータ（prefill/思考中） */
+#chat-activity:empty { display: none; }
+#chat-activity { color: var(--muted); font-size: 12px; padding-bottom: 6px; }
+#chat-activity .wait-indicator { margin: 0; padding: 2px 0; }
+.response-speed { color: var(--muted); font-size: 12px; margin-top: 8px; }
 .wait-indicator {
   display: flex; align-items: center; gap: 8px;
   color: var(--muted); font-size: 12px; padding: 2px 0 6px;
@@ -1014,3 +1018,69 @@ body.view-chat.chat-files-open #filemgr {
 .autonomy-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .autonomy-controls label { font-size: 12px; }
 .autonomy-controls input[type="text"] { flex: 1; min-width: 160px; padding: 5px 8px; }
+
+/* Project source bundle dialog. */
+#source-bundle-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#source-bundle-dialog {
+  width: min(880px, 94vw);
+  max-height: 90vh;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+#source-bundle-root {
+  overflow-wrap: anywhere;
+}
+.source-bundle-hint {
+  margin: 0;
+}
+#source-bundle-dialog label {
+  font-size: 12px;
+}
+#source-bundle-dialog textarea {
+  flex-shrink: 0;
+  width: 100%;
+  padding: 8px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  resize: vertical;
+}
+#source-bundle-preview {
+  min-height: 160px;
+  height: 30vh;
+  font-family: Consolas, monospace;
+}
+#source-bundle-warning {
+  color: var(--plan);
+  font-size: 12px;
+}
+#source-bundle-skips {
+  font-size: 12px;
+}
+#source-bundle-skips-list {
+  max-height: 100px;
+  overflow-y: auto;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+.source-bundle-actions {
+  flex-wrap: wrap;
+}

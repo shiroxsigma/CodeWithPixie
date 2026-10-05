@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (auth, code_chat, compact, config, copilot, copilot_flow, engine_adapter, engine_events, extract,
-               files, history, mdflow, mode, note_api, note_prompts, patch, search)
+               files, history, mdflow, mode, note_api, note_prompts, patch, search, source_bundle)
 from .config import settings
 from .engine_adapter import AgentSession
 
@@ -226,6 +226,16 @@ class ContextFile(BaseModel):
     content: str
 
 
+class SourceBundleAttachment(BaseModel):
+    filename: str = Field(max_length=160, pattern=r"^[^/\\:<>|?*\x00-\x1f]+\.md$")
+    content: str = Field(min_length=1, max_length=10_000_000)
+
+
+class SourceBundleReq(BaseModel):
+    current_file: str = ""
+    current_content: str | None = Field(default=None, max_length=2_000_000)
+
+
 class ChatReq(BaseModel):
     message: str
     session_id: str
@@ -237,6 +247,7 @@ class ChatReq(BaseModel):
     history: list[dict] = []               # フロント保持の履歴（セッション新規作成時のシード用）
     current_content: str = ""              # current_file の内容（未保存の編集を含むエディタバッファ）
     attach_files: list[str] = []           # 関連ファイル（バイナリ/外部）の絶対パス: Copilot 添付用
+    source_bundle: SourceBundleAttachment | None = None  # 集約したソースを実ファイルとして添付する
     plan_first: bool = False               # Code モード plan-first サブモード: このターンは
                                            # 読み取り専用ツールで調査し ```plan の計画だけを出す
     autonomous: bool = False
@@ -265,6 +276,17 @@ class PatchReq(BaseModel):
 
 
 # --- ファイル API -------------------------------------------------------------
+@app.post("/api/workspace/source-bundle")
+def api_source_bundle(req: SourceBundleReq):
+    """選択中のプロジェクトをコピー・保存・Copilot 添付用にまとめる。"""
+    workspace = config.WORKSPACE
+    try:
+        return source_bundle.build_bundle(
+            workspace, current_file=req.current_file, current_content=req.current_content)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/files")
 def api_files():
     r = files.list_files()
@@ -877,9 +899,14 @@ def _copilot_direct(question_text: str, req: ChatReq,
             yield _sse({"type": "done"})
             return
 
-        question = _build_copilot_question(
-            question_text or "以下のテキストについて意見をください。", req.selection, context)
-        files_note = f"・添付 {len(req.attach_files)} 件" if req.attach_files else ""
+        user_question = question_text or "以下のテキストについて意見をください。"
+        if req.source_bundle:
+            user_question = (f"添付した {req.source_bundle.filename} はプロジェクトのソース集です。"
+                             "各ファイルのパスを確認し、以下の修正指示に沿って変更案と検証方法を示してください。\n\n"
+                             + user_question)
+        question = _build_copilot_question(user_question, req.selection, context)
+        attachment_count = len(req.attach_files) + int(req.source_bundle is not None)
+        files_note = f"・添付 {attachment_count} 件" if attachment_count else ""
         yield _sse({"type": "status",
                     "text": f"{command}: ローカルLLMを経由せずCopilotに直接質問します"
                             f"（{len(question)} 文字{files_note}・数十秒かかります）"})
@@ -890,9 +917,15 @@ def _copilot_direct(question_text: str, req: ChatReq,
         # 無通知にすると「送った後まったく進まない」ようにしか見えない）。
         loop = asyncio.get_running_loop()
         progress: asyncio.Queue = asyncio.Queue()
-        task = asyncio.create_task(asyncio.to_thread(
-            copilot.ask_with_progress, question, list(req.attach_files),
-            lambda line: loop.call_soon_threadsafe(progress.put_nowait, line)))
+        on_progress = lambda line: loop.call_soon_threadsafe(progress.put_nowait, line)
+        if req.source_bundle:
+            call = asyncio.to_thread(
+                copilot.ask_bundle_with_progress, question, req.source_bundle.filename,
+                req.source_bundle.content, list(req.attach_files), on_progress)
+        else:
+            call = asyncio.to_thread(
+                copilot.ask_with_progress, question, list(req.attach_files), on_progress)
+        task = asyncio.create_task(call)
         # 完了も同じキューに番兵として流す。done() をポーリングする形だと
         # 「進捗を put した直後に完了」の順序を毎回考える羽目になる。
         task.add_done_callback(lambda _: progress.put_nowait(_PROGRESS_END))
@@ -1247,6 +1280,8 @@ async def api_chat(req: ChatReq):
     for name in COPILOT_DIRECT_COMMANDS:
         if msg.lower().startswith(name):
             return _copilot_direct(msg[len(name):].strip(), req, command=name)
+    if req.source_bundle:
+        raise HTTPException(400, "ソース集の添付は /copilot_simple で送信してください。")
     if msg.lower().startswith("/copilot"):
         return _copilot_orchestrated(msg[len("/copilot"):].strip(), req)
     # /compact はモードに依らず同じ処理（畳む対象は現在モードのセッションの会話）。

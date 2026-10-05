@@ -8,8 +8,10 @@
 // モードは GET /api/mode（ワークスペース随伴の last_mode）。body.mode-note / mode-code /
 //   mode-plan で出し分け。
 import { chatRuntime, consumeChatStream } from "../chat/runtime";
+import { watch } from "vue";
 import { setConnectionIssue, setControllerReady, setEditorContext, showView, workspaceView } from "../ui/view";
 import { ApiError, getJSON, jsonFetch, postJSON, tryJSON } from "./api.js";
+import { bindSourceBundle } from "./source-bundle.js";
 import {
   available as mdAvailable, pngBackground, renderInto, renderPlain, resetDiagramZoom,
   setAssetBase, setDiagramEditor, setDiagramSaver, setOnDiagramRendered,
@@ -99,6 +101,8 @@ let fileOpenGeneration = 0;
 let workspaceSwitching = false;
 let replacementRunning = false;
 let replacementWriting = false;
+let sourceBundleUI = null;
+watch(() => [workspaceView.ready, chatRuntime.busy.value], () => sourceBundleUI?.update());
 
 // 拡張子 → Monaco 言語 ID
 const LANG = {
@@ -278,6 +282,7 @@ function toggleCodeStyle() {
 // Copilot 関連 UI の出し分け（NWP と同じ規則）。バーは .note-only だけでは足りない:
 // Copilot 連携がオフなら Note モードでも出さない（押しても必ずエラーになるボタンを出さない）。
 function applyCopilotVisibility() {
+  sourceBundleUI?.update();
   const on = !!state.copilotEnabled;
   const bar = $("copilot-bar");
   if (bar) bar.classList.toggle("hidden", !on);
@@ -2769,6 +2774,7 @@ const PHASE_LABEL = {
   generating: (sec) => `ツール呼び出しを生成中… ${sec}s`,
   tool: (sec) => `ツールを実行中… ${sec}s`,
   verify: (sec) => `結果を検証中… ${sec}s`,
+  responding: (sec) => `回答を生成中… ${sec}s`,
 };
 
 function beginAssistantStream(el) {
@@ -2780,15 +2786,18 @@ function beginAssistantStream(el) {
   wait.className = "wait-indicator";
   wait.innerHTML = `<span class="dots"><i></i><i></i><i></i></span><span class="wait-text"></span>`;
   const waitText = wait.querySelector(".wait-text");
+  const activity = $("chat-activity");
+  if (activity) activity.replaceChildren();
+  let speedLabel = "";
 
   const showWait = () => {
-    if (!wait.isConnected) el.insertBefore(wait, el.querySelector(".body"));
+    if (!wait.isConnected) (activity || el).prepend(wait);
   };
   const paint = () => {
     if (!wait.isConnected) return;
     const sec = ((performance.now() - phaseStart) / 1000).toFixed(1);
     const label = PHASE_LABEL[phase] || ((s) => `${phase}… ${s}s`);
-    waitText.textContent = label(sec);
+    waitText.textContent = label(sec) + (speedLabel ? ` / ${speedLabel}` : "");
   };
   const setPhase = (p) => {
     if (p !== phase) { phase = p; phaseStart = performance.now(); }
@@ -2823,7 +2832,7 @@ function beginAssistantStream(el) {
   return {
     onToken(t) {
       raw += t;
-      wait.remove();  // 本文が出ている間は待機表示は不要
+      setPhase("responding");
       // 思考は折りたたみへ、本文だけを吹き出しに出す。ストリーミング中の本文は生テキスト
       // のまま（トークンごとに Markdown を組み直すと重いうえ、閉じていないフェンスが
       // 崩れて見える）。整形は finish() で一度だけ行う。
@@ -2834,9 +2843,22 @@ function beginAssistantStream(el) {
     },
     /** エンジンのインジケータ（⏳ Prefill / 🧠 Thinking...）を待機表示のフェーズに反映する。 */
     setPhase,
+    setSpeed(label) {
+      speedLabel = label;
+      paint();
+      let speed = el.querySelector(".response-speed");
+      if (!speed) {
+        speed = document.createElement("div");
+        speed.className = "response-speed";
+        el.appendChild(speed);
+      }
+      speed.textContent = label;
+      speed.title = "LLM全呼び出しの生成トークン数 ÷ 生成時間（思考・ツール呼び出しの生成を含む）";
+    },
     finish() {
       clearInterval(timer);
       wait.remove();
+      if (activity) activity.textContent = speedLabel;
       // <think>...</think>（qwen 系が content に混ぜる形式）は表示・履歴・差分反映の
       // 対象から外す。無ければ splitThink は素通しなので Code モードにも無害。
       const { think, visible } = splitThink(raw);
@@ -3081,11 +3103,14 @@ async function clearConversation() {
 
 }
 
-async function sendChat() {
+async function sendChat(submission) {
   if (!workspaceView.ready) return;
   if (state.streaming) return;
+  // 通常のクリックイベントは入力欄を使う。ソースまとめだけ独立した送信内容を受け取る。
+  const sourceBundle = submission?.sourceBundle;
+  if (sourceBundle && (!state.copilotEnabled || workspaceSwitching)) return;
   const input = $("chat-input");
-  const msg = input.value.trim();
+  const msg = sourceBundle ? submission.message.trim() : input.value.trim();
   if (!msg) return;
   const command = msg.split(/\s/, 1)[0].toLowerCase();
   if (Object.hasOwn(LOCAL_COMMANDS, command)) {
@@ -3100,16 +3125,19 @@ async function sendChat() {
     // ローカル完結のスラッシュコマンド（/help・/undo 等）はここで処理して終わり。
     // サーバへ送るコマンド（/compact・/copilot）は通常の送信経路に乗る。
 
-    const note = isNote();
-    const plan = isPlan();
+    const note = !sourceBundle && isNote();
+    const plan = !sourceBundle && isPlan();
     // Code モード plan-first サブモード: このターンは「計画フェーズ」（読み取り専用で計画だけ出す）。
     // 計画承認直後の実行フェーズ（approvePlan が planExecNext を立てる）は除外する。
-    const codePlan = isCode() && state.codeStyle === "plan" && !state.planExecNext;
-    state.planExecNext = false;
+    const codePlan = !sourceBundle && isCode() && state.codeStyle === "plan" && !state.planExecNext;
+    if (!sourceBundle) state.planExecNext = false;
     // 反映先の追跡は「送信時の選択範囲」。以降の編集にデコレーションで追随する。
     const applyTarget = note ? trackApplyTarget() : null;
     let body;
-    if (note) {
+    if (sourceBundle) {
+      // 全ソースはファイル添付として送る。選択テキスト・チェック済み参照は混ぜない。
+      body = { message: msg, session_id: state.sessionId, source_bundle: sourceBundle };
+    } else if (note) {
       body = await buildNotePayload(msg, run.controller.signal);
     } else if (plan) {
       // PlanもCode/Noteと同じWorkspaceSnapshot/Worksetを使う。チェック済み本文は
@@ -3141,8 +3169,9 @@ async function sendChat() {
 
     if (run.controller.signal.aborted || !chatRuntime.current(run)) return;
     body.session_id = run.sessionId;
-    input.value = "";
-    const userEl = addMessage("user", msg);
+    if (!sourceBundle) input.value = "";
+    const userText = sourceBundle ? `${msg}\n\n添付: ${submission.attachmentLabel || sourceBundle.filename}` : msg;
+    const userEl = addMessage("user", userText);
     // 変更バッジは直近ターンのもの。新しいターンを始めたら畳む。
     if (state.changedPaths.size) { state.changedPaths.clear(); renderFileTree(); }
 
@@ -3150,7 +3179,7 @@ async function sendChat() {
     state.turnId = 0;         // turn イベントで埋まる（来なければ文脈編集は無いターン）
     state.compacted = null;
     // 削除は「1往復」が単位なので、アシスタントの吹き出しから相方のユーザー発言を辿れるようにする。
-    state.assistantEl._exchange = { userEl, userText: msg };
+    state.assistantEl._exchange = { userEl, userText };
     state.assistantUi = beginAssistantStream(state.assistantEl);
 
 
@@ -3185,7 +3214,7 @@ async function sendChat() {
     if (note) noteAfterTurn(assistantEl, msg, visible, applyTarget, cancelled);
     else if ((plan || codePlan) && !cancelled) planAfterTurn(visible);
     // Code モードの会話はターン確定ごとにサイドカーへ保存（再起動後の復元用）
-    if (isCode() && !cancelled) saveCodeTurn(msg, visible);
+    if (isCode() && !cancelled) saveCodeTurn(userText, visible);
     if (state.compacted && assistantEl?.isConnected) collapseToSummary(assistantEl, state.compacted);
     else if (assistantEl?.isConnected) {
       // 往復が確定してから削除ボタンを付ける（生成中に消せると文脈と表示がずれる）。
@@ -3359,6 +3388,14 @@ async function handleEvent(ev) {
       const parts = [`LLM ${llmCalls}`, `tools ${toolCalls}`];
       const calls = Array.isArray(metrics.llm_calls) ? metrics.llm_calls : [];
       const sum = (key) => calls.reduce((total, call) => total + (Number(call[key]) || 0), 0);
+      const measured = calls.filter(call => Number(call.decode_tokens) > 0 && Number(call.decode_ms) > 0);
+      if (measured.length) {
+        const tokens = measured.reduce((total, call) => total + Number(call.decode_tokens), 0);
+        const ms = measured.reduce((total, call) => total + Number(call.decode_ms), 0);
+        const speed = `${(tokens * 1000 / ms).toFixed(1)} tokens/sec`;
+        parts.push(speed);
+        state.assistantUi?.setSpeed(speed);
+      }
       if (calls.length) {
         parts.push(`LLM時間 ${sum("wall_sec").toFixed(1)}秒`);
         parts.push(`応答待ち ${sum("prefill_sec").toFixed(1)}秒`);
@@ -4051,6 +4088,7 @@ async function switchWorkspace(path) {
     editorReadOnly = state.editor.getOption(state.monaco.editor.EditorOption.readOnly);
     state.editor.updateOptions({ readOnly: true });
     workspaceGeneration++;
+    sourceBundleUI?.reset();
     fileOpenGeneration++;
     searchGeneration++;
     let r;
@@ -4340,6 +4378,16 @@ async function openCopilotBrowser() {
 
 // ---- UI バインド ----
 function bindUI() {
+  sourceBundleUI = bindSourceBundle({
+    getSnapshot: () => ({
+      current_file: state.currentFile || "",
+      current_content: state.currentFile ? state.editor.getValue() : null,
+      generation: workspaceGeneration,
+    }),
+    isCurrent: generation => generation === workspaceGeneration && !workspaceSwitching,
+    canSend: () => workspaceView.ready && !state.streaming && state.copilotEnabled && !workspaceSwitching,
+    send: submission => sendChat(submission),
+  });
   $("send-btn").addEventListener("click", () => (state.streaming ? interrupt() : sendChat()));
   $("new-session-btn").addEventListener("click", newSession);
   $("sessions-btn").addEventListener("click", openSessionsModal);

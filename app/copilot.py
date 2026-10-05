@@ -297,6 +297,20 @@ def ask(question: str, files: list | None = None, on_progress=None) -> str:
     return answer
 
 
+def ask_bundle_with_progress(question: str, filename: str, content: str,
+                             files: list | None = None, on_progress=None) -> str:
+    """ソース集を一時 Markdown ファイルにして添付する。質問本文の上限で削らない。"""
+    if not filename or any(c in filename for c in '/\\:<>|?*') or not filename.endswith(".md"):
+        return "エラー: ソース集のファイル名が不正です。"
+    try:
+        with tempfile.TemporaryDirectory(prefix="cwp-sources-", ignore_cleanup_errors=True) as temp:
+            attachment = Path(temp) / filename
+            attachment.write_text(content, encoding="utf-8", newline="\n")
+            return ask_with_progress(question, [str(attachment), *(files or [])], on_progress)
+    except OSError as e:
+        return f"エラー: ソース集を添付できませんでした: {e}"
+
+
 def open_browser() -> str:
     """PrayLight のログイン用ブラウザを起動して Copilot を開く。成功なら ""、失敗ならエラー文。"""
     script, py = _praylight_paths("start_browser.py")

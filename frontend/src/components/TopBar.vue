@@ -66,6 +66,14 @@ function openSettings() {
   <button id="places-btn" title="お気に入り・最近使ったフォルダへ移動">
     ⭐
   </button>
+  <button
+    id="source-bundle-btn"
+    type="button"
+    title="このプロジェクトのソースをまとめてコピー・保存・Copilotに送信"
+    :disabled="!workspaceView.ready"
+  >
+    ソースをまとめる
+  </button>
   <div class="file-info">
     <button
       id="nav-back"

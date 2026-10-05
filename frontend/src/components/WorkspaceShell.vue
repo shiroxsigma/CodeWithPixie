@@ -286,6 +286,7 @@ function useExample(text: string) {
           aria-label="承認が必要な操作"
         ></div>
         <div id="composer">
+          <div id="chat-activity" aria-live="polite"></div>
           <div class="code-only autonomy-controls">
             <label
               title="プロジェクト内の編集と、指定した検証コマンドを自動で繰り返します"

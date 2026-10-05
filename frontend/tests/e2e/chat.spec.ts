@@ -1,5 +1,36 @@
 import { expect, test } from "@playwright/test";
 
+test("activity stays above the input and measured generation speed survives completion", async ({ page }) => {
+  await page.locator("#chat-input").fill("speed check");
+  await page.locator("#send-btn").click();
+  await expect(page.locator("#composer .wait-indicator")).toContainText("応答を待っています");
+  await expect(page.locator("#messages .wait-indicator")).toHaveCount(0);
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "status", phase: "thinking" });
+  });
+  await expect(page.locator("#chat-activity")).toContainText("思考中");
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "token", text: "answer" });
+  });
+  await expect(page.locator("#chat-activity")).toContainText("回答を生成中");
+  await page.evaluate(() => {
+    (window as any).emitChat({ type: "turn_metrics", metrics: { llm_calls: [
+      { decode_tokens: 100, decode_ms: 2000 },
+      { decode_tokens: 200, decode_ms: 1000 },
+      { decode_tokens: null, decode_ms: null },
+    ] } });
+    (window as any).emitChat({ type: "done" });
+  });
+  await expect(page.locator("#chat-activity")).toHaveText("100.0 tokens/sec");
+  await expect(page.locator("#messages .response-speed")).toHaveText("100.0 tokens/sec");
+  await expect(page.locator("#composer .wait-indicator")).toHaveCount(0);
+  await page.locator("#chat-input").fill("next");
+  await page.locator("#send-btn").click();
+  await expect(page.locator("#chat-activity")).not.toContainText("tokens/sec");
+  await page.evaluate(() => (window as any).emitChat({ type: "done" }));
+  await expect(page.locator("#chat-activity")).toBeEmpty();
+});
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem("pixie.codeStyle", "normal");

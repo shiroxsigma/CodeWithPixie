@@ -308,6 +308,11 @@ Microsoft Copilot（Web版）に相談できる（[PrayLight](../PrayLight) 経�
 - 事前に PrayLight で `python start_browser.py` を実行し、開いたブラウザで Copilot にログインしておく
   （⚙️ 設定の「🕊️ Copilot ブラウザを開く」からも起動可能）。
 - 設定: `copilot_enabled`（既定 false）、`praylight_dir`（既定 `../PrayLight`）、`praylight_python`、`copilot_timeout`。
+- 上部の **ソースをまとめる** で、選択中のプロジェクトのソースをファイル名付きの Markdown 1本に集約できる。
+  コピー・ダウンロードには修正指示も同梱できる。Copilot 連携がオンなら、修正指示を入力して
+  **Copilotに送信** と、ソース集をファイル添付で送り、変更案を会話に表示する。
+  開いているファイルの未保存内容も含め、依存ライブラリ・生成物・秘密情報用のファイルは除外する。
+  収集上限や読み取りエラーによる省略は一覧で確認できる。外部へのシンボリックリンクは収集しない。
 - 実装: AWP コアは無改修。CWP が起動時に `pixie_core.register_tool(pack="copilot")` で ask_copilot を
   登録し、on の会話だけ `context.active_packs={"copilot"}` にして提示する（off の会話には出ない）。
 
